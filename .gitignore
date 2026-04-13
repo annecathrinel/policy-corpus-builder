@@ -1,0 +1,47 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Project-generated artifacts
+outputs/
+emb_cache/
+docs_df_cleaned/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Large/local data directories (safe defaults)
+data/
+datasets/
+raw_data/
+interim_data/
+processed_data/
+docs_df_cleaned/
+
+# Heavy artifacts
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.csv
+
+# Keep small tracked examples/docs if needed
+!data/README.md
+!datasets/README.md
+
+
