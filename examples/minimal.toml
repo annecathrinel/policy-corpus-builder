@@ -1,0 +1,17 @@
+[project]
+name = "example-corpus"
+output_dir = "outputs/example-corpus"
+
+[queries]
+inventory = "examples/queries/example_queries.txt"
+
+[[sources]]
+name = "placeholder-source"
+adapter = "placeholder"
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "publication_date", "url"]
+
+[export]
+formats = ["jsonl"]
