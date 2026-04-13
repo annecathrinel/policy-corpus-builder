@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from policy_corpus_builder.models import Query
+from policy_corpus_builder.schemas import SourceConfig
+
 
 @dataclass(slots=True)
 class AdapterResult:
@@ -18,8 +21,8 @@ class SourceAdapter(Protocol):
 
     name: str
 
-    def validate_config(self, config: dict[str, Any]) -> None:
+    def validate_source_config(self, source: SourceConfig) -> None:
         """Validate adapter-specific config."""
 
-    def run(self, config: dict[str, Any]) -> list[AdapterResult]:
-        """Execute retrieval and return raw results."""
+    def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+        """Collect raw results for a single source/query pair."""

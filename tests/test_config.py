@@ -21,6 +21,7 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.project.name, "example-corpus")
         self.assertEqual(config.project.output_dir, "outputs/example-corpus")
         self.assertEqual(config.queries.inventory, "queries/example_queries.txt")
+        self.assertEqual(config.queries.items, tuple())
         self.assertEqual(len(config.sources), 1)
         self.assertEqual(config.sources[0].adapter, "placeholder")
         self.assertEqual(config.export.formats, ("jsonl",))

@@ -1,9 +1,19 @@
-"""Normalized metadata models for retrieved policy documents."""
+"""Core in-memory models for queries and normalized documents."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class Query:
+    """Normalized query item used by the internal pipeline."""
+
+    text: str
+    query_id: str
+    origin: str
+    source_path: str | None = None
 
 
 @dataclass(slots=True)
