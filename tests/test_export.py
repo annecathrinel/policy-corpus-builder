@@ -10,7 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_corpus_builder.cli import main as cli_main  # noqa: E402
-from policy_corpus_builder.exporters import JSONL_FILENAME, export_documents_jsonl  # noqa: E402
+from policy_corpus_builder.exporters import (  # noqa: E402
+    JSONL_FILENAME,
+    MANIFEST_FILENAME,
+    export_documents_jsonl,
+)
 from policy_corpus_builder.models import NormalizedDocument  # noqa: E402
 from policy_corpus_builder.orchestration import run_in_memory  # noqa: E402
 from policy_corpus_builder.schemas import (  # noqa: E402
@@ -75,12 +79,17 @@ class JsonlExportTests(unittest.TestCase):
             base_path = Path(tmpdir)
             run_result = run_in_memory(config, base_path=base_path, write_exports=True)
             output_path = (base_path / "outputs" / "demo-run" / JSONL_FILENAME).resolve()
+            manifest_path = (base_path / "outputs" / "demo-run" / MANIFEST_FILENAME).resolve()
             lines = output_path.read_text(encoding="utf-8").splitlines()
 
-            self.assertEqual(run_result.exported_paths, (output_path,))
+            self.assertEqual(run_result.exported_paths, (output_path, manifest_path))
             self.assertTrue(output_path.exists())
+            self.assertTrue(manifest_path.exists())
             self.assertEqual(len(lines), 2)
-            self.assertEqual(run_result.summary.exported_files, (JSONL_FILENAME,))
+            self.assertEqual(
+                run_result.summary.exported_files,
+                (JSONL_FILENAME, MANIFEST_FILENAME),
+            )
 
     def test_run_does_not_write_jsonl_when_not_enabled(self) -> None:
         config = BuilderConfig(
@@ -98,10 +107,12 @@ class JsonlExportTests(unittest.TestCase):
             base_path = Path(tmpdir)
             run_result = run_in_memory(config, base_path=base_path, write_exports=True)
             output_path = base_path / "outputs" / "no-jsonl" / JSONL_FILENAME
+            manifest_path = (base_path / "outputs" / "no-jsonl" / MANIFEST_FILENAME).resolve()
 
-            self.assertEqual(run_result.exported_paths, tuple())
+            self.assertEqual(run_result.exported_paths, (manifest_path,))
             self.assertFalse(output_path.exists())
-            self.assertEqual(run_result.summary.exported_files, tuple())
+            self.assertTrue(manifest_path.exists())
+            self.assertEqual(run_result.summary.exported_files, (MANIFEST_FILENAME,))
 
     def test_cli_run_writes_jsonl_when_enabled(self) -> None:
         stdout = StringIO()
@@ -152,10 +163,15 @@ class JsonlExportTests(unittest.TestCase):
                 sys.argv = original_argv
 
             output_path = base_path / "outputs" / "demo" / JSONL_FILENAME
+            manifest_path = base_path / "outputs" / "demo" / MANIFEST_FILENAME
             self.assertEqual(exit_code, 0)
             self.assertEqual(stderr.getvalue(), "")
             self.assertTrue(output_path.exists())
-            self.assertIn("Exported files: documents.jsonl", stdout.getvalue())
+            self.assertTrue(manifest_path.exists())
+            self.assertIn(
+                "Exported files: documents.jsonl, run-manifest.json",
+                stdout.getvalue(),
+            )
 
     def test_cli_run_skips_jsonl_when_not_enabled(self) -> None:
         stdout = StringIO()
@@ -203,10 +219,12 @@ class JsonlExportTests(unittest.TestCase):
                 sys.argv = original_argv
 
             output_path = base_path / "outputs" / "demo" / JSONL_FILENAME
+            manifest_path = base_path / "outputs" / "demo" / MANIFEST_FILENAME
             self.assertEqual(exit_code, 0)
             self.assertEqual(stderr.getvalue(), "")
             self.assertFalse(output_path.exists())
-            self.assertIn("Exported files: none", stdout.getvalue())
+            self.assertTrue(manifest_path.exists())
+            self.assertIn("Exported files: run-manifest.json", stdout.getvalue())
 
 
 if __name__ == "__main__":
