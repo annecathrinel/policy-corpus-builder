@@ -146,6 +146,8 @@ The `local-file` adapter expects object records with:
 
 When `queries` is present, records are emitted only for matching query text. When it is missing, records are treated as query-agnostic and may appear for every configured query. The normalized document `query` field is attached later by the shared pipeline using the active query that produced the record.
 
+Adapter author notes now live in [docs/adapter-authors.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/adapter-authors.md).
+
 ## Minimal Usage
 
 ```bash

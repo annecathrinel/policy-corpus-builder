@@ -11,6 +11,7 @@ from policy_corpus_builder.adapters.base import (
     AdapterDataError,
     AdapterResult,
 )
+from policy_corpus_builder.adapters.mapping import build_adapter_result
 from policy_corpus_builder.models import Query
 from policy_corpus_builder.schemas import SourceConfig
 
@@ -27,6 +28,22 @@ OPTIONAL_RECORD_FIELDS = {
     "retrieved_at",
     "checksum",
     "content_path",
+}
+LOCAL_FILE_FIELD_MAPPING = {
+    "document_id": "id",
+    "source_document_id": "source_document_id",
+    "title": "title",
+    "summary": "summary",
+    "document_type": "document_type",
+    "language": "language",
+    "jurisdiction": "jurisdiction",
+    "publication_date": "publication_date",
+    "effective_date": "effective_date",
+    "url": "url",
+    "download_url": "download_url",
+    "retrieved_at": "retrieved_at",
+    "checksum": "checksum",
+    "content_path": "content_path",
 }
 
 
@@ -143,6 +160,17 @@ class LocalFileAdapter:
         return any(term.strip().casefold() == normalized_query for term in terms)
 
     def _record_to_result(self, record: dict[str, Any], *, source: SourceConfig) -> AdapterResult:
+        self._validate_record_fields(record)
+
+        result = build_adapter_result(
+            record,
+            field_mapping=LOCAL_FILE_FIELD_MAPPING,
+            defaults={"source_document_id": str(record["id"])},
+        )
+        result.payload["document_id"] = f"{source.name}:{result.payload['document_id']}"
+        return result
+
+    def _validate_record_fields(self, record: dict[str, Any]) -> None:
         record_id = record.get("id")
         title = record.get("title")
         if not isinstance(record_id, str) or not record_id.strip():
@@ -151,35 +179,18 @@ class LocalFileAdapter:
             raise AdapterDataError("local-file records require a non-empty string 'title'.")
 
         raw_source_document_id = record.get("source_document_id")
-        if raw_source_document_id is None:
-            source_document_id = record_id.strip()
-        elif isinstance(raw_source_document_id, str) and raw_source_document_id.strip():
-            source_document_id = raw_source_document_id.strip()
-        else:
-            raise AdapterDataError(
-                "local-file record field 'source_document_id' must be a non-empty string when present."
-            )
-
-        payload: dict[str, Any] = {
-            "document_id": f"{source.name}:{record_id.strip()}",
-            "source_document_id": source_document_id,
-            "title": title.strip(),
-        }
+        if raw_source_document_id is not None:
+            if not isinstance(raw_source_document_id, str) or not raw_source_document_id.strip():
+                raise AdapterDataError(
+                    "local-file record field 'source_document_id' must be a non-empty string when present."
+                )
 
         for field_name in OPTIONAL_RECORD_FIELDS:
             raw_value = record.get(field_name)
-            if raw_value is None:
-                continue
-            if not isinstance(raw_value, str):
+            if raw_value is not None and not isinstance(raw_value, str):
                 raise AdapterDataError(
                     f"local-file record field '{field_name}' must be a string when present."
                 )
-            cleaned = raw_value.strip()
-            if cleaned:
-                payload[field_name] = cleaned
-
-        payload["raw_record"] = record
-        return AdapterResult(payload=payload)
 
     def _resolve_fixture_path(self, source: SourceConfig, *, base_path: Path) -> Path:
         fixture_path = Path(str(source.settings["path"]))

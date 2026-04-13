@@ -138,6 +138,10 @@ class LocalFileAdapterTests(unittest.TestCase):
         self.assertEqual(documents[0].title, "Energy Security Strategy")
         self.assertEqual(documents[0].summary, "Strategy summary")
         self.assertEqual(documents[0].query, "energy security")
+        self.assertEqual(
+            documents[0].raw_metadata["raw_record"]["url"],
+            "https://example.invalid/doc-1",
+        )
 
     def test_invalid_record_structure_raises_adapter_data_error(self) -> None:
         adapter = LocalFileAdapter()
