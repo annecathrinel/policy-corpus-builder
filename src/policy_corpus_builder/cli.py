@@ -13,6 +13,8 @@ from policy_corpus_builder.config import (
     format_config_summary,
     load_and_validate_config,
 )
+from policy_corpus_builder.orchestration import format_run_summary, run_from_config_path
+from policy_corpus_builder.pipeline import NormalizationError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,8 +58,18 @@ def main() -> int:
         return 0
 
     if args.command == "run":
-        load_and_validate_config(args.config)
-        print("Pipeline execution is not implemented yet.")
+        try:
+            run_result = run_from_config_path(args.config)
+        except (
+            ConfigValidationError,
+            FileNotFoundError,
+            NormalizationError,
+            tomllib.TOMLDecodeError,
+        ) as exc:
+            print(f"Run failed: {exc}", file=sys.stderr)
+            return 1
+
+        print(format_run_summary(run_result.summary))
         return 0
 
     parser.error(f"Unknown command: {args.command}")

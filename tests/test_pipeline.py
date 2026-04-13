@@ -2,13 +2,17 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_corpus_builder.adapters import available_adapters, get_adapter, register_adapter  # noqa: E402
 from policy_corpus_builder.adapters.base import AdapterResult  # noqa: E402
+from policy_corpus_builder.cli import main as cli_main  # noqa: E402
 from policy_corpus_builder.models import Query  # noqa: E402
+from policy_corpus_builder.orchestration import format_run_summary, run_from_config_path, run_in_memory  # noqa: E402
 from policy_corpus_builder.pipeline import NormalizationError, normalize_adapter_results  # noqa: E402
 from policy_corpus_builder.queries import load_queries  # noqa: E402
 from policy_corpus_builder.schemas import (  # noqa: E402
@@ -98,6 +102,206 @@ class QueryAndPipelineTests(unittest.TestCase):
         register_adapter(DemoAdapter)
         self.assertIn("demo", available_adapters())
         self.assertEqual(get_adapter("demo").name, "demo")
+
+    def test_orchestration_runs_multiple_sources_and_queries(self) -> None:
+        class AltAdapter:
+            name = "alt"
+
+            def validate_source_config(self, source: SourceConfig) -> None:
+                return None
+
+            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+                return [
+                    AdapterResult(
+                        payload={
+                            "document_id": f"{source.name}:{query.query_id}:alt",
+                            "title": f"Alt result for {query.text}",
+                        }
+                    )
+                ]
+
+        register_adapter(AltAdapter)
+        config = BuilderConfig(
+            project=ProjectConfig(name="demo", output_dir="outputs/demo"),
+            queries=QueriesConfig(items=("energy security", "resilience policy")),
+            sources=(
+                SourceConfig(name="source-a", adapter="placeholder"),
+                SourceConfig(name="source-b", adapter="alt"),
+            ),
+            normalization=NormalizationConfig(
+                deduplicate=False,
+                deduplicate_fields=(),
+            ),
+            export=ExportConfig(formats=("jsonl",)),
+        )
+
+        run_result = run_in_memory(config, base_path=Path("."))
+
+        self.assertEqual(run_result.summary.query_count, 2)
+        self.assertEqual(run_result.summary.enabled_source_count, 2)
+        self.assertEqual(run_result.summary.source_query_pairs, 4)
+        self.assertEqual(run_result.summary.raw_result_count, 4)
+        self.assertEqual(run_result.summary.document_count, 4)
+        self.assertEqual(len(run_result.documents), 4)
+
+    def test_disabled_sources_are_skipped(self) -> None:
+        config = BuilderConfig(
+            project=ProjectConfig(name="demo", output_dir="outputs/demo"),
+            queries=QueriesConfig(items=("energy security",)),
+            sources=(
+                SourceConfig(name="active-source", adapter="placeholder", enabled=True),
+                SourceConfig(name="disabled-source", adapter="placeholder", enabled=False),
+            ),
+            normalization=NormalizationConfig(
+                deduplicate=False,
+                deduplicate_fields=(),
+            ),
+            export=ExportConfig(formats=("jsonl",)),
+        )
+
+        run_result = run_in_memory(config, base_path=Path("."))
+
+        self.assertEqual(run_result.summary.enabled_source_count, 1)
+        self.assertEqual(run_result.summary.source_query_pairs, 1)
+        self.assertEqual(run_result.summary.document_count, 1)
+        self.assertEqual(run_result.documents[0].source_name, "active-source")
+
+    def test_empty_adapter_results_are_supported(self) -> None:
+        class EmptyAdapter:
+            name = "empty"
+
+            def validate_source_config(self, source: SourceConfig) -> None:
+                return None
+
+            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+                return []
+
+        register_adapter(EmptyAdapter)
+        config = BuilderConfig(
+            project=ProjectConfig(name="demo", output_dir="outputs/demo"),
+            queries=QueriesConfig(items=("energy security", "resilience policy")),
+            sources=(SourceConfig(name="empty-source", adapter="empty"),),
+            normalization=NormalizationConfig(
+                deduplicate=False,
+                deduplicate_fields=(),
+            ),
+            export=ExportConfig(formats=("jsonl",)),
+        )
+
+        run_result = run_in_memory(config, base_path=Path("."))
+
+        self.assertEqual(run_result.summary.raw_result_count, 0)
+        self.assertEqual(run_result.summary.document_count, 0)
+        self.assertEqual(run_result.documents, tuple())
+
+    def test_invalid_adapter_output_fails_cleanly(self) -> None:
+        class BrokenAdapter:
+            name = "broken"
+
+            def validate_source_config(self, source: SourceConfig) -> None:
+                return None
+
+            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+                return [AdapterResult(payload={"title": "No document id"})]
+
+        register_adapter(BrokenAdapter)
+        config = BuilderConfig(
+            project=ProjectConfig(name="demo", output_dir="outputs/demo"),
+            queries=QueriesConfig(items=("energy security",)),
+            sources=(SourceConfig(name="broken-source", adapter="broken"),),
+            normalization=NormalizationConfig(
+                deduplicate=False,
+                deduplicate_fields=(),
+            ),
+            export=ExportConfig(formats=("jsonl",)),
+        )
+
+        with self.assertRaisesRegex(
+            NormalizationError,
+            "Adapter result field 'document_id' must be a non-empty string",
+        ):
+            run_in_memory(config, base_path=Path("."))
+
+    def test_run_from_config_path_supports_inventory_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_path = Path(tmpdir)
+            queries_dir = base_path / "queries"
+            queries_dir.mkdir()
+            (queries_dir / "inventory.txt").write_text(
+                "energy security\nresilience policy\n",
+                encoding="utf-8",
+            )
+            config_path = base_path / "config.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [project]
+                    name = "demo"
+                    output_dir = "outputs/demo"
+
+                    [queries]
+                    inventory = "queries/inventory.txt"
+
+                    [[sources]]
+                    name = "placeholder-source"
+                    adapter = "placeholder"
+
+                    [normalization]
+                    deduplicate = true
+                    deduplicate_fields = ["title"]
+
+                    [export]
+                    formats = ["jsonl"]
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+
+            run_result = run_from_config_path(config_path)
+
+        self.assertEqual(run_result.summary.query_count, 2)
+        self.assertEqual(run_result.summary.document_count, 2)
+
+    def test_run_summary_is_concise_and_readable(self) -> None:
+        config = BuilderConfig(
+            project=ProjectConfig(name="demo", output_dir="outputs/demo"),
+            queries=QueriesConfig(items=("energy security",)),
+            sources=(SourceConfig(name="placeholder-source", adapter="placeholder"),),
+            normalization=NormalizationConfig(
+                deduplicate=False,
+                deduplicate_fields=(),
+            ),
+            export=ExportConfig(formats=("jsonl",)),
+        )
+
+        run_result = run_in_memory(config, base_path=Path("."))
+        summary = format_run_summary(run_result.summary)
+
+        self.assertIn("Run completed successfully.", summary)
+        self.assertIn("Project: demo", summary)
+        self.assertIn("Normalized documents: 1", summary)
+
+    def test_cli_run_reports_success_for_placeholder_pipeline(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "run",
+                "--config",
+                "examples/minimal.toml",
+            ]
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("Run completed successfully.", stdout.getvalue())
+        self.assertIn("Normalized documents: 3", stdout.getvalue())
 
     def test_placeholder_adapter_output_converts_to_normalized_document(self) -> None:
         source = SourceConfig(name="placeholder-source", adapter="placeholder")
