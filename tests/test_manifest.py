@@ -86,11 +86,19 @@ class ManifestTests(unittest.TestCase):
     def test_manifest_is_stable_when_no_documents_are_returned(self) -> None:
         class EmptyAdapter:
             name = "empty-manifest"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query, *, base_path: Path) -> list:
+            def collect(
+                self,
+                source: SourceConfig,
+                query,
+                *,
+                base_path: Path,
+                loaded_source: object | None = None,
+            ) -> list:
                 return []
 
         from policy_corpus_builder.adapters import register_adapter  # noqa: E402

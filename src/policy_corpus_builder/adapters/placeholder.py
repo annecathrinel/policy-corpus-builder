@@ -13,6 +13,7 @@ class PlaceholderAdapter:
     """Simple adapter that emits one predictable in-memory result per query."""
 
     name = "placeholder"
+    execution_mode = "query-aware"
 
     def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         if source.adapter != self.name:
@@ -20,12 +21,17 @@ class PlaceholderAdapter:
                 f"PlaceholderAdapter cannot validate adapter '{source.adapter}'."
             )
 
+    def load_source(self, source: SourceConfig, *, base_path: Path) -> None:
+        self.validate_source_config(source, base_path=base_path)
+        return None
+
     def collect(
         self,
         source: SourceConfig,
         query: Query,
         *,
         base_path: Path,
+        loaded_source: object | None = None,
     ) -> list[AdapterResult]:
         self.validate_source_config(source, base_path=base_path)
         return [

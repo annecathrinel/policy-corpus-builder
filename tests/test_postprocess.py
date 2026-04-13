@@ -113,11 +113,19 @@ class DeduplicationTests(unittest.TestCase):
     def test_deduplication_happens_before_jsonl_export(self) -> None:
         class DuplicateAdapter:
             name = "duplicate"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query, *, base_path: Path) -> list:
+            def collect(
+                self,
+                source: SourceConfig,
+                query,
+                *,
+                base_path: Path,
+                loaded_source: object | None = None,
+            ) -> list:
                 return [
                     type("Result", (), {"payload": {"document_id": "doc-1", "title": "Shared"}})(),
                     type("Result", (), {"payload": {"document_id": "doc-2", "title": "Shared"}})(),

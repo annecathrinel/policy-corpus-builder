@@ -92,6 +92,7 @@ class QueryAndPipelineTests(unittest.TestCase):
     def test_adapter_registry_allows_registration(self) -> None:
         class DemoAdapter:
             name = "demo"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
@@ -102,6 +103,7 @@ class QueryAndPipelineTests(unittest.TestCase):
                 query: Query,
                 *,
                 base_path: Path,
+                loaded_source: object | None = None,
             ) -> list[AdapterResult]:
                 return []
 
@@ -112,6 +114,7 @@ class QueryAndPipelineTests(unittest.TestCase):
     def test_orchestration_runs_multiple_sources_and_queries(self) -> None:
         class AltAdapter:
             name = "alt"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
@@ -122,6 +125,7 @@ class QueryAndPipelineTests(unittest.TestCase):
                 query: Query,
                 *,
                 base_path: Path,
+                loaded_source: object | None = None,
             ) -> list[AdapterResult]:
                 return [
                     AdapterResult(
@@ -183,6 +187,7 @@ class QueryAndPipelineTests(unittest.TestCase):
     def test_empty_adapter_results_are_supported(self) -> None:
         class EmptyAdapter:
             name = "empty"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
@@ -193,6 +198,7 @@ class QueryAndPipelineTests(unittest.TestCase):
                 query: Query,
                 *,
                 base_path: Path,
+                loaded_source: object | None = None,
             ) -> list[AdapterResult]:
                 return []
 
@@ -218,6 +224,7 @@ class QueryAndPipelineTests(unittest.TestCase):
     def test_invalid_adapter_output_fails_cleanly(self) -> None:
         class BrokenAdapter:
             name = "broken"
+            execution_mode = "query-aware"
 
             def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
@@ -228,6 +235,7 @@ class QueryAndPipelineTests(unittest.TestCase):
                 query: Query,
                 *,
                 base_path: Path,
+                loaded_source: object | None = None,
             ) -> list[AdapterResult]:
                 return [AdapterResult(payload={"title": "No document id"})]
 

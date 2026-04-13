@@ -12,6 +12,17 @@ Mappings are adapter-defined in code, not config-driven. Each adapter declares:
 - any explicit defaults
 - any source-specific validation it needs before mapping
 
+## Execution Contract
+
+The execution contract lives in `src/policy_corpus_builder/adapters/base.py`.
+
+Adapters declare an `execution_mode`:
+
+- `query-aware`: orchestration calls `collect(...)` once per query
+- `query-agnostic`: orchestration calls `load_source(...)` once, then reuses the loaded data across queries by passing it into `collect(..., loaded_source=...)`
+
+Use `query-agnostic` when one source read can serve many queries. This is the preferred pattern for local files and other static inputs.
+
 ## Required Normalized Fields
 
 Adapters must supply these normalized fields:

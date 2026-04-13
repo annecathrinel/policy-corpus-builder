@@ -51,6 +51,7 @@ class LocalFileAdapter:
     """Read structured policy records from a local JSON or JSONL file."""
 
     name = "local-file"
+    execution_mode = "query-agnostic"
 
     def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         settings = source.settings
@@ -90,15 +91,24 @@ class LocalFileAdapter:
         query: Query,
         *,
         base_path: Path,
+        loaded_source: Any | None = None,
     ) -> list[AdapterResult]:
         self.validate_source_config(source, base_path=base_path)
-        records = self._load_records(source, base_path=base_path)
+        records = (
+            loaded_source
+            if isinstance(loaded_source, list)
+            else self._load_records(source, base_path=base_path)
+        )
         matching_records = [
             record
             for record in records
             if self._record_matches_query(record, source=source, query=query)
         ]
         return [self._record_to_result(record, source=source) for record in matching_records]
+
+    def load_source(self, source: SourceConfig, *, base_path: Path) -> list[dict[str, Any]]:
+        self.validate_source_config(source, base_path=base_path)
+        return self._load_records(source, base_path=base_path)
 
     def _load_records(self, source: SourceConfig, *, base_path: Path) -> list[dict[str, Any]]:
         fixture_path = self._resolve_fixture_path(source, base_path=base_path)
