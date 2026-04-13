@@ -141,7 +141,9 @@ class QueryAndPipelineTests(unittest.TestCase):
         self.assertEqual(run_result.summary.enabled_source_count, 2)
         self.assertEqual(run_result.summary.source_query_pairs, 4)
         self.assertEqual(run_result.summary.raw_result_count, 4)
-        self.assertEqual(run_result.summary.document_count, 4)
+        self.assertEqual(run_result.summary.raw_normalized_document_count, 4)
+        self.assertEqual(run_result.summary.final_document_count, 4)
+        self.assertEqual(run_result.summary.duplicates_removed, 0)
         self.assertEqual(len(run_result.documents), 4)
 
     def test_disabled_sources_are_skipped(self) -> None:
@@ -163,7 +165,7 @@ class QueryAndPipelineTests(unittest.TestCase):
 
         self.assertEqual(run_result.summary.enabled_source_count, 1)
         self.assertEqual(run_result.summary.source_query_pairs, 1)
-        self.assertEqual(run_result.summary.document_count, 1)
+        self.assertEqual(run_result.summary.final_document_count, 1)
         self.assertEqual(run_result.documents[0].source_name, "active-source")
 
     def test_empty_adapter_results_are_supported(self) -> None:
@@ -191,7 +193,8 @@ class QueryAndPipelineTests(unittest.TestCase):
         run_result = run_in_memory(config, base_path=Path("."))
 
         self.assertEqual(run_result.summary.raw_result_count, 0)
-        self.assertEqual(run_result.summary.document_count, 0)
+        self.assertEqual(run_result.summary.raw_normalized_document_count, 0)
+        self.assertEqual(run_result.summary.final_document_count, 0)
         self.assertEqual(run_result.documents, tuple())
 
     def test_invalid_adapter_output_fails_cleanly(self) -> None:
@@ -260,7 +263,7 @@ class QueryAndPipelineTests(unittest.TestCase):
             run_result = run_from_config_path(config_path)
 
         self.assertEqual(run_result.summary.query_count, 2)
-        self.assertEqual(run_result.summary.document_count, 2)
+        self.assertEqual(run_result.summary.final_document_count, 2)
 
     def test_run_summary_is_concise_and_readable(self) -> None:
         config = BuilderConfig(
@@ -279,7 +282,7 @@ class QueryAndPipelineTests(unittest.TestCase):
 
         self.assertIn("Run completed successfully.", summary)
         self.assertIn("Project: demo", summary)
-        self.assertIn("Normalized documents: 1", summary)
+        self.assertIn("Documents after deduplication: 1", summary)
 
     def test_cli_run_reports_success_for_placeholder_pipeline(self) -> None:
         stdout = StringIO()
@@ -301,7 +304,7 @@ class QueryAndPipelineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
         self.assertIn("Run completed successfully.", stdout.getvalue())
-        self.assertIn("Normalized documents: 3", stdout.getvalue())
+        self.assertIn("Documents after deduplication: 3", stdout.getvalue())
 
     def test_placeholder_adapter_output_converts_to_normalized_document(self) -> None:
         source = SourceConfig(name="placeholder-source", adapter="placeholder")

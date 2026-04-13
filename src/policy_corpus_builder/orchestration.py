@@ -10,6 +10,7 @@ from policy_corpus_builder.config import load_and_validate_config
 from policy_corpus_builder.exporters import export_documents_jsonl
 from policy_corpus_builder.models import NormalizedDocument
 from policy_corpus_builder.pipeline import normalize_adapter_results
+from policy_corpus_builder.postprocess import deduplicate_documents
 from policy_corpus_builder.queries import load_queries
 from policy_corpus_builder.schemas import BuilderConfig
 
@@ -23,7 +24,9 @@ class RunSummary:
     enabled_source_count: int
     source_query_pairs: int
     raw_result_count: int
-    document_count: int
+    raw_normalized_document_count: int
+    final_document_count: int
+    duplicates_removed: int
     output_dir: str
     exported_files: tuple[str, ...]
 
@@ -35,6 +38,7 @@ class RunResult:
     documents: tuple[NormalizedDocument, ...]
     summary: RunSummary
     exported_paths: tuple[Path, ...]
+
 
 def run_from_config_path(config_path: Path | str, *, write_exports: bool = True) -> RunResult:
     """Load validated config from disk and execute the in-memory pipeline."""
@@ -70,8 +74,13 @@ def run_in_memory(
                 normalize_adapter_results(raw_results, source=source, query=query)
             )
 
+    deduplication_result = deduplicate_documents(
+        tuple(documents),
+        config=config.normalization,
+    )
+
     exported_paths = _write_exports(
-        documents,
+        list(deduplication_result.documents),
         output_dir=output_dir,
         enabled_formats=config.export.formats,
         write_exports=write_exports,
@@ -83,13 +92,15 @@ def run_in_memory(
         enabled_source_count=len(enabled_sources),
         source_query_pairs=len(enabled_sources) * len(queries),
         raw_result_count=raw_result_count,
-        document_count=len(documents),
+        raw_normalized_document_count=len(documents),
+        final_document_count=len(deduplication_result.documents),
+        duplicates_removed=deduplication_result.duplicates_removed,
         output_dir=str(output_dir),
         exported_files=tuple(path.name for path in exported_paths),
     )
 
     return RunResult(
-        documents=tuple(documents),
+        documents=deduplication_result.documents,
         summary=summary,
         exported_paths=exported_paths,
     )
@@ -105,7 +116,9 @@ def format_run_summary(summary: RunSummary) -> str:
         f"Enabled sources: {summary.enabled_source_count}",
         f"Source-query pairs: {summary.source_query_pairs}",
         f"Raw results: {summary.raw_result_count}",
-        f"Normalized documents: {summary.document_count}",
+        f"Raw normalized documents: {summary.raw_normalized_document_count}",
+        f"Documents after deduplication: {summary.final_document_count}",
+        f"Duplicates removed: {summary.duplicates_removed}",
         f"Output directory: {summary.output_dir}",
         (
             f"Exported files: {', '.join(summary.exported_files)}"
