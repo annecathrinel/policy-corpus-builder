@@ -1,10 +1,13 @@
-Small tracked examples should live here.
+This directory holds the small public-facing examples used by the v0.1 workflow.
 
-Keep examples lightweight and public-safe so the repository remains easy to understand and clone.
+Recommended starting points:
 
-Included examples:
+- `local_file.toml`: the main end-to-end example config
+- `fixtures/policies.jsonl`: fixture data for the `local-file` adapter
+- `queries/example_queries.txt`: example query inventory
+- `notebooks/local_file_end_to_end.ipynb`: notebook walkthrough of the library-first workflow
 
-- `minimal.toml`: placeholder adapter example
-- `local_file.toml`: local fixture-backed adapter example
-- `fixtures/policies.jsonl`: JSONL fixture for the `local-file` adapter
-- `fixtures/policies.json`: equivalent JSON fixture using a top-level `records` array
+Also included:
+
+- `minimal.toml`: a smaller placeholder-oriented config kept for internal structure and tests
+- `fixtures/policies.json`: the same fixture data in JSON form

@@ -1,95 +1,109 @@
 # policy-corpus-builder
 
-`policy-corpus-builder` is a reusable, public-facing tool for policy document querying, retrieval, metadata normalization, deduplication, and corpus export.
+`policy-corpus-builder` is a small Python toolkit for building clean policy document corpora.
 
-This repository is intentionally separate from `NiD-Policy-Analysis-clean`. The goal here is to provide a clean retrieval and corpus-building layer that can support many downstream analysis projects without embedding project-specific research logic.
+Version `0.1` is intentionally narrow:
 
-## Current Scope
+- load queries from a config file
+- read structured local policy records with the `local-file` adapter
+- normalize records into one shared `NormalizedDocument` model
+- deduplicate deterministically
+- export the final corpus to JSONL
 
-This bootstrap pass adds:
+The package is library-first. The CLI is a thin convenience layer on top of the same workflow.
 
-- a lightweight Python package skeleton
-- a minimal CLI entry point
-- a TOML-based configuration approach
-- placeholder source adapter and schema modules
-- example/config/test directories
+## What v0.1 Includes
 
-This pass does **not** implement retrieval adapters, crawling, deduplication, or export pipelines yet.
+- one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
+- one real adapter: `local-file`
+- deterministic deduplication using configured normalized fields
+- one export format: JSONL
+- one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
+- one minimal CLI for config validation and running the same workflow
 
-## Design Direction
+## Small Public API
 
-### Tool Responsibilities
+These are the main functions and modules worth treating as the v0.1 public surface:
 
-`policy-corpus-builder` should own:
+- `load_and_validate_config` in [src/policy_corpus_builder/config.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/config.py)
+- `load_queries` in [src/policy_corpus_builder/queries.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/queries.py)
+- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
+- `normalize_adapter_results` in [src/policy_corpus_builder/pipeline.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/pipeline.py)
+- `deduplicate_documents` in [src/policy_corpus_builder/postprocess.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/postprocess.py)
+- `export_documents_jsonl` in [src/policy_corpus_builder/exporters/jsonl.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/exporters/jsonl.py)
+- `run_from_config_path` in [src/policy_corpus_builder/orchestration.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/orchestration.py)
 
-- configurable query inventories
-- source adapter interfaces
-- retrieval/crawling orchestration
-- metadata normalization into a shared schema
-- deduplication utilities
-- export to common corpus formats
+## Install
 
-`NiD-Policy-Analysis-clean` should own:
-
-- research questions and report generation
-- domain dictionaries and coding schemes
-- analysis notebooks and statistical workflows
-- project-specific filtering, aggregation, and interpretation
-
-### Proposed Package Layout
-
-```text
-src/policy_corpus_builder/
-  __init__.py
-  cli.py
-  config.py
-  models.py
-  adapters/
-    __init__.py
-    base.py
-  exporters/
-    __init__.py
-  schemas/
-    __init__.py
+```bash
+pip install -e .
 ```
 
-### Proposed CLI Surface
+Python `3.11+` is required.
 
-Planned commands:
+## Happy Path
 
-- `policy-corpus-builder run --config examples/minimal.toml`
-- `policy-corpus-builder validate-config --config examples/minimal.toml`
-- `policy-corpus-builder list-adapters`
-- `policy-corpus-builder export --config ...`
+The simplest end-to-end example uses the bundled local fixture-backed adapter and config:
 
-Only `validate-config` and `list-adapters` are minimally stubbed right now. `run` exists as a placeholder to reserve the public interface.
+- config: [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml)
+- fixture data: [examples/fixtures/policies.jsonl](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/fixtures/policies.jsonl)
+- notebook walkthrough: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
 
-### Config Approach
+### Library Usage
 
-Use TOML for human-readable, versionable configuration with no mandatory external dependency on modern Python.
+```python
+from pathlib import Path
 
-Validated top-level sections:
+from policy_corpus_builder.adapters import get_adapter
+from policy_corpus_builder.config import load_and_validate_config
+from policy_corpus_builder.exporters.jsonl import export_documents_jsonl
+from policy_corpus_builder.pipeline import normalize_adapter_results
+from policy_corpus_builder.postprocess import deduplicate_documents
+from policy_corpus_builder.queries import load_queries
 
-- `[project]`: run name, description, output directory
-- `[queries]`: either an inventory path or inline query strings
-- `[[sources]]`: source definitions, adapter names, and optional settings
-- `[normalization]`: metadata mapping/dedup settings
-- `[export]`: enabled output formats and destinations
+repo_root = Path.cwd()
+config_path = repo_root / "examples" / "local_file.toml"
+config = load_and_validate_config(config_path)
 
-Current validation rules include:
+queries = load_queries(config, base_path=config_path.parent)
+source = config.sources[0]
+adapter = get_adapter(source.adapter)
+loaded_source = adapter.load_source(source, base_path=config_path.parent)
 
-- all five top-level sections are required
-- unknown top-level keys are rejected
-- `queries` must define exactly one of `inventory` or `items`
-- `queries.inventory` must point to an existing file, relative to the config file
-- each source must reference a known adapter
-- `normalization.deduplicate` must be boolean
-- `normalization.deduplicate_fields` must reference known normalized metadata fields
-- `export.formats` must be a non-empty subset of `jsonl`, `csv`, and `parquet`
+documents = []
+for query in queries:
+    raw_results = adapter.collect(
+        source,
+        query,
+        base_path=config_path.parent,
+        loaded_source=loaded_source,
+    )
+    documents.extend(
+        normalize_adapter_results(raw_results, source=source, query=query)
+    )
 
-### Metadata Schema
+deduped = deduplicate_documents(tuple(documents), config=config.normalization)
+output_path = export_documents_jsonl(
+    deduped.documents,
+    output_dir=repo_root / "examples" / "outputs" / "readme-demo",
+)
+print(output_path)
+```
 
-The normalized document model should stay intentionally generic and source-agnostic. Initial core fields:
+### CLI Usage
+
+```bash
+policy-corpus-builder validate-config --config examples/local_file.toml
+policy-corpus-builder run --config examples/local_file.toml
+```
+
+The CLI runs the same in-memory pipeline and writes `documents.jsonl` when `jsonl` is enabled in the config.
+
+## Normalized Document Model
+
+The shared normalized record is [NormalizedDocument](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py:14).
+
+Core fields include:
 
 - `document_id`
 - `source_name`
@@ -109,54 +123,109 @@ The normalized document model should stay intentionally generic and source-agnos
 - `content_path`
 - `raw_metadata`
 
-The tool should allow source-specific metadata to remain in `raw_metadata` while mapping stable cross-source fields into the normalized layer.
+Source-specific leftovers stay in `raw_metadata`.
 
-### Export Formats
+## Local-File Adapter
 
-Recommended initial targets:
+The bundled v0.1 adapter is `local-file` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py).
 
-- `jsonl` for flexible pipelines
-- `csv` for quick inspection and interoperability
-- `parquet` for efficient larger corpora
+It reads local JSON or JSONL files from `source.settings.path`.
 
-Not all formats need to land first. `jsonl` is the safest initial implementation target.
+Supported input shapes:
 
-### Source Adapter Structure
+- JSONL: one JSON object per line
+- JSON: a top-level list of objects
+- JSON: an object with `records: [...]`
 
-Each source adapter should eventually provide:
+Required record fields:
 
-- a stable adapter name
-- config validation
-- query execution or crawl entry points
-- raw result parsing
-- normalization into the shared metadata schema
+- `id`
+- `title`
 
-This bootstrap includes a base adapter protocol, one placeholder adapter, and one real local fixture-backed adapter.
+Optional fields:
 
-Current bundled adapters:
+- `summary`
+- `document_type`
+- `language`
+- `jurisdiction`
+- `publication_date`
+- `effective_date`
+- `url`
+- `download_url`
+- `retrieved_at`
+- `checksum`
+- `content_path`
+- `source_document_id`
 
-- `placeholder`: deterministic non-network stub adapter for structure and testing
-- `local-file`: fixture-backed adapter that reads local JSON or JSONL records from `source.settings.path`
+Optional query matching:
 
-The `local-file` adapter expects object records with:
+- by default the adapter looks for a `queries` field on each record
+- `queries` can be a string or list of strings
+- matching records are emitted for the active query
+- if the field is missing, the record is treated as query-agnostic
 
-- required fields: `id`, `title`
-- optional fields: `summary`, `document_type`, `language`, `jurisdiction`, `publication_date`, `effective_date`, `url`, `download_url`, `retrieved_at`, `checksum`, `content_path`, `source_document_id`
-- optional query matching field: `queries` by default, configurable with `source.settings.query_field`
+## Config Shape
 
-When `queries` is present, records are emitted only for matching query text. When it is missing, records are treated as query-agnostic and may appear for every configured query. The normalized document `query` field is attached later by the shared pipeline using the active query that produced the record.
+v0.1 uses TOML with five top-level sections:
 
-Adapter author notes now live in [docs/adapter-authors.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/adapter-authors.md).
+- `[project]`
+- `[queries]`
+- `[[sources]]`
+- `[normalization]`
+- `[export]`
 
-## Minimal Usage
+The bundled example config is [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml).
 
-```bash
-python -m policy_corpus_builder.cli list-adapters
-python -m policy_corpus_builder.cli validate-config --config examples/minimal.toml
+```toml
+[project]
+name = "local-file-example"
+output_dir = "outputs/local-file-example"
+
+[queries]
+inventory = "queries/example_queries.txt"
+
+[[sources]]
+name = "fixture-policies"
+adapter = "local-file"
+
+[sources.settings]
+path = "fixtures/policies.jsonl"
+format = "jsonl"
+query_field = "queries"
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "publication_date", "url"]
+
+[export]
+formats = ["jsonl"]
 ```
 
-## Assumptions
+## Output
 
-- Python 3.11+ is acceptable, which lets us rely on `tomllib`.
-- The first real implementation pass should prioritize config loading, normalized metadata models, and one end-to-end adapter prototype.
-- Extraction from `NiD-Policy-Analysis-clean` should happen selectively later, after this repo defines stable public abstractions.
+The v0.1 export format is JSONL. Each line is one normalized document record produced by `NormalizedDocument.to_dict()`.
+
+Typical run output goes under the configured project output directory, for example:
+
+- [examples/outputs/local-file-example/documents.jsonl](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/outputs/local-file-example/documents.jsonl)
+
+The current implementation also writes a small run manifest alongside corpus exports, but that is a secondary artifact rather than the main v0.1 feature.
+
+## Repository Scope
+
+This repository is intentionally separate from `NiD-Policy-Analysis-clean`.
+
+`policy-corpus-builder` is for:
+
+- query loading
+- source access
+- normalization
+- corpus cleaning
+- export
+
+It is not for:
+
+- research questions
+- project-specific dictionaries
+- notebooks tied to one analysis project
+- report generation
