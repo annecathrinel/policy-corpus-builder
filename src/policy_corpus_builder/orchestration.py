@@ -7,6 +7,7 @@ from pathlib import Path
 
 from policy_corpus_builder.adapters import get_adapter
 from policy_corpus_builder.config import load_and_validate_config
+from policy_corpus_builder.exporters import export_documents_jsonl
 from policy_corpus_builder.models import NormalizedDocument
 from policy_corpus_builder.pipeline import normalize_adapter_results
 from policy_corpus_builder.queries import load_queries
@@ -23,6 +24,8 @@ class RunSummary:
     source_query_pairs: int
     raw_result_count: int
     document_count: int
+    output_dir: str
+    exported_files: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,21 +34,27 @@ class RunResult:
 
     documents: tuple[NormalizedDocument, ...]
     summary: RunSummary
+    exported_paths: tuple[Path, ...]
 
-
-def run_from_config_path(config_path: Path | str) -> RunResult:
+def run_from_config_path(config_path: Path | str, *, write_exports: bool = True) -> RunResult:
     """Load validated config from disk and execute the in-memory pipeline."""
 
     path = Path(config_path)
     config = load_and_validate_config(path)
-    return run_in_memory(config, base_path=path.parent)
+    return run_in_memory(config, base_path=path.parent, write_exports=write_exports)
 
 
-def run_in_memory(config: BuilderConfig, *, base_path: Path) -> RunResult:
+def run_in_memory(
+    config: BuilderConfig,
+    *,
+    base_path: Path,
+    write_exports: bool = False,
+) -> RunResult:
     """Run the configured placeholder pipeline fully in memory."""
 
     queries = load_queries(config, base_path=base_path)
     enabled_sources = tuple(source for source in config.sources if source.enabled)
+    output_dir = (base_path / config.project.output_dir).resolve()
 
     documents: list[NormalizedDocument] = []
     raw_result_count = 0
@@ -61,6 +70,13 @@ def run_in_memory(config: BuilderConfig, *, base_path: Path) -> RunResult:
                 normalize_adapter_results(raw_results, source=source, query=query)
             )
 
+    exported_paths = _write_exports(
+        documents,
+        output_dir=output_dir,
+        enabled_formats=config.export.formats,
+        write_exports=write_exports,
+    )
+
     summary = RunSummary(
         project_name=config.project.name,
         query_count=len(queries),
@@ -68,9 +84,15 @@ def run_in_memory(config: BuilderConfig, *, base_path: Path) -> RunResult:
         source_query_pairs=len(enabled_sources) * len(queries),
         raw_result_count=raw_result_count,
         document_count=len(documents),
+        output_dir=str(output_dir),
+        exported_files=tuple(path.name for path in exported_paths),
     )
 
-    return RunResult(documents=tuple(documents), summary=summary)
+    return RunResult(
+        documents=tuple(documents),
+        summary=summary,
+        exported_paths=exported_paths,
+    )
 
 
 def format_run_summary(summary: RunSummary) -> str:
@@ -84,5 +106,28 @@ def format_run_summary(summary: RunSummary) -> str:
         f"Source-query pairs: {summary.source_query_pairs}",
         f"Raw results: {summary.raw_result_count}",
         f"Normalized documents: {summary.document_count}",
+        f"Output directory: {summary.output_dir}",
+        (
+            f"Exported files: {', '.join(summary.exported_files)}"
+            if summary.exported_files
+            else "Exported files: none"
+        ),
     ]
     return "\n".join(lines)
+
+
+def _write_exports(
+    documents: list[NormalizedDocument],
+    *,
+    output_dir: Path,
+    enabled_formats: tuple[str, ...],
+    write_exports: bool,
+) -> tuple[Path, ...]:
+    if not write_exports:
+        return tuple()
+
+    exported_paths: list[Path] = []
+    if "jsonl" in enabled_formats:
+        exported_paths.append(export_documents_jsonl(documents, output_dir=output_dir))
+
+    return tuple(exported_paths)
