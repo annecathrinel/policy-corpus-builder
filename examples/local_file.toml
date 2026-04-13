@@ -1,0 +1,23 @@
+[project]
+name = "local-file-example"
+output_dir = "outputs/local-file-example"
+
+[queries]
+inventory = "queries/example_queries.txt"
+
+[[sources]]
+name = "fixture-policies"
+adapter = "local-file"
+enabled = true
+
+[sources.settings]
+path = "fixtures/policies.jsonl"
+format = "jsonl"
+query_field = "queries"
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "publication_date", "url"]
+
+[export]
+formats = ["jsonl"]

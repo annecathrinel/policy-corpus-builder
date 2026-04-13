@@ -87,10 +87,10 @@ class ManifestTests(unittest.TestCase):
         class EmptyAdapter:
             name = "empty-manifest"
 
-            def validate_source_config(self, source: SourceConfig) -> None:
+            def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query) -> list:
+            def collect(self, source: SourceConfig, query, *, base_path: Path) -> list:
                 return []
 
         from policy_corpus_builder.adapters import register_adapter  # noqa: E402

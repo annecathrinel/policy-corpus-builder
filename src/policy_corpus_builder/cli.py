@@ -7,7 +7,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-from policy_corpus_builder.adapters import available_adapters
+from policy_corpus_builder.adapters import available_adapters, get_adapter
+from policy_corpus_builder.adapters.base import AdapterError
 from policy_corpus_builder.config import (
     ConfigValidationError,
     format_config_summary,
@@ -50,7 +51,15 @@ def main() -> int:
     if args.command == "validate-config":
         try:
             config = load_and_validate_config(args.config)
+            for source in config.sources:
+                get_adapter(source.adapter).validate_source_config(
+                    source,
+                    base_path=args.config.parent,
+                )
         except (ConfigValidationError, FileNotFoundError, tomllib.TOMLDecodeError) as exc:
+            print(f"Config validation failed: {exc}", file=sys.stderr)
+            return 1
+        except AdapterError as exc:
             print(f"Config validation failed: {exc}", file=sys.stderr)
             return 1
 
@@ -61,6 +70,7 @@ def main() -> int:
         try:
             run_result = run_from_config_path(args.config)
         except (
+            AdapterError,
             ConfigValidationError,
             FileNotFoundError,
             NormalizationError,

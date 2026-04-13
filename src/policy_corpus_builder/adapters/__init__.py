@@ -1,9 +1,11 @@
 """Adapter registry plumbing."""
 
 from policy_corpus_builder.adapters.base import SourceAdapter
+from policy_corpus_builder.adapters.local_file import LocalFileAdapter
 from policy_corpus_builder.adapters.placeholder import PlaceholderAdapter
 
 ADAPTERS: dict[str, type[SourceAdapter]] = {
+    LocalFileAdapter.name: LocalFileAdapter,
     PlaceholderAdapter.name: PlaceholderAdapter,
 }
 

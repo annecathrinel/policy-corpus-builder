@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from policy_corpus_builder.adapters.base import AdapterResult
 from policy_corpus_builder.models import Query
 from policy_corpus_builder.schemas import SourceConfig
@@ -12,14 +14,20 @@ class PlaceholderAdapter:
 
     name = "placeholder"
 
-    def validate_source_config(self, source: SourceConfig) -> None:
+    def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         if source.adapter != self.name:
             raise ValueError(
                 f"PlaceholderAdapter cannot validate adapter '{source.adapter}'."
             )
 
-    def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
-        self.validate_source_config(source)
+    def collect(
+        self,
+        source: SourceConfig,
+        query: Query,
+        *,
+        base_path: Path,
+    ) -> list[AdapterResult]:
+        self.validate_source_config(source, base_path=base_path)
         return [
             AdapterResult(
                 payload={

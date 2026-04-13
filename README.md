@@ -131,7 +131,20 @@ Each source adapter should eventually provide:
 - raw result parsing
 - normalization into the shared metadata schema
 
-This bootstrap includes only a base protocol and one placeholder adapter name.
+This bootstrap includes a base adapter protocol, one placeholder adapter, and one real local fixture-backed adapter.
+
+Current bundled adapters:
+
+- `placeholder`: deterministic non-network stub adapter for structure and testing
+- `local-file`: fixture-backed adapter that reads local JSON or JSONL records from `source.settings.path`
+
+The `local-file` adapter expects object records with:
+
+- required fields: `id`, `title`
+- optional fields: `summary`, `document_type`, `language`, `jurisdiction`, `publication_date`, `effective_date`, `url`, `download_url`, `retrieved_at`, `checksum`, `content_path`, `source_document_id`
+- optional query matching field: `queries` by default, configurable with `source.settings.query_field`
+
+When `queries` is present, records are emitted only for matching query text. When it is missing, records are treated as query-agnostic and may appear for every configured query. The normalized document `query` field is attached later by the shared pipeline using the active query that produced the record.
 
 ## Minimal Usage
 

@@ -1,0 +1,26 @@
+{
+  "records": [
+    {
+      "id": "energy-001",
+      "title": "Energy Security Strategy",
+      "summary": "National strategy for energy resilience.",
+      "document_type": "strategy",
+      "language": "en",
+      "jurisdiction": "national",
+      "publication_date": "2024-01-15",
+      "url": "https://example.invalid/policies/energy-001",
+      "queries": ["energy security"]
+    },
+    {
+      "id": "resilience-001",
+      "title": "National Resilience Plan",
+      "summary": "Framework for resilience coordination.",
+      "document_type": "plan",
+      "language": "en",
+      "jurisdiction": "national",
+      "publication_date": "2024-03-10",
+      "url": "https://example.invalid/policies/resilience-001",
+      "queries": ["resilience policy"]
+    }
+  ]
+}

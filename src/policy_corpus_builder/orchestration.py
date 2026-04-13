@@ -105,10 +105,10 @@ def run_in_memory(
 
     for source in enabled_sources:
         adapter = get_adapter(source.adapter)
-        adapter.validate_source_config(source)
+        adapter.validate_source_config(source, base_path=base_path)
 
         for query in queries:
-            raw_results = tuple(adapter.collect(source, query))
+            raw_results = tuple(adapter.collect(source, query, base_path=base_path))
             raw_result_count += len(raw_results)
             documents.extend(
                 normalize_adapter_results(raw_results, source=source, query=query)

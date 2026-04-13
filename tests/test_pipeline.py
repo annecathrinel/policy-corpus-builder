@@ -93,10 +93,16 @@ class QueryAndPipelineTests(unittest.TestCase):
         class DemoAdapter:
             name = "demo"
 
-            def validate_source_config(self, source: SourceConfig) -> None:
+            def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+            def collect(
+                self,
+                source: SourceConfig,
+                query: Query,
+                *,
+                base_path: Path,
+            ) -> list[AdapterResult]:
                 return []
 
         register_adapter(DemoAdapter)
@@ -107,10 +113,16 @@ class QueryAndPipelineTests(unittest.TestCase):
         class AltAdapter:
             name = "alt"
 
-            def validate_source_config(self, source: SourceConfig) -> None:
+            def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+            def collect(
+                self,
+                source: SourceConfig,
+                query: Query,
+                *,
+                base_path: Path,
+            ) -> list[AdapterResult]:
                 return [
                     AdapterResult(
                         payload={
@@ -172,10 +184,16 @@ class QueryAndPipelineTests(unittest.TestCase):
         class EmptyAdapter:
             name = "empty"
 
-            def validate_source_config(self, source: SourceConfig) -> None:
+            def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+            def collect(
+                self,
+                source: SourceConfig,
+                query: Query,
+                *,
+                base_path: Path,
+            ) -> list[AdapterResult]:
                 return []
 
         register_adapter(EmptyAdapter)
@@ -201,10 +219,16 @@ class QueryAndPipelineTests(unittest.TestCase):
         class BrokenAdapter:
             name = "broken"
 
-            def validate_source_config(self, source: SourceConfig) -> None:
+            def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
                 return None
 
-            def collect(self, source: SourceConfig, query: Query) -> list[AdapterResult]:
+            def collect(
+                self,
+                source: SourceConfig,
+                query: Query,
+                *,
+                base_path: Path,
+            ) -> list[AdapterResult]:
                 return [AdapterResult(payload={"title": "No document id"})]
 
         register_adapter(BrokenAdapter)
@@ -311,7 +335,7 @@ class QueryAndPipelineTests(unittest.TestCase):
         query = Query(text="energy security", query_id="inline-001", origin="inline")
         adapter = get_adapter("placeholder")
 
-        raw_results = adapter.collect(source, query)
+        raw_results = adapter.collect(source, query, base_path=Path("."))
         documents = normalize_adapter_results(raw_results, source=source, query=query)
 
         self.assertEqual(len(documents), 1)
