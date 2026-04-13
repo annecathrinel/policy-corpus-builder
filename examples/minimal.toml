@@ -3,11 +3,12 @@ name = "example-corpus"
 output_dir = "outputs/example-corpus"
 
 [queries]
-inventory = "examples/queries/example_queries.txt"
+inventory = "queries/example_queries.txt"
 
 [[sources]]
 name = "placeholder-source"
 adapter = "placeholder"
+enabled = true
 
 [normalization]
 deduplicate = true

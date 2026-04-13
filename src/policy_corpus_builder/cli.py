@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import tomllib
 from pathlib import Path
 
 from policy_corpus_builder.adapters import available_adapters
-from policy_corpus_builder.config import load_config
+from policy_corpus_builder.config import (
+    ConfigValidationError,
+    format_config_summary,
+    load_and_validate_config,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_parser = subparsers.add_parser(
         "validate-config",
-        help="Load and lightly validate a TOML configuration file.",
+        help="Load and validate a TOML configuration file.",
     )
     validate_parser.add_argument("--config", required=True, type=Path)
 
@@ -40,15 +46,17 @@ def main() -> int:
         return 0
 
     if args.command == "validate-config":
-        config = load_config(args.config)
-        print(
-            f"Config loaded successfully: {args.config} "
-            f"(sections: {', '.join(sorted(config.keys())) or 'none'})"
-        )
+        try:
+            config = load_and_validate_config(args.config)
+        except (ConfigValidationError, FileNotFoundError, tomllib.TOMLDecodeError) as exc:
+            print(f"Config validation failed: {exc}", file=sys.stderr)
+            return 1
+
+        print(format_config_summary(config))
         return 0
 
     if args.command == "run":
-        load_config(args.config)
+        load_and_validate_config(args.config)
         print("Pipeline execution is not implemented yet.")
         return 0
 

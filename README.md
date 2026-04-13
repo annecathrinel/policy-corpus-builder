@@ -68,13 +68,24 @@ Only `validate-config` and `list-adapters` are minimally stubbed right now. `run
 
 Use TOML for human-readable, versionable configuration with no mandatory external dependency on modern Python.
 
-Expected top-level sections:
+Validated top-level sections:
 
 - `[project]`: run name, description, output directory
-- `[queries]`: query inventory file or inline query groups
-- `[[sources]]`: source definitions and adapter names
+- `[queries]`: either an inventory path or inline query strings
+- `[[sources]]`: source definitions, adapter names, and optional settings
 - `[normalization]`: metadata mapping/dedup settings
 - `[export]`: enabled output formats and destinations
+
+Current validation rules include:
+
+- all five top-level sections are required
+- unknown top-level keys are rejected
+- `queries` must define exactly one of `inventory` or `items`
+- `queries.inventory` must point to an existing file, relative to the config file
+- each source must reference a known adapter
+- `normalization.deduplicate` must be boolean
+- `normalization.deduplicate_fields` must reference known normalized metadata fields
+- `export.formats` must be a non-empty subset of `jsonl`, `csv`, and `parquet`
 
 ### Metadata Schema
 
