@@ -41,5 +41,6 @@ tests/test_config.py
 tests/test_export.py
 tests/test_local_file_adapter.py
 tests/test_manifest.py
+tests/test_non_eu_uk.py
 tests/test_pipeline.py
 tests/test_postprocess.py

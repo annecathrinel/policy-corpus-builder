@@ -54,6 +54,7 @@ class JsonlExportTests(unittest.TestCase):
             self.assertEqual(first_record["document_id"], "doc-1")
             self.assertEqual(first_record["source_name"], "source-a")
             self.assertEqual(first_record["query"], "energy security")
+            self.assertIn("full_text", first_record)
             self.assertIn("raw_metadata", first_record)
 
     def test_export_documents_jsonl_supports_empty_streams(self) -> None:

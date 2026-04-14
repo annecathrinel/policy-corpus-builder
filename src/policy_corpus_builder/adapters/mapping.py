@@ -17,6 +17,7 @@ OPTIONAL_NORMALIZED_FIELDS = (
     "effective_date",
     "url",
     "download_url",
+    "full_text",
     "retrieved_at",
     "checksum",
     "content_path",

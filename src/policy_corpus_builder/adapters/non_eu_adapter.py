@@ -22,6 +22,7 @@ NON_EU_FIELD_MAPPING = {
     "publication_date": "date",
     "url": "url",
     "download_url": "full_text_url",
+    "full_text": "full_text_clean",
 }
 
 
@@ -111,6 +112,7 @@ class NonEUAdapter:
             self._stringify(row.get("full_text_url"))
             or self._stringify(row.get("source_file"))
         )
+        normalized_row["full_text_clean"] = self._stringify(row.get("full_text_clean"))
 
         result = build_adapter_result(
             normalized_row,
@@ -119,8 +121,27 @@ class NonEUAdapter:
         )
         result.payload["document_id"] = f"{source.name}:{result.payload['document_id']}"
         result.payload["document_type"] = "policy_document"
-        result.payload["raw_record"] = dict(normalized_row)
-        result.payload["raw_record"]["source_log"] = source_log
+        result.payload["raw_record"] = {
+            "country": normalized_row.get("country", ""),
+            "date": normalized_row.get("date", ""),
+            "doc_id": normalized_row.get("doc_id", ""),
+            "doc_uid": normalized_row.get("doc_uid", ""),
+            "full_text_error": normalized_row.get("full_text_error", ""),
+            "full_text_format": normalized_row.get("full_text_format", ""),
+            "full_text_url": normalized_row.get("full_text_url", ""),
+            "has_text": normalized_row.get("has_text", ""),
+            "jurisdiction": normalized_row.get("jurisdiction", ""),
+            "lang": normalized_row.get("lang", ""),
+            "matched_terms": normalized_row.get("matched_terms", ""),
+            "retrieval_status": normalized_row.get("retrieval_status", ""),
+            "source": normalized_row.get("source", ""),
+            "source_log": source_log,
+            "source_file": normalized_row.get("source_file", ""),
+            "text_len": normalized_row.get("text_len", ""),
+            "title": normalized_row.get("title", ""),
+            "url": normalized_row.get("url", ""),
+            "year": normalized_row.get("year", ""),
+        }
         return result
 
     def _resolve_countries(self, settings: dict[str, Any]) -> tuple[str, ...]:

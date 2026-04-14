@@ -41,6 +41,7 @@ def normalize_adapter_results(
                 url=_optional_string(payload.get("url")),
                 download_url=_optional_string(payload.get("download_url")),
                 query=query.text,
+                full_text=_optional_string(payload.get("full_text")),
                 retrieved_at=_optional_string(payload.get("retrieved_at")),
                 checksum=_optional_string(payload.get("checksum")),
                 content_path=_optional_string(payload.get("content_path")),

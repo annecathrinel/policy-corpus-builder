@@ -118,6 +118,7 @@ Core fields include:
 - `url`
 - `download_url`
 - `query`
+- `full_text`
 - `retrieved_at`
 - `checksum`
 - `content_path`

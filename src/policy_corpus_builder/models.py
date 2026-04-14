@@ -33,6 +33,7 @@ class NormalizedDocument:
     url: str | None = None
     download_url: str | None = None
     query: str | None = None
+    full_text: str | None = None
     retrieved_at: str | None = None
     checksum: str | None = None
     content_path: str | None = None

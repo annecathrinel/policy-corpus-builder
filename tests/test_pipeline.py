@@ -354,6 +354,27 @@ class QueryAndPipelineTests(unittest.TestCase):
         self.assertEqual(document.raw_metadata["_query_id"], "inline-001")
         self.assertEqual(document.raw_metadata["_query_origin"], "inline")
 
+    def test_normalization_promotes_full_text_when_present(self) -> None:
+        source = SourceConfig(name="placeholder-source", adapter="placeholder")
+        query = Query(text="energy security", query_id="inline-001", origin="inline")
+
+        documents = normalize_adapter_results(
+            [
+                AdapterResult(
+                    payload={
+                        "document_id": "doc-1",
+                        "title": "Document",
+                        "full_text": "Cleaned full text body.",
+                    }
+                )
+            ],
+            source=source,
+            query=query,
+        )
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0].full_text, "Cleaned full text body.")
+
     def test_normalization_rejects_missing_document_id(self) -> None:
         source = SourceConfig(name="placeholder-source", adapter="placeholder")
         query = Query(text="energy security", query_id="inline-001", origin="inline")
@@ -365,8 +386,9 @@ class QueryAndPipelineTests(unittest.TestCase):
             normalize_adapter_results(
                 [AdapterResult(payload={"title": "Missing id"})],
                 source=source,
-                query=query,
-            )
+                  query=query,
+              )
+
 
 
 if __name__ == "__main__":
