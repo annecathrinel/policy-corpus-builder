@@ -1,0 +1,25 @@
+[project]
+name = "non-eu-uk-example"
+output_dir = "outputs/non-eu-uk-example"
+
+[queries]
+inventory = "queries/non_eu_uk_queries.txt"
+
+[[sources]]
+name = "uk-legislation"
+adapter = "non-eu"
+enabled = true
+
+[sources.settings]
+countries = ["UK"]
+max_per_term = 25
+max_workers = 4
+progress_every = 0
+obey_robots = true
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "url"]
+
+[export]
+formats = ["jsonl"]

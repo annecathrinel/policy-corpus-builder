@@ -1,0 +1,3 @@
+# Small live non-EU example query inventory.
+biodiversity
+nature restoration

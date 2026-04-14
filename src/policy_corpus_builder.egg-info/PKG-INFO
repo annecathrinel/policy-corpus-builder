@@ -28,6 +28,11 @@ License: MIT License
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 License-File: LICENSE
+Requires-Dist: beautifulsoup4
+Requires-Dist: certifi
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: requests
 Dynamic: license-file
 
 # policy-corpus-builder

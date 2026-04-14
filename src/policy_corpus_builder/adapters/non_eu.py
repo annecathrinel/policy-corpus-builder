@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import os
@@ -21,6 +22,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from policy_corpus_builder.normalize.corpus import harmonize_docs
 from policy_corpus_builder.query_sets.nid4ocean import (
     NON_EU_SEARCH_TERMS_PRIMARY,
     SOURCE_TO_COUNTRY,
@@ -83,6 +85,20 @@ _AU_ID_RE = re.compile(r"/(C\d{4}[A-Z]\d{5,}|F\d{4}[A-Z]\d{5,}|L\d{4}[A-Z]\d{5,}
 _CELEX_RE = re.compile(r"(?:CELEX:|celex%3A|celex%3a)([0-9A-Z]{4,}[0-9A-Z()./]+)", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
 _thread_local = threading.local()
+
+
+@dataclass(frozen=True, slots=True)
+class NonEUQueryRun:
+    """In-memory result for one non-EU query pipeline execution."""
+
+    raw_hits_df: pd.DataFrame
+    source_log_df: pd.DataFrame
+    fulltext_docs_df: pd.DataFrame
+    harmonized_docs_df: pd.DataFrame
+
+    @property
+    def source_log(self) -> list[dict[str, object]]:
+        return self.source_log_df.to_dict(orient="records")
 
 
 def _is_missing_text(value: object) -> bool:
@@ -1273,3 +1289,49 @@ def reconstruct_non_eu_hits_from_cache(
 def summarize_non_eu_docs(non_eu_raw_hits: pd.DataFrame) -> pd.DataFrame:
     _, docs = build_non_eu_doc_tables(non_eu_raw_hits)
     return docs[["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "matched_terms"]].copy()
+
+
+def run_non_eu_query_pipeline(
+    query_text: str,
+    *,
+    countries: tuple[str, ...] = ("UK",),
+    us_api_key: str | None = None,
+    max_per_term: int = 100,
+    max_workers: int = 4,
+    progress_every: int = 0,
+    obey_robots: bool = True,
+) -> NonEUQueryRun:
+    """Run one real non-EU retrieval query through retrieval, full text, and harmonization."""
+
+    raw_hits_df, source_log_df = fetch_non_eu_all(
+        [query_text],
+        sources=countries,
+        us_api_key=us_api_key,
+        max_per_term=max_per_term,
+    )
+    fulltext_docs_df = build_non_eu_fulltext_docs(
+        raw_hits_df,
+        us_api_key=us_api_key,
+        max_workers=max_workers,
+        progress_every=progress_every,
+        obey_robots=obey_robots,
+    )
+
+    if not fulltext_docs_df.empty:
+        doc_summary_df = summarize_non_eu_docs(raw_hits_df)
+        if not doc_summary_df.empty:
+            fulltext_docs_df = fulltext_docs_df.merge(
+                doc_summary_df[["doc_id", "matched_terms"]],
+                on="doc_id",
+                how="left",
+            )
+        harmonized_docs_df = harmonize_docs(fulltext_docs_df)
+    else:
+        harmonized_docs_df = fulltext_docs_df.copy()
+
+    return NonEUQueryRun(
+        raw_hits_df=raw_hits_df,
+        source_log_df=source_log_df,
+        fulltext_docs_df=fulltext_docs_df,
+        harmonized_docs_df=harmonized_docs_df,
+    )
