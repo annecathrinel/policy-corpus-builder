@@ -6,6 +6,7 @@ Version `0.1` is intentionally narrow:
 
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
+- run one supported live non-EU workflow for UK legislation discovery/metadata
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
 - export the final corpus to JSONL
@@ -16,6 +17,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
+- one supported live non-EU path: `non-eu` with `countries = ["UK"]`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
 - one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
@@ -98,6 +100,28 @@ policy-corpus-builder run --config examples/local_file.toml
 ```
 
 The CLI runs the same in-memory pipeline and writes `documents.jsonl` when `jsonl` is enabled in the config.
+
+## Supported UK Workflow
+
+The current supported UK live workflow uses the `non-eu` adapter with `countries = ["UK"]`.
+
+What it supports today:
+
+- query-driven UK legislation discovery
+- normalized metadata export
+- official `legislation.gov.uk` API representations as the preferred full-text backend
+
+What it does not guarantee today:
+
+- successful full-text extraction for every UK record
+
+`policy-corpus-builder` now prefers the official UK API representations such as `data.xml` for full text. However, upstream access controls on `legislation.gov.uk` may still challenge automated requests. In those cases:
+
+- the run is still considered successful if discovery and normalization complete
+- exported records may contain `full_text = null`
+- source-specific diagnostics remain in `raw_metadata.raw_record`, including `full_text_error = "waf_challenge"` and `retrieval_status = "upstream_blocked"`
+
+For responsible use, set a clear contact-bearing user agent either through the environment variable `POLICY_CORPUS_BUILDER_USER_AGENT` or in `source.settings.user_agent` for the `non-eu` adapter.
 
 ## Normalized Document Model
 
@@ -201,6 +225,8 @@ deduplicate_fields = ["title", "publication_date", "url"]
 [export]
 formats = ["jsonl"]
 ```
+
+The live UK example is [examples/non_eu_uk.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_uk.toml). For that workflow, `source.settings.user_agent` is optional but recommended.
 
 ## Output
 

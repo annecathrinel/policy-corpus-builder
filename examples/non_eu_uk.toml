@@ -16,6 +16,8 @@ max_per_term = 25
 max_workers = 4
 progress_every = 0
 obey_robots = true
+# Recommended for live UK runs:
+# user_agent = "policy-corpus-builder/0.1 (your-email@example.org)"
 
 [normalization]
 deduplicate = true

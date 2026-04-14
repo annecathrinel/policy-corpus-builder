@@ -47,6 +47,7 @@ class NonEUAdapter:
         self._require_positive_int(settings, "max_workers", default=4)
         self._require_non_negative_int(settings, "progress_every", default=0)
         self._require_bool(settings, "obey_robots", default=True)
+        self._resolve_user_agent(settings)
 
         if "US" in countries:
             api_key = self._resolve_us_api_key(settings)
@@ -76,6 +77,7 @@ class NonEUAdapter:
             max_workers=self._require_positive_int(settings, "max_workers", default=4),
             progress_every=self._require_non_negative_int(settings, "progress_every", default=0),
             obey_robots=self._require_bool(settings, "obey_robots", default=True),
+            user_agent=self._resolve_user_agent(settings),
         )
 
         return [
@@ -123,6 +125,7 @@ class NonEUAdapter:
         result.payload["document_type"] = "policy_document"
         result.payload["raw_record"] = {
             "country": normalized_row.get("country", ""),
+            "contents_url": normalized_row.get("contents_url", ""),
             "date": normalized_row.get("date", ""),
             "doc_id": normalized_row.get("doc_id", ""),
             "doc_uid": normalized_row.get("doc_uid", ""),
@@ -172,6 +175,16 @@ class NonEUAdapter:
     def _resolve_us_api_key(self, settings: dict[str, Any]) -> str | None:
         env_name = self._resolve_us_api_key_env(settings)
         return os.getenv(env_name) or None
+
+    def _resolve_user_agent(self, settings: dict[str, Any]) -> str | None:
+        raw_value = settings.get("user_agent")
+        if raw_value is None:
+            return None
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.user_agent must be a non-empty string."
+            )
+        return raw_value.strip()
 
     def _require_positive_int(
         self,

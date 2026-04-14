@@ -87,11 +87,11 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             results,
             [
                 (
-                    "https://www.legislation.gov.uk/uksi/2023/91/contents",
+                    "https://www.legislation.gov.uk/uksi/2023/91",
                     "The Environmental Targets (Biodiversity) (England) Regulations 2023",
                 ),
                 (
-                    "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                    "https://www.legislation.gov.uk/ukpga/2021/30",
                     "Environment Act 2021",
                 ),
             ],
@@ -104,14 +104,20 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             results,
             [
                 (
-                    "https://www.legislation.gov.uk/uksi/2023/91/contents",
+                    "https://www.legislation.gov.uk/uksi/2023/91",
                     "The Environmental Targets (Biodiversity) (England) Regulations 2023",
                 ),
                 (
-                    "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                    "https://www.legislation.gov.uk/ukpga/2021/30",
                     "Environment Act 2021",
                 ),
             ],
+        )
+
+    def test_uk_contents_url_preserves_contents_view_separately(self) -> None:
+        self.assertEqual(
+            non_eu.uk_contents_url("https://www.legislation.gov.uk/uksi/2023/91/contents/made"),
+            "https://www.legislation.gov.uk/uksi/2023/91/contents",
         )
 
     def test_fetch_uk_documents_uses_search_fallback_when_direct_search_is_challenged(self) -> None:
@@ -135,6 +141,13 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         self.assertEqual(len(df), 2)
         self.assertEqual(
             sorted(df["url"].tolist()),
+            [
+                "https://www.legislation.gov.uk/ukpga/2021/30",
+                "https://www.legislation.gov.uk/uksi/2023/91",
+            ],
+        )
+        self.assertEqual(
+            sorted(df["contents_url"].tolist()),
             [
                 "https://www.legislation.gov.uk/ukpga/2021/30/contents",
                 "https://www.legislation.gov.uk/uksi/2023/91/contents",

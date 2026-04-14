@@ -41,13 +41,19 @@ except Exception:
 
 
 UA = os.getenv("POLICY_CORPUS_BUILDER_USER_AGENT", "policy-corpus-builder/0.1")
+
+
+def _headers_for(user_agent: str | None = None) -> dict[str, str]:
+    return {
+        "User-Agent": (user_agent or UA).strip(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+
+
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"}
-DEFAULT_HEADERS = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Connection": "keep-alive",
-}
+DEFAULT_HEADERS = _headers_for()
 
 UK_BASE = "https://www.legislation.gov.uk"
 UK_DATASETS = ("ukpga", "uksi", "ukla", "asp", "anaw", "wsi", "ssi", "nisr", "nisi", "ukdsi", "sdsi")
@@ -112,9 +118,10 @@ def build_session(
     backoff_factor: float = 1.0,
     pool_connections: int = 20,
     pool_maxsize: int = 20,
+    user_agent: str | None = None,
 ) -> requests.Session:
     session = requests.Session()
-    session.headers.update(DEFAULT_HEADERS)
+    session.headers.update(_headers_for(user_agent))
     retries = Retry(
         total=total_retries,
         backoff_factor=backoff_factor,
@@ -187,10 +194,19 @@ def canonicalize_uk_doc_url(href: str) -> str:
     parsed = urlparse(resolved)
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) >= 3:
-        normalized_path = "/" + "/".join(parts[:3]) + "/contents"
+        normalized_path = "/" + "/".join(parts[:3])
     else:
         normalized_path = parsed.path or "/"
     return urlunparse(("https", parsed.netloc or urlparse(UK_BASE).netloc, normalized_path, "", "", ""))
+
+
+def uk_contents_url(url: str) -> str:
+    canonical_url = canonicalize_uk_doc_url(url)
+    parsed = urlparse(canonical_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 3:
+        return urlunparse(("https", parsed.netloc or urlparse(UK_BASE).netloc, "/" + "/".join(parts[:3]) + "/contents", "", "", ""))
+    return canonical_url
 
 
 def _is_uk_search_challenge_response(response: requests.Response | None) -> bool:
@@ -567,6 +583,7 @@ def fetch_uk_documents(
                     break
                 seen_urls.add(doc_url)
                 title_lookup = dict(page_results)
+                contents_url = uk_contents_url(doc_url)
                 rows.append(
                     {
                         "jurisdiction": "United Kingdom",
@@ -575,6 +592,7 @@ def fetch_uk_documents(
                         "term": term,
                         "doc_url": doc_url,
                         "url": doc_url,
+                        "contents_url": contents_url,
                         "title": clean_uk_title(title_lookup.get(doc_url, "")),
                     }
                 )
@@ -1051,7 +1069,7 @@ class RobotsCache:
             parser = robotparser.RobotFileParser()
             parser.set_url(robots_url)
             try:
-                response = requests.get(robots_url, headers=DEFAULT_HEADERS, timeout=20, verify=certifi.where())
+                response = requests.get(robots_url, headers=_headers_for(self.user_agent), timeout=20, verify=certifi.where())
                 if response.status_code >= 400:
                     parser = None
                 else:
@@ -1068,19 +1086,25 @@ class RobotsCache:
             return False
 
 
-def _get_thread_session() -> requests.Session:
+def _get_thread_session(user_agent: str | None = None) -> requests.Session:
     session = getattr(_thread_local, "session", None)
-    if session is None:
-        session = build_session()
+    session_user_agent = getattr(_thread_local, "session_user_agent", None)
+    desired_user_agent = (user_agent or UA).strip()
+    if session is None or session_user_agent != desired_user_agent:
+        session = build_session(user_agent=desired_user_agent)
         _thread_local.session = session
+        _thread_local.session_user_agent = desired_user_agent
     return session
 
 
-def _get_thread_robots() -> RobotsCache:
+def _get_thread_robots(user_agent: str | None = None) -> RobotsCache:
     robots = getattr(_thread_local, "robots", None)
-    if robots is None:
-        robots = RobotsCache(user_agent=DEFAULT_HEADERS["User-Agent"])
+    robots_user_agent = getattr(_thread_local, "robots_user_agent", None)
+    desired_user_agent = (user_agent or UA).strip()
+    if robots is None or robots_user_agent != desired_user_agent:
+        robots = RobotsCache(user_agent=desired_user_agent)
         _thread_local.robots = robots
+        _thread_local.robots_user_agent = desired_user_agent
     return robots
 
 
@@ -1180,7 +1204,7 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
     if src == "UK":
         if not url:
             return []
-        parsed = urlparse(url)
+        parsed = urlparse(canonicalize_uk_doc_url(url))
         base_parts = [part for part in parsed.path.split("/") if part]
         if len(base_parts) >= 3:
             doc_root = "/" + "/".join(base_parts[:3])
@@ -1240,6 +1264,7 @@ def enrich_one_record_fulltext(
     us_api_key: str | None,
     obey_robots: bool = True,
     timeout: int = 40,
+    user_agent: str | None = None,
 ) -> dict:
     out = dict(rec)
     out.setdefault("full_text", "")
@@ -1253,8 +1278,9 @@ def enrich_one_record_fulltext(
     if not candidates:
         out["full_text_error"] = "no_url_candidate"
         return out
-    session = _get_thread_session()
-    robots = _get_thread_robots()
+    request_headers = _headers_for(user_agent)
+    session = _get_thread_session(user_agent)
+    robots = _get_thread_robots(user_agent)
     last_err = ""
     for candidate_url, mode in candidates:
         try:
@@ -1265,7 +1291,7 @@ def enrich_one_record_fulltext(
                 last_err = "skipped candidate: data file (zip/csv/xlsx/etc.)"
                 continue
             if mode == "us_api_json":
-                headers = dict(DEFAULT_HEADERS)
+                headers = dict(request_headers)
                 if us_api_key:
                     headers["X-Api-Key"] = us_api_key
                 response = session.get(candidate_url, headers=headers, timeout=timeout, verify=certifi.where())
@@ -1284,7 +1310,7 @@ def enrich_one_record_fulltext(
                     candidate_url,
                     timeout=timeout,
                     verify=certifi.where(),
-                    headers={**DEFAULT_HEADERS, "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"},
+                    headers={**request_headers, "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"},
                 )
                 if _is_waf_challenge_response(response):
                     last_err = "waf_challenge"
@@ -1299,7 +1325,7 @@ def enrich_one_record_fulltext(
                     return out
                 last_err = "uk_xml_empty"
                 continue
-            response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=DEFAULT_HEADERS)
+            response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
             if _is_waf_challenge_response(response):
                 last_err = "waf_challenge"
                 continue
@@ -1325,6 +1351,7 @@ def add_full_texts_parallel(
     max_workers: int = 12,
     progress_every: int = 25,
     obey_robots: bool = True,
+    user_agent: str | None = None,
 ) -> list[dict]:
     if not records:
         return []
@@ -1333,7 +1360,16 @@ def add_full_texts_parallel(
     ok = 0
     counter: Counter[str] = Counter()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(enrich_one_record_fulltext, rec, us_api_key=us_api_key, obey_robots=obey_robots) for rec in records]
+        futures = [
+            executor.submit(
+                enrich_one_record_fulltext,
+                rec,
+                us_api_key=us_api_key,
+                obey_robots=obey_robots,
+                user_agent=user_agent,
+            )
+            for rec in records
+        ]
         for idx, future in enumerate(as_completed(futures), start=1):
             try:
                 enriched = future.result()
@@ -1398,6 +1434,7 @@ def build_non_eu_fulltext_docs(
     max_workers: int = 12,
     progress_every: int = 25,
     obey_robots: bool = True,
+    user_agent: str | None = None,
 ) -> pd.DataFrame:
     if raw_hits_df.empty:
         return pd.DataFrame(
@@ -1410,6 +1447,7 @@ def build_non_eu_fulltext_docs(
         max_workers=max_workers,
         progress_every=progress_every,
         obey_robots=obey_robots,
+        user_agent=user_agent,
     )
     df = pd.DataFrame(enriched)
     if df.empty:
@@ -1422,6 +1460,7 @@ def build_non_eu_fulltext_docs(
     df["retrieval_status"] = "missing_text"
     df.loc[df["has_text"], "retrieval_status"] = "ok"
     df.loc[df["full_text_error"].fillna("").astype(str).str.len().gt(0), "retrieval_status"] = "error"
+    df.loc[df["full_text_error"].eq("waf_challenge"), "retrieval_status"] = "upstream_blocked"
     df["source_file"] = df["full_text_url"].fillna("")
     df["doc_uid"] = df["doc_id"]
     if "doc_url" in df.columns:
@@ -1504,6 +1543,7 @@ def run_non_eu_query_pipeline(
     max_workers: int = 4,
     progress_every: int = 0,
     obey_robots: bool = True,
+    user_agent: str | None = None,
 ) -> NonEUQueryRun:
     """Run one real non-EU retrieval query through retrieval, full text, and harmonization."""
 
@@ -1519,6 +1559,7 @@ def run_non_eu_query_pipeline(
         max_workers=max_workers,
         progress_every=progress_every,
         obey_robots=obey_robots,
+        user_agent=user_agent,
     )
 
     if not fulltext_docs_df.empty:
