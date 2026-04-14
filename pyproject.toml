@@ -12,7 +12,13 @@ license = { file = "LICENSE" }
 authors = [
   { name = "Anne Cathrine Linder" }
 ]
-dependencies = []
+dependencies = [
+  "beautifulsoup4",
+  "certifi",
+  "numpy",
+  "pandas",
+  "requests",
+]
 
 [project.scripts]
 policy-corpus-builder = "policy_corpus_builder.cli:main"

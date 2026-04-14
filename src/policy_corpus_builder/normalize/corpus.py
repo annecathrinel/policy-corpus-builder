@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import numpy as np
 import pandas as pd
-from celex_lookup import extract_celex_token, parse_celex_to_dict
+from policy_corpus_builder.utils.celex import extract_celex_token, parse_celex_to_dict
 
 
 def normalize_lang(value: object) -> str:

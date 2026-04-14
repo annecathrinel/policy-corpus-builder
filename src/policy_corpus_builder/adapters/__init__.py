@@ -32,3 +32,12 @@ def register_adapter(adapter_class: type[SourceAdapter]) -> None:
 
 def available_adapters() -> list[str]:
     return sorted(ADAPTERS)
+
+
+__all__ = [
+    "ADAPTERS",
+    "SourceAdapter",
+    "available_adapters",
+    "get_adapter",
+    "register_adapter",
+]

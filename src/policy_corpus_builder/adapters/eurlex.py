@@ -25,11 +25,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from celex_lookup import extract_celex_token, parse_celex_to_dict
-from analysis_pipeline.functions.retrieval_queries import (
+from policy_corpus_builder.query_sets.nid4ocean import (
     SEARCH_TERMS_PRIMARY,
     TRANSLATED_TERMS_PRIMARY,
 )
+from policy_corpus_builder.utils.celex import extract_celex_token, parse_celex_to_dict
 
 EURLEX_WS_ENDPOINT = "https://eur-lex.europa.eu/EURLexWebService"
 EURLEX_ALT_SEARCH_URL = "https://eur-lex.europa.eu/search.html"

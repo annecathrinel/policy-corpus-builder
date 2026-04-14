@@ -25,7 +25,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from celex_lookup import extract_celex_token, parse_celex, parse_celex_to_dict
+from policy_corpus_builder.utils.celex import (
+    extract_celex_token,
+    parse_celex,
+    parse_celex_to_dict,
+)
 
 try:
     from lxml import etree as ET
@@ -1404,7 +1408,7 @@ def fetch_nim_document_text(
         }
     )
 
-    file_cache_dir = _ensure_dir(Path("analysis_pipeline/outputs/nim_fulltext_cache/file_cache"))
+    file_cache_dir = _ensure_dir(Path("outputs/nim_fulltext_cache/file_cache"))
     route_candidates = _build_nim_route_candidates(page_meta)
     seen_urls: set[str] = set()
     while route_candidates:

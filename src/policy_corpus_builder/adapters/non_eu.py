@@ -21,7 +21,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from analysis_pipeline.functions.retrieval_queries import NON_EU_SEARCH_TERMS_PRIMARY, SOURCE_TO_COUNTRY
+from policy_corpus_builder.query_sets.nid4ocean import (
+    NON_EU_SEARCH_TERMS_PRIMARY,
+    SOURCE_TO_COUNTRY,
+)
 
 try:
     import truststore
