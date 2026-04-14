@@ -1,0 +1,2 @@
+[console_scripts]
+policy-corpus-builder = policy_corpus_builder.cli:main
