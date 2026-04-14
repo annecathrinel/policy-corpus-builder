@@ -398,14 +398,30 @@ def clean_title_from_fulltext_prefix(text: str) -> str:
     return prefix[:300].strip(" -|:\n\t")
 
 
+def clean_uk_title(title: str) -> str:
+    text = _WS_RE.sub(" ", str(title or "").strip())
+    if not text:
+        return ""
+    text = re.sub(r"^\s*PDF\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*-\s*Legislation\.gov\.uk\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*Legislation\.gov\.uk\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" -|:\n\t")
+
+
 def infer_title(row: pd.Series | dict) -> str:
     title = str((row.get("title") if isinstance(row, dict) else row.get("title", "")) or "").strip()
     if not _is_missing_text(title):
+        jurisdiction = str((row.get("jurisdiction") if isinstance(row, dict) else row.get("jurisdiction", "")) or "").strip()
+        if jurisdiction in {"United Kingdom", "UK"}:
+            return clean_uk_title(title)
         return title
     jurisdiction = str((row.get("jurisdiction") if isinstance(row, dict) else row.get("jurisdiction", "")) or "").strip()
     text = str((row.get("full_text_clean") if isinstance(row, dict) else row.get("full_text_clean", "")) or "").strip()
     if jurisdiction in {"United Kingdom", "New Zealand"} and text:
-        return clean_title_from_fulltext_prefix(text)
+        inferred = clean_title_from_fulltext_prefix(text)
+        if jurisdiction in {"United Kingdom", "UK"}:
+            return clean_uk_title(inferred)
+        return inferred
     return ""
 
 
@@ -561,7 +577,7 @@ def fetch_uk_documents(
                         "term": term,
                         "doc_url": doc_url,
                         "url": doc_url,
-                        "title": title_lookup.get(doc_url, ""),
+                        "title": clean_uk_title(title_lookup.get(doc_url, "")),
                     }
                 )
                 kept += 1
@@ -1110,6 +1126,13 @@ def ensure_url_in_record(rec: dict) -> str:
     return ""
 
 
+def _is_waf_challenge_response(response: requests.Response | None) -> bool:
+    if response is None:
+        return False
+    waf_action = str(response.headers.get("x-amzn-waf-action", "") or "").strip().lower()
+    return response.status_code == 202 or waf_action == "challenge"
+
+
 def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tuple[str, str]]:
     url = ensure_url_in_record(rec)
     if src == "AUS":
@@ -1123,7 +1146,29 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
                 candidates.append((doc_url.rstrip("/") + "/text", "html"))
             candidates.append((doc_url, "html"))
         return candidates
-    if src in ("UK", "NZ", "CA"):
+    if src == "UK":
+        if not url:
+            return []
+        parsed = urlparse(url)
+        base_parts = [part for part in parsed.path.split("/") if part]
+        if len(base_parts) >= 3:
+            doc_root = "/" + "/".join(base_parts[:3])
+            candidates = [
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/contents", "", "", "")), "html"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/made", "", "", "")), "html"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/enacted", "", "", "")), "html"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/contents/made", "", "", "")), "html"),
+            ]
+            seen: set[str] = set()
+            deduped: list[tuple[str, str]] = []
+            for candidate in candidates:
+                if candidate[0] in seen:
+                    continue
+                seen.add(candidate[0])
+                deduped.append(candidate)
+            return deduped
+        return [(url, "html")]
+    if src in ("NZ", "CA"):
         return [(url, "html")] if url else []
     if src == "US":
         api_self = (rec.get("api_self") or url or "").strip()
@@ -1198,6 +1243,9 @@ def enrich_one_record_fulltext(
                 last_err = "us_api_json_empty"
                 continue
             response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=DEFAULT_HEADERS)
+            if _is_waf_challenge_response(response):
+                last_err = "waf_challenge"
+                continue
             response.raise_for_status()
             text = html_to_visible_text(response.text)
             if text:

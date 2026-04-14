@@ -57,6 +57,12 @@ class _FakeUrlOpenResponse:
 
 
 class NonEUUkRetrievalTests(unittest.TestCase):
+    def test_clean_uk_title_removes_site_noise(self) -> None:
+        self.assertEqual(
+            non_eu.clean_uk_title("PDF Environment Act 2021 - Legislation.gov.uk"),
+            "Environment Act 2021",
+        )
+
     def test_extract_uk_search_result_links_filters_to_document_paths(self) -> None:
         results = non_eu._extract_uk_search_result_links(DIRECT_UK_HTML)
 
@@ -124,6 +130,55 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 "The Environmental Targets (Biodiversity) (England) Regulations 2023",
             ],
         )
+
+    def test_get_url_candidates_for_uk_tries_multiple_content_variants(self) -> None:
+        candidates = non_eu.get_url_candidates(
+            {"url": "https://www.legislation.gov.uk/ukpga/2021/30/contents"},
+            "UK",
+            None,
+        )
+
+        self.assertEqual(
+            candidates,
+            [
+                ("https://www.legislation.gov.uk/ukpga/2021/30/contents", "html"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/made", "html"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/enacted", "html"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/contents/made", "html"),
+            ],
+        )
+
+    def test_enrich_one_record_fulltext_marks_waf_challenge_instead_of_html_empty(self) -> None:
+        class _ChallengeSession:
+            def get(self, *args, **kwargs):
+                return _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"})
+
+        previous_session = getattr(non_eu._thread_local, "session", None)
+        previous_robots = getattr(non_eu._thread_local, "robots", None)
+        non_eu._thread_local.session = _ChallengeSession()
+        non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
+        try:
+            enriched = non_eu.enrich_one_record_fulltext(
+                {
+                    "source": "UK",
+                    "jurisdiction": "United Kingdom",
+                    "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                },
+                us_api_key=None,
+                obey_robots=False,
+            )
+        finally:
+            if previous_session is None and hasattr(non_eu._thread_local, "session"):
+                delattr(non_eu._thread_local, "session")
+            else:
+                non_eu._thread_local.session = previous_session
+            if previous_robots is None and hasattr(non_eu._thread_local, "robots"):
+                delattr(non_eu._thread_local, "robots")
+            else:
+                non_eu._thread_local.robots = previous_robots
+
+        self.assertEqual(enriched["full_text"], "")
+        self.assertEqual(enriched["full_text_error"], "waf_challenge")
 
 
 if __name__ == "__main__":
