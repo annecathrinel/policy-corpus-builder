@@ -14,6 +14,7 @@ import socket
 import threading
 import time
 import urllib.robotparser as robotparser
+import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
@@ -39,10 +40,7 @@ except Exception:
     TRUSTSTORE_OK = False
 
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-)
+UA = os.getenv("POLICY_CORPUS_BUILDER_USER_AGENT", "policy-corpus-builder/0.1")
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"}
 DEFAULT_HEADERS = {
     "User-Agent": UA,
@@ -1103,6 +1101,39 @@ def html_to_visible_text(html: str) -> str:
     return _WS_RE.sub(" ", soup.get_text(" ")).strip()
 
 
+def uk_xml_to_text(xml: str) -> str:
+    try:
+        root = ET.fromstring(xml or "")
+    except ET.ParseError:
+        return ""
+
+    skip_tags = {"Metadata", "Versions", "Contents", "Commentaries"}
+
+    def local_name(tag: str) -> str:
+        if "}" in tag:
+            return tag.rsplit("}", 1)[-1]
+        if ":" in tag:
+            return tag.rsplit(":", 1)[-1]
+        return tag
+
+    parts: list[str] = []
+
+    def visit(element: ET.Element, *, skip: bool = False) -> None:
+        current_skip = skip or local_name(element.tag) in skip_tags
+        if not current_skip and element.text and element.text.strip():
+            parts.append(element.text.strip())
+        for child in element:
+            visit(child, skip=current_skip)
+            if not current_skip and child.tail and child.tail.strip():
+                parts.append(child.tail.strip())
+
+    visit(root)
+    text = "\n".join(parts)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _WS_RE.sub(" ", text)
+    return text.strip()
+
+
 def canonical_source(src: str) -> str:
     text = (src or "").strip().lower()
     if "aus" in text or "australia" in text:
@@ -1154,6 +1185,12 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
         if len(base_parts) >= 3:
             doc_root = "/" + "/".join(base_parts[:3])
             candidates = [
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/data.xml", "", "", "")), "uk_xml"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/made/data.xml", "", "", "")), "uk_xml"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/enacted/data.xml", "", "", "")), "uk_xml"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/data.xht", "", "", "")), "html"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/made/data.xht", "", "", "")), "html"),
+                (urlunparse(("https", parsed.netloc, f"{doc_root}/enacted/data.xht", "", "", "")), "html"),
                 (urlunparse(("https", parsed.netloc, f"{doc_root}/contents", "", "", "")), "html"),
                 (urlunparse(("https", parsed.netloc, f"{doc_root}/made", "", "", "")), "html"),
                 (urlunparse(("https", parsed.netloc, f"{doc_root}/enacted", "", "", "")), "html"),
@@ -1241,6 +1278,26 @@ def enrich_one_record_fulltext(
                     out["full_text_error"] = ""
                     return out
                 last_err = "us_api_json_empty"
+                continue
+            if mode == "uk_xml":
+                response = session.get(
+                    candidate_url,
+                    timeout=timeout,
+                    verify=certifi.where(),
+                    headers={**DEFAULT_HEADERS, "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"},
+                )
+                if _is_waf_challenge_response(response):
+                    last_err = "waf_challenge"
+                    continue
+                response.raise_for_status()
+                text = uk_xml_to_text(response.text)
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "uk_xml"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "uk_xml_empty"
                 continue
             response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=DEFAULT_HEADERS)
             if _is_waf_challenge_response(response):

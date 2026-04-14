@@ -33,12 +33,29 @@ DUCKDUCKGO_HTML = """
 </html>
 """
 
+UK_XML = """
+<Legislation>
+  <Metadata>
+    <Title>Environment Act 2021</Title>
+  </Metadata>
+  <Body>
+    <Title>Environment Act 2021</Title>
+    <P>1 Biodiversity gain plans.</P>
+    <P>Schedule 1 makes further provision.</P>
+  </Body>
+</Legislation>
+"""
+
 
 class _FakeResponse:
     def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None):
         self.status_code = status_code
         self.text = text
         self.headers = headers or {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class _FakeUrlOpenResponse:
@@ -141,11 +158,62 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         self.assertEqual(
             candidates,
             [
+                ("https://www.legislation.gov.uk/ukpga/2021/30/data.xml", "uk_xml"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/made/data.xml", "uk_xml"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/enacted/data.xml", "uk_xml"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/data.xht", "html"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/made/data.xht", "html"),
+                ("https://www.legislation.gov.uk/ukpga/2021/30/enacted/data.xht", "html"),
                 ("https://www.legislation.gov.uk/ukpga/2021/30/contents", "html"),
                 ("https://www.legislation.gov.uk/ukpga/2021/30/made", "html"),
                 ("https://www.legislation.gov.uk/ukpga/2021/30/enacted", "html"),
                 ("https://www.legislation.gov.uk/ukpga/2021/30/contents/made", "html"),
             ],
+        )
+
+    def test_uk_xml_to_text_extracts_document_text(self) -> None:
+        text = non_eu.uk_xml_to_text(UK_XML)
+
+        self.assertIn("Environment Act 2021", text)
+        self.assertIn("Biodiversity gain plans.", text)
+        self.assertNotIn("<Title>", text)
+
+    def test_enrich_one_record_fulltext_uses_uk_xml_when_available(self) -> None:
+        class _XmlSession:
+            def get(self, url, *args, **kwargs):
+                if url.endswith("/data.xml"):
+                    return _FakeResponse(200, UK_XML)
+                return _FakeResponse(404, "")
+
+        previous_session = getattr(non_eu._thread_local, "session", None)
+        previous_robots = getattr(non_eu._thread_local, "robots", None)
+        non_eu._thread_local.session = _XmlSession()
+        non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
+        try:
+            enriched = non_eu.enrich_one_record_fulltext(
+                {
+                    "source": "UK",
+                    "jurisdiction": "United Kingdom",
+                    "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                },
+                us_api_key=None,
+                obey_robots=False,
+            )
+        finally:
+            if previous_session is None and hasattr(non_eu._thread_local, "session"):
+                delattr(non_eu._thread_local, "session")
+            else:
+                non_eu._thread_local.session = previous_session
+            if previous_robots is None and hasattr(non_eu._thread_local, "robots"):
+                delattr(non_eu._thread_local, "robots")
+            else:
+                non_eu._thread_local.robots = previous_robots
+
+        self.assertIn("Biodiversity gain plans.", enriched["full_text"])
+        self.assertEqual(enriched["full_text_format"], "uk_xml")
+        self.assertEqual(
+            enriched["full_text_url"],
+            "https://www.legislation.gov.uk/ukpga/2021/30/data.xml",
         )
 
     def test_enrich_one_record_fulltext_marks_waf_challenge_instead_of_html_empty(self) -> None:
