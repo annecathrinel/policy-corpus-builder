@@ -22,6 +22,7 @@ src/policy_corpus_builder/adapters/eurlex_nim.py
 src/policy_corpus_builder/adapters/local_file.py
 src/policy_corpus_builder/adapters/mapping.py
 src/policy_corpus_builder/adapters/non_eu.py
+src/policy_corpus_builder/adapters/non_eu_adapter.py
 src/policy_corpus_builder/adapters/placeholder.py
 src/policy_corpus_builder/exporters/__init__.py
 src/policy_corpus_builder/exporters/jsonl.py

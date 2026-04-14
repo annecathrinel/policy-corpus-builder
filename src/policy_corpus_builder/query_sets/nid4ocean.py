@@ -406,7 +406,6 @@ TRANSLATED_TERMS_PRIMARY = {
   ],
 }
 
-#SEARCH_TERMS_FULLTEXT = ['nature-positive', 'nature positive', 'nature inclusive', 'nature-inclusive', 'nature inclusive design', 'nature-inclusive design', 'nature based solutions', 'nature-based solutions', 'net gain', 'net-gain', 'biodiversity net gain', 'biodiversity net-gain', 'biodiversity gain', 'nature restoration', 'nature repair', 'biodiversity strategy', 'offshore wind', 'offshore wind', 'marine energy', 'blue carbon', 'blue economy', 'restoration', 'nature capital', 'natural capital', 'nature-based', 'nature based', 'green infrastructure', 'marine infrastructure', 'infrastructure', 'mitigation', 'offsetting', 'NiD', 'NBS', 'NbS', 'design']
 SEARCH_TERMS_FULLTEXT = ['nature-positive', 'nature positive', 'nature inclusive', 'nature-inclusive', 'nature inclusive design', 'nature-inclusive design', 'nature based solutions', 'nature-based solutions', 'biodiversity net gain', 'net gain', 'net-gain' 'biodiversity net-gain', 'biodiversity gain', 'nature restoration', 'nature repair', 'biodiversity strategy']
 TRANSLATED_TERMS_FULLTEXT = {
   "bg": [
@@ -797,19 +796,12 @@ TRANSLATED_TERMS_FULLTEXT = {
   ],
 }
 
-
 SOURCE_TO_COUNTRY = {'UK': 'UK', 'UK_GOVUK': 'UK', 'US': 'US', 'Canada': 'Canada', 'CA': 'Canada', 'Australia': 'Australia', 'AUS': 'Australia', 'AU': 'Australia', 'New Zealand': 'New Zealand', 'NZ': 'New Zealand'}
 PATHS_BY_COUNTRY = {'Australia': 'country_dfs/nid_policy_aus_legislation.csv', 'New Zealand': 'country_dfs/nid_policy_nz_legislation.csv', 'Canada': 'country_dfs/nid_policy_publications_gc_ca.csv', 'UK': 'country_dfs/nid_policy_uk_legislation.csv', 'US': 'country_dfs/nid_policy_regulations_gov.csv'}
 
 # Backward-compatible aliases used by the standalone retrieval modules.
 NON_EU_SEARCH_TERMS_PRIMARY = SEARCH_TERMS_PRIMARY
 NON_EU_SEARCH_TERMS_SECONDARY = SEARCH_TERMS_FULLTEXT
-
-#POSITIVE_HINTS = ("positiv", "pozitiv", "positivo", "positif", "pozyt", "pozitī", "θετικ", "dearfach", "природопозитив", "naturpositiv", "luontopositiiv", "looduspositiiv")
-#DESIGN_HINTS = ("design", "planung", "plán", "plan", "progett", "projekt", "aménagement", "oblikov", "dizajn", "diseño", "ontwerp", "tervez", "suunnittelu", "disinn", "dearadh",    "proiectare", "projektowanie", "načrt", "oblikovanje")
-
-#BNG_BIODIV_HINTS = ("biodivers", "biodiverz", "bioraz", "biolog", "elurikk", "vielfalt", "bioróżnor", "biodiversidad")
-#BNG_NET_HINTS    = ("net", "nett", "netto", "gain", "ganancia", "guadagno", "ganho", "câștig", "zysk", "dobit", "κέρδ", "qligħ")
 
 def dedupe_terms(terms: list[str]) -> list[str]:
     seen = set()

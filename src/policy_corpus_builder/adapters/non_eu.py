@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 import json
 import os
@@ -13,7 +14,8 @@ import socket
 import threading
 import time
 import urllib.robotparser as robotparser
-from urllib.parse import quote, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from bs4 import BeautifulSoup
 import certifi
@@ -183,11 +185,103 @@ def query_source(url: str, *, timeout_s: int = 60, session: requests.Session | N
 
 
 def canonicalize_uk_doc_url(href: str) -> str:
-    href = href.split("#", 1)[0]
-    parts = [part for part in href.split("/") if part]
+    resolved = urljoin(UK_BASE, href.split("#", 1)[0])
+    parsed = urlparse(resolved)
+    parts = [part for part in parsed.path.split("/") if part]
     if len(parts) >= 3:
-        href = "/" + "/".join(parts[:3]) + "/contents"
-    return urljoin(UK_BASE, href)
+        normalized_path = "/" + "/".join(parts[:3]) + "/contents"
+    else:
+        normalized_path = parsed.path or "/"
+    return urlunparse(("https", parsed.netloc or urlparse(UK_BASE).netloc, normalized_path, "", "", ""))
+
+
+def _is_uk_search_challenge_response(response: requests.Response | None) -> bool:
+    if response is None:
+        return False
+    waf_action = str(response.headers.get("x-amzn-waf-action", "") or "").strip().lower()
+    return response.status_code == 202 or waf_action == "challenge"
+
+
+def _looks_like_uk_document_href(href: str) -> bool:
+    parsed = urlparse(urljoin(UK_BASE, href))
+    if parsed.netloc and "legislation.gov.uk" not in parsed.netloc.lower():
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3:
+        return False
+    if parts[0].lower() not in {dataset.lower() for dataset in UK_DATASETS}:
+        return False
+    if not re.fullmatch(r"\d{4}", parts[1]):
+        return False
+    if not re.fullmatch(r"\d+", parts[2]):
+        return False
+    return True
+
+
+def _extract_uk_search_result_links(html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        if not href:
+            continue
+        if not _looks_like_uk_document_href(href):
+            continue
+        doc_url = canonicalize_uk_doc_url(urljoin(UK_BASE, href))
+        if doc_url in seen:
+            continue
+        seen.add(doc_url)
+        title = anchor.get_text(" ").strip()
+        results.append((doc_url, title))
+
+    return results
+
+
+def _decode_duckduckgo_result_url(href: str) -> str:
+    absolute = urljoin("https://duckduckgo.com", href)
+    parsed = urlparse(absolute)
+    query = parse_qs(parsed.query)
+    raw_target = query.get("uddg", [""])[0]
+    if not raw_target:
+        return ""
+    return unquote(raw_target).strip()
+
+
+def _extract_uk_duckduckgo_links(html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for anchor in soup.select("a.result__a"):
+        href = str(anchor.get("href", "")).strip()
+        target_url = _decode_duckduckgo_result_url(href)
+        if not target_url or not _looks_like_uk_document_href(target_url):
+            continue
+        doc_url = canonicalize_uk_doc_url(target_url)
+        if doc_url in seen:
+            continue
+        seen.add(doc_url)
+        title = unescape(anchor.get_text(" ").strip())
+        results.append((doc_url, title))
+
+    return results
+
+
+def _fetch_uk_search_results_via_duckduckgo(term: str) -> list[tuple[str, str]]:
+    query = f"site:legislation.gov.uk {term} legislation"
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept-Language": "en-GB,en;q=0.9",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        html = response.read().decode("utf-8", errors="replace")
+    return _extract_uk_duckduckgo_links(html)
 
 
 def build_aus_search_url(term: str) -> str:
@@ -426,27 +520,29 @@ def fetch_uk_documents(
 ) -> pd.DataFrame:
     sess = session or build_session()
     verify = certifi.where() if verify is None else verify
-    link_re = re.compile(r"^/(" + "|".join(map(re.escape, UK_DATASETS)) + r")/\d{4}/\d+", re.I)
     rows: list[dict] = []
     for term in search_terms:
         kept = 0
         page = 1
         seen_urls: set[str] = set()
+        used_search_fallback = False
         while kept < max_per_term:
             q = f'"{term}"' if " " in term else term
             url = f"{UK_BASE}/all?text={quote(q)}"
             if page > 1:
                 url += f"&page={page}"
             response = safe_get(url, session=sess, verify=verify, verbose_err=False)
-            if response is None or response.status_code != 200:
+            if response is None:
                 break
-            soup = BeautifulSoup(response.text, "html.parser")
-            page_urls = [
-                canonicalize_uk_doc_url(anchor["href"].strip())
-                for anchor in soup.find_all("a", href=True)
-                if link_re.match(anchor["href"].strip())
-            ]
-            page_urls = list(dict.fromkeys(page_urls))
+            page_results = []
+            if response.status_code == 200 and not _is_uk_search_challenge_response(response):
+                page_results = _extract_uk_search_result_links(response.text)
+            elif not used_search_fallback:
+                page_results = _fetch_uk_search_results_via_duckduckgo(term)
+                used_search_fallback = True
+            else:
+                break
+            page_urls = [doc_url for doc_url, _ in page_results]
             if not page_urls:
                 break
             new_urls = [item for item in page_urls if item not in seen_urls]
@@ -456,6 +552,7 @@ def fetch_uk_documents(
                 if kept >= max_per_term:
                     break
                 seen_urls.add(doc_url)
+                title_lookup = dict(page_results)
                 rows.append(
                     {
                         "jurisdiction": "United Kingdom",
@@ -464,10 +561,12 @@ def fetch_uk_documents(
                         "term": term,
                         "doc_url": doc_url,
                         "url": doc_url,
-                        "title": "",
+                        "title": title_lookup.get(doc_url, ""),
                     }
                 )
                 kept += 1
+            if used_search_fallback:
+                break
             page += 1
             time.sleep(sleep_s)
     return _normalize_raw_rows(rows)
