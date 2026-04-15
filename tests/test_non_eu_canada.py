@@ -28,6 +28,38 @@ class _FakeResponse:
 
 
 class NonEUCanadaTests(unittest.TestCase):
+    def test_clean_canada_title_removes_trailing_catalogue_identifier(self) -> None:
+        self.assertEqual(
+            non_eu.clean_canada_title(
+                "Soil biodiversity : what's most important? : A59-82/2021E-PDF"
+            ),
+            "Soil biodiversity : what's most important?",
+        )
+        self.assertEqual(
+            non_eu.clean_canada_title(
+                "Compendium of Canada's engagement in international environmental agreements and instruments. Intergovernmental Platform on Biodiversity and Ecosystem Services (IPBES). En4-381/4-5-2018E-PDF"
+            ),
+            "Compendium of Canada's engagement in international environmental agreements and instruments. Intergovernmental Platform on Biodiversity and Ecosystem Services (IPBES).",
+        )
+
+    def test_clean_canada_full_text_trims_boilerplate_and_common_encoding_noise(self) -> None:
+        cleaned = non_eu.clean_canada_full_text(
+            "Title - Government of Canada Publications - Canada.ca "
+            "Passer au contenu principal "
+            "Passer à « À propos de ce site » "
+            "Language selection Français fr / Gouvernement du Canada "
+            "Search Search Canada.ca Search Menu Main Menu "
+            "Useful body text with biodiversitÃ© and authorâ€™s note. "
+            "Page details Report a problem or mistake on this page "
+            "About this site Government of Canada All contacts Departments and agencies"
+        )
+
+        self.assertIn("Useful body text", cleaned)
+        self.assertIn("biodiversité", cleaned)
+        self.assertIn("author's note", cleaned)
+        self.assertNotIn("Passer au contenu principal", cleaned)
+        self.assertNotIn("Government of Canada Publications - Canada.ca", cleaned)
+
     def test_fetch_canada_documents_extracts_publications_hits(self) -> None:
         with (
             patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_SEARCH_HTML)),

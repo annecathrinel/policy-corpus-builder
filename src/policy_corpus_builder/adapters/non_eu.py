@@ -360,12 +360,71 @@ def clean_uk_title(title: str) -> str:
     return text.strip(" -|:\n\t")
 
 
+def clean_canada_title(title: str) -> str:
+    text = _WS_RE.sub(" ", str(title or "").strip())
+    if not text:
+        return ""
+    text = re.sub(r"\s*:\s*[A-Z][A-Za-z0-9-]*/[A-Za-z0-9-]*\d{4}[A-Z-]*\s*$", "", text)
+    text = re.sub(r"\s+[A-Z][A-Za-z0-9-]*/[A-Za-z0-9-]*\d{4}[A-Z-]*\s*$", "", text)
+    text = re.sub(r"\s*:\s*[A-Z][A-Za-z0-9/-]*PDF\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[A-Z][A-Za-z0-9/-]*PDF\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" -|:\n\t")
+
+
+def clean_canada_full_text(text: str) -> str:
+    cleaned = str(text or "")
+    replacements = {
+        "Passer Ã  Â« Ã€ propos de ce site Â»": "",
+        "Passer au contenu principal": "",
+        "Passer à « À propos de ce site »": "",
+        "Language selection FranÃ§ais fr / Gouvernement du Canada": "",
+        "Language selection Français fr / Gouvernement du Canada": "",
+        "Government of Canada Publications - Canada.ca": "",
+        "Page details Report a problem or mistake on this page": "",
+        "About this site Government of Canada All contacts Departments and agencies": "",
+        "Government of Canada Corporate Social media Mobile applications About Canada.ca Terms and conditions Privacy": "",
+        "FranÃ§ais": "Français",
+        "Gouvernement du Canada": "Gouvernement du Canada",
+        "Ã€": "À",
+        "Ã ": "à",
+        "Ã©": "é",
+        "Ã¨": "è",
+        "Ãª": "ê",
+        "Ã«": "ë",
+        "Ã¢": "â",
+        "Ã®": "î",
+        "Ã´": "ô",
+        "Ã»": "û",
+        "Ã§": "ç",
+        "â€™": "'",
+        "â€œ": '"',
+        "â€": '"',
+        "â€“": "-",
+        "â€”": "-",
+    }
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    cleaned = re.split(r"\bPage details Report a problem or mistake on this page\b", cleaned, maxsplit=1)[0]
+    cleaned = re.split(r"\bAbout this site Government of Canada\b", cleaned, maxsplit=1)[0]
+    cleaned = re.split(r"\bAll contacts Departments and agencies About government\b", cleaned, maxsplit=1)[0]
+    cleaned = re.sub(
+        r"^\s*.*?(Language selection Français fr / Gouvernement du Canada|Language selection FranÃ§ais fr / Gouvernement du Canada|Search Search Canada\.ca Search Menu Main Menu)\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = _WS_RE.sub(" ", cleaned)
+    return cleaned.strip()
+
+
 def infer_title(row: pd.Series | dict) -> str:
     title = str((row.get("title") if isinstance(row, dict) else row.get("title", "")) or "").strip()
     if not _is_missing_text(title):
         jurisdiction = str((row.get("jurisdiction") if isinstance(row, dict) else row.get("jurisdiction", "")) or "").strip()
         if jurisdiction in {"United Kingdom", "UK"}:
             return clean_uk_title(title)
+        if jurisdiction == "Canada":
+            return clean_canada_title(title)
         return title
     jurisdiction = str((row.get("jurisdiction") if isinstance(row, dict) else row.get("jurisdiction", "")) or "").strip()
     text = str((row.get("full_text_clean") if isinstance(row, dict) else row.get("full_text_clean", "")) or "").strip()
@@ -1260,6 +1319,8 @@ def enrich_one_record_fulltext(
                 continue
             response.raise_for_status()
             text = html_to_visible_text(response.text)
+            if src == "CA":
+                text = clean_canada_full_text(text)
             if text:
                 out["full_text"] = text
                 out["full_text_url"] = candidate_url
