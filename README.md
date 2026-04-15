@@ -43,6 +43,25 @@ pip install -e .
 
 Python `3.11+` is required.
 
+## Local Credentials
+
+For local-only secrets, copy `.env.example` to `.env`, fill in your real credentials, and keep `.env` untracked.
+
+```bash
+cp .env.example .env
+```
+
+Currently relevant environment variables include:
+
+- `REGULATIONS_GOV_API_KEY`
+- `EURLEX_USER`
+- `EURLEX_WEB_PASS`
+- `EURLEX_WS_USER`
+- `EURLEX_WS_PASS`
+- `POLICY_CORPUS_BUILDER_USER_AGENT`
+
+The package will load `.env` automatically if it is present in the repository root (or a parent directory when importing the package locally). Never commit `.env`.
+
 ## Happy Path
 
 The simplest end-to-end example uses the bundled local fixture-backed adapter and config:

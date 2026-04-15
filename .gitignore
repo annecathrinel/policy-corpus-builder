@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
 
 # Jupyter
 .ipynb_checkpoints/
@@ -43,5 +44,4 @@ docs_df_cleaned/
 # Keep small tracked examples/docs if needed
 !data/README.md
 !datasets/README.md
-
 
