@@ -259,27 +259,6 @@ def _looks_like_uk_document_href(href: str) -> bool:
     return True
 
 
-def _extract_uk_search_result_links(html: str) -> list[tuple[str, str]]:
-    soup = BeautifulSoup(html, "html.parser")
-    results: list[tuple[str, str]] = []
-    seen: set[str] = set()
-
-    for anchor in soup.find_all("a", href=True):
-        href = str(anchor["href"]).strip()
-        if not href:
-            continue
-        if not _looks_like_uk_document_href(href):
-            continue
-        doc_url = canonicalize_uk_doc_url(urljoin(UK_BASE, href))
-        if doc_url in seen:
-            continue
-        seen.add(doc_url)
-        title = anchor.get_text(" ").strip()
-        results.append((doc_url, title))
-
-    return results
-
-
 def _extract_uk_feed_links(xml_text: str) -> list[tuple[str, str]]:
     try:
         root = ET.fromstring(xml_text or "")
@@ -627,7 +606,6 @@ def fetch_uk_documents(
             response = safe_get(url, session=sess, verify=verify, verbose_err=False)
             if response is None:
                 break
-            page_results = []
             if response.status_code == 200 and not _is_uk_search_challenge_response(response):
                 page_results = _extract_uk_feed_links(response.text)
             elif not used_search_fallback:

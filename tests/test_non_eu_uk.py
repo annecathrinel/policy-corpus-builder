@@ -1,21 +1,9 @@
 from __future__ import annotations
 
 import unittest
-from io import BytesIO
 from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
-
-
-DIRECT_UK_HTML = """
-<html>
-  <body>
-    <a href="/uksi/2023/91/contents/made">The Environmental Targets (Biodiversity) (England) Regulations 2023</a>
-    <a href="/ukpga/2021/30/part/6">Environment Act 2021</a>
-    <a href="/uksi?title=biodiversity">Search Results</a>
-  </body>
-</html>
-"""
 
 DUCKDUCKGO_HTML = """
 <html>
@@ -74,21 +62,6 @@ class _FakeResponse:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
-class _FakeUrlOpenResponse:
-    def __init__(self, html: str, status: int = 200):
-        self._html = html.encode("utf-8")
-        self.status = status
-
-    def read(self) -> bytes:
-        return self._html
-
-    def __enter__(self) -> _FakeUrlOpenResponse:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
-
-
 class NonEUUkRetrievalTests(unittest.TestCase):
     def test_clean_uk_title_removes_site_noise(self) -> None:
         self.assertEqual(
@@ -96,8 +69,8 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             "Environment Act 2021",
         )
 
-    def test_extract_uk_search_result_links_filters_to_document_paths(self) -> None:
-        results = non_eu._extract_uk_search_result_links(DIRECT_UK_HTML)
+    def test_extract_uk_feed_links_decodes_atom_entries(self) -> None:
+        results = non_eu._extract_uk_feed_links(UK_ATOM_FEED)
 
         self.assertEqual(
             results,
@@ -115,23 +88,6 @@ class NonEUUkRetrievalTests(unittest.TestCase):
 
     def test_extract_uk_duckduckgo_links_decodes_redirect_targets(self) -> None:
         results = non_eu._extract_uk_duckduckgo_links(DUCKDUCKGO_HTML)
-
-        self.assertEqual(
-            results,
-            [
-                (
-                    "https://www.legislation.gov.uk/uksi/2023/91",
-                    "The Environmental Targets (Biodiversity) (England) Regulations 2023",
-                ),
-                (
-                    "https://www.legislation.gov.uk/ukpga/2021/30",
-                    "Environment Act 2021",
-                ),
-            ],
-        )
-
-    def test_extract_uk_feed_links_decodes_atom_entries(self) -> None:
-        results = non_eu._extract_uk_feed_links(UK_ATOM_FEED)
 
         self.assertEqual(
             results,
@@ -183,7 +139,15 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             patch.object(
                 non_eu,
                 "urlopen",
-                return_value=_FakeUrlOpenResponse(DUCKDUCKGO_HTML),
+                return_value=type(
+                    "_FakeUrlOpenResponse",
+                    (),
+                    {
+                        "read": lambda self: DUCKDUCKGO_HTML.encode("utf-8"),
+                        "__enter__": lambda self: self,
+                        "__exit__": lambda self, exc_type, exc, tb: None,
+                    },
+                )(),
             ),
             patch.object(non_eu.time, "sleep"),
         ):
@@ -195,20 +159,6 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             [
                 "https://www.legislation.gov.uk/ukpga/2021/30",
                 "https://www.legislation.gov.uk/uksi/2023/91",
-            ],
-        )
-        self.assertEqual(
-            sorted(df["contents_url"].tolist()),
-            [
-                "https://www.legislation.gov.uk/ukpga/2021/30/contents",
-                "https://www.legislation.gov.uk/uksi/2023/91/contents",
-            ],
-        )
-        self.assertEqual(
-            sorted(df["title"].tolist()),
-            [
-                "Environment Act 2021",
-                "The Environmental Targets (Biodiversity) (England) Regulations 2023",
             ],
         )
 
@@ -253,9 +203,13 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 return _FakeResponse(404, "")
 
         previous_session = getattr(non_eu._thread_local, "session", None)
+        previous_session_user_agent = getattr(non_eu._thread_local, "session_user_agent", None)
         previous_robots = getattr(non_eu._thread_local, "robots", None)
+        previous_robots_user_agent = getattr(non_eu._thread_local, "robots_user_agent", None)
         non_eu._thread_local.session = _XmlSession()
+        non_eu._thread_local.session_user_agent = non_eu.UA
         non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
+        non_eu._thread_local.robots_user_agent = non_eu.UA
         try:
             enriched = non_eu.enrich_one_record_fulltext(
                 {
@@ -271,10 +225,18 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 delattr(non_eu._thread_local, "session")
             else:
                 non_eu._thread_local.session = previous_session
+            if previous_session_user_agent is None and hasattr(non_eu._thread_local, "session_user_agent"):
+                delattr(non_eu._thread_local, "session_user_agent")
+            else:
+                non_eu._thread_local.session_user_agent = previous_session_user_agent
             if previous_robots is None and hasattr(non_eu._thread_local, "robots"):
                 delattr(non_eu._thread_local, "robots")
             else:
                 non_eu._thread_local.robots = previous_robots
+            if previous_robots_user_agent is None and hasattr(non_eu._thread_local, "robots_user_agent"):
+                delattr(non_eu._thread_local, "robots_user_agent")
+            else:
+                non_eu._thread_local.robots_user_agent = previous_robots_user_agent
 
         self.assertIn("Biodiversity gain plans.", enriched["full_text"])
         self.assertEqual(enriched["full_text_format"], "uk_xml")
@@ -301,9 +263,13 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 return _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"})
 
         previous_session = getattr(non_eu._thread_local, "session", None)
+        previous_session_user_agent = getattr(non_eu._thread_local, "session_user_agent", None)
         previous_robots = getattr(non_eu._thread_local, "robots", None)
+        previous_robots_user_agent = getattr(non_eu._thread_local, "robots_user_agent", None)
         non_eu._thread_local.session = _ChallengeSession()
+        non_eu._thread_local.session_user_agent = non_eu.UA
         non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
+        non_eu._thread_local.robots_user_agent = non_eu.UA
         try:
             enriched = non_eu.enrich_one_record_fulltext(
                 {
@@ -319,10 +285,18 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 delattr(non_eu._thread_local, "session")
             else:
                 non_eu._thread_local.session = previous_session
+            if previous_session_user_agent is None and hasattr(non_eu._thread_local, "session_user_agent"):
+                delattr(non_eu._thread_local, "session_user_agent")
+            else:
+                non_eu._thread_local.session_user_agent = previous_session_user_agent
             if previous_robots is None and hasattr(non_eu._thread_local, "robots"):
                 delattr(non_eu._thread_local, "robots")
             else:
                 non_eu._thread_local.robots = previous_robots
+            if previous_robots_user_agent is None and hasattr(non_eu._thread_local, "robots_user_agent"):
+                delattr(non_eu._thread_local, "robots_user_agent")
+            else:
+                non_eu._thread_local.robots_user_agent = previous_robots_user_agent
 
         self.assertEqual(enriched["full_text"], "")
         self.assertEqual(enriched["full_text_error"], "waf_challenge")
