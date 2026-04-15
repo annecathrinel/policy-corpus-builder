@@ -6,7 +6,7 @@ Version `0.1` is intentionally narrow:
 
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
-- run one supported live non-EU workflow for UK legislation discovery/metadata
+- run supported live non-EU workflows for UK legislation and Canada publications
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
 - export the final corpus to JSONL
@@ -17,7 +17,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
-- one supported live non-EU path: `non-eu` with `countries = ["UK"]`
+- supported live non-EU paths: `non-eu` with `countries = ["UK"]` and `countries = ["CA"]`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
 - one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
@@ -122,6 +122,20 @@ What it does not guarantee today:
 - source-specific diagnostics remain in `raw_metadata.raw_record`, including `full_text_error = "waf_challenge"` and `retrieval_status = "upstream_blocked"`
 
 For responsible use, set a clear contact-bearing user agent either through the environment variable `POLICY_CORPUS_BUILDER_USER_AGENT` or in `source.settings.user_agent` for the `non-eu` adapter.
+
+## Supported Canada Workflow
+
+The current supported Canada live workflow uses the `non-eu` adapter with `countries = ["CA"]`.
+
+What it supports today:
+
+- query-driven Canada publications discovery
+- full-text retrieval from the discovered document URLs
+- normalized JSONL export through the shared document model
+
+The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).
+
+The current Canada path is the strongest non-UK migrated workflow in this repository and is the next explicitly supported live non-EU path after UK.
 
 ## Normalized Document Model
 
