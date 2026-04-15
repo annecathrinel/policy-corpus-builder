@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,6 +58,45 @@ class _FakeSession:
 
 
 class NonEUCanadaTests(unittest.TestCase):
+    def test_extract_canada_ckan_rows_prefers_document_resources_from_package_metadata(self) -> None:
+        packages = [
+            {
+                "id": "pkg-1",
+                "name": "pkg-1",
+                "title": "Biodiversity in Canada: Commitments and Trends",
+                "resources": [
+                    {
+                        "id": "res-csv",
+                        "format": "CSV",
+                        "language": ["en"],
+                        "url": "https://open.canada.ca/data/dataset/pkg-1/resource/res-csv/download/data.csv",
+                    },
+                    {
+                        "id": "res-pdf",
+                        "format": "PDF",
+                        "language": ["en"],
+                        "url": "/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
+                    },
+                ],
+            }
+        ]
+
+        rows = non_eu._extract_canada_ckan_rows("biodiversity", packages, max_per_term=10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["url"],
+            "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
+        )
+        self.assertEqual(
+            rows[0]["doc_url"],
+            "https://open.canada.ca/data/en/dataset/pkg-1",
+        )
+        self.assertEqual(
+            rows[0]["title"],
+            "Biodiversity in Canada: Commitments and Trends",
+        )
+
     def test_clean_canada_title_removes_trailing_catalogue_identifier(self) -> None:
         self.assertEqual(
             non_eu.clean_canada_title(
@@ -106,6 +146,65 @@ class NonEUCanadaTests(unittest.TestCase):
         )
         self.assertTrue((df["jurisdiction"] == "Canada").all())
         self.assertTrue((df["source"] == "CA").all())
+
+    def test_fetch_canada_documents_uses_ckan_api_first(self) -> None:
+        ckan_payload = {
+            "success": True,
+            "result": {
+                "results": [
+                    {
+                        "id": "pkg-1",
+                        "name": "pkg-1",
+                        "title": "Biodiversity in Canada: Commitments and Trends",
+                        "resources": [
+                            {
+                                "id": "res-pdf",
+                                "format": "PDF",
+                                "language": "eng",
+                                "url": "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            if url == non_eu.CANADA_CKAN_PACKAGE_SEARCH:
+                return _FakeResponse(200, json.dumps(ckan_payload))
+            raise AssertionError(f"unexpected fallback URL: {url}")
+
+        with patch.object(non_eu, "safe_get", side_effect=fake_safe_get):
+            df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=1)
+
+        self.assertEqual(len(df), 1)
+        self.assertEqual(
+            df["url"].iloc[0],
+            "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
+        )
+        self.assertEqual(
+            df["doc_url"].iloc[0],
+            "https://open.canada.ca/data/en/dataset/pkg-1",
+        )
+
+    def test_fetch_canada_documents_falls_back_to_publications_search_when_ckan_yields_no_documents(self) -> None:
+        ckan_payload = {"success": True, "result": {"results": []}}
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            if url == non_eu.CANADA_CKAN_PACKAGE_SEARCH:
+                return _FakeResponse(200, json.dumps(ckan_payload))
+            if "search/search.html" in url:
+                return _FakeResponse(200, CANADA_SEARCH_HTML)
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with (
+            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
+            patch.object(non_eu.time, "sleep"),
+        ):
+            df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=2)
+
+        self.assertEqual(len(df), 2)
+        self.assertTrue(df["url"].iloc[0].startswith("https://www.publications.gc.ca/"))
 
     def test_should_skip_canada_url_flags_data_files(self) -> None:
         self.assertTrue(non_eu.should_skip_canada_url("https://www.publications.gc.ca/tbl/csv/example.csv"))

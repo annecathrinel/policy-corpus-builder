@@ -148,8 +148,9 @@ The current supported Canada live workflow uses the `non-eu` adapter with `count
 
 What it supports today:
 
-- query-driven Canada publications discovery
-- full-text retrieval from the discovered document URLs
+- Canada Open Government / CKAN API-first discovery for document-like resources
+- resource-metadata-based selection of direct PDF or HTML assets
+- publications.gc.ca landing-page extraction as fallback only when API metadata is insufficient
 - normalized JSONL export through the shared document model
 
 The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).

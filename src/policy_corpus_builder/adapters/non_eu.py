@@ -79,6 +79,7 @@ AUS_BASE = "https://www.legislation.gov.au"
 CA_BASE = "https://www.publications.gc.ca"
 NZ_HOSTS = ["www.legislation.govt.nz", "legislation.govt.nz"]
 US_BASE = "https://api.regulations.gov/v4"
+CANADA_CKAN_PACKAGE_SEARCH = "https://open.canada.ca/data/api/3/action/package_search"
 
 CANADA_SKIP_EXTS = {
     ".zip",
@@ -472,6 +473,187 @@ def _extract_canada_asset_links(landing_url: str, html: str) -> list[tuple[str, 
     return results
 
 
+def _canada_ckan_package_url(package: dict) -> str:
+    package_id = str(package.get("name") or package.get("id") or "").strip()
+    if not package_id:
+        return ""
+    return f"https://open.canada.ca/data/en/dataset/{package_id}"
+
+
+def _normalize_canada_ckan_resource_url(url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    return urljoin("https://open.canada.ca", text)
+
+
+def _canada_resource_is_probably_english(resource: dict) -> bool:
+    raw_language = resource.get("language")
+    if isinstance(raw_language, list):
+        language = ",".join(str(item).strip().lower() for item in raw_language if str(item).strip())
+    else:
+        language = str(raw_language or "").strip().lower()
+    if language in {"eng", "en", "english", ""}:
+        pass
+    elif language in {"fra", "fr", "french"}:
+        return False
+    url = _normalize_canada_ckan_resource_url(resource.get("url") or "").lower()
+    name = str(resource.get("name") or "").strip().lower()
+    negative_markers = ("_f.pdf", "-f.pdf", "_fra", "-fra", "/fr/", "francais", "français")
+    return not any(marker in url or marker in name for marker in negative_markers)
+
+
+def _score_canada_ckan_resource(resource: dict) -> int:
+    url = _normalize_canada_ckan_resource_url(resource.get("url") or "")
+    if not url or should_skip_canada_url(url):
+        return -10_000
+    fmt = str(resource.get("format") or "").strip().upper()
+    if fmt not in {"PDF", "HTML", "HTM"}:
+        return -10_000
+
+    score = 0
+    if fmt == "PDF":
+        score += 50
+    else:
+        score += 30
+
+    lower = url.lower()
+    host = (urlparse(url).netloc or "").lower()
+    if "open.canada.ca/data/dataset/" in lower and "/download/" in lower:
+        score += 40
+    elif host.endswith("publications.gc.ca"):
+        score += 35
+    elif host.endswith("canada.ca"):
+        score += 25
+
+    if _canada_resource_is_probably_english(resource):
+        score += 10
+    else:
+        score -= 100
+
+    return score
+
+
+def _extract_canada_ckan_rows(term: str, packages: list[dict], *, max_per_term: int) -> list[dict]:
+    rows: list[dict] = []
+    seen_urls: set[str] = set()
+    for package in packages:
+        resources = package.get("resources") or []
+        scored_resources = sorted(
+            (
+                (resource, _score_canada_ckan_resource(resource))
+                for resource in resources
+                if isinstance(resource, dict)
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        best_resource = next((resource for resource, score in scored_resources if score > 0), None)
+        if best_resource is None:
+            continue
+        resource_url = _normalize_canada_ckan_resource_url(best_resource.get("url") or "")
+        if not resource_url or resource_url in seen_urls:
+            continue
+        seen_urls.add(resource_url)
+        rows.append(
+            {
+                "jurisdiction": "Canada",
+                "source": "CA",
+                "matched_term": term,
+                "term": term,
+                "doc_url": _canada_ckan_package_url(package),
+                "url": resource_url,
+                "title": clean_canada_title(str(package.get("title") or best_resource.get("name") or "").strip()),
+                "doc_uid": str(best_resource.get("id") or package.get("id") or "").strip(),
+            }
+        )
+        if len(rows) >= max_per_term:
+            break
+    return rows
+
+
+def _fetch_canada_documents_via_ckan(
+    term: str,
+    *,
+    max_per_term: int,
+    session: requests.Session,
+    verify: bool | str,
+) -> list[dict]:
+    response = safe_get(
+        CANADA_CKAN_PACKAGE_SEARCH,
+        session=session,
+        verify=verify,
+        verbose_err=False,
+        params={
+            "q": term,
+            "fq": "type:info",
+            "rows": max(max_per_term * 3, 25),
+        },
+    )
+    if response is None or response.status_code != 200:
+        return []
+    try:
+        payload = json.loads(response.text or "{}")
+    except json.JSONDecodeError:
+        return []
+    if not payload.get("success"):
+        return []
+    packages = ((payload.get("result") or {}).get("results") or [])
+    if not isinstance(packages, list):
+        return []
+    return _extract_canada_ckan_rows(term, packages, max_per_term=max_per_term)
+
+
+def _fetch_canada_documents_via_publications_search(
+    term: str,
+    *,
+    max_per_term: int,
+    session: requests.Session,
+    verify: bool | str,
+    sleep_s: float,
+) -> list[dict]:
+    rows: list[dict] = []
+    q = quote(f'"{term}"' if " " in term else term, safe="")
+    url = f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&adof=on"
+    response = safe_get(url, session=session, verify=verify, verbose_err=False)
+    if response is None or response.status_code != 200:
+        return rows
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates: list[tuple[str, str]] = []
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"].strip()
+        if "search/search.html" in href:
+            continue
+        full = urljoin(CA_BASE, href)
+        if "publications.gc.ca" not in full:
+            continue
+        path = urlparse(full).path.lower()
+        if path.endswith("/home.html") or path.endswith("/browse/index.html") or "/search/" in path:
+            continue
+        if full.lower().endswith(".pdf") or "/site/eng/" in full:
+            candidates.append((full, anchor.get_text(" ").strip()))
+    kept = 0
+    for doc_url, title in list(dict.fromkeys(candidates)):
+        if kept >= max_per_term:
+            break
+        rows.append(
+            {
+                "jurisdiction": "Canada",
+                "source": "CA",
+                "matched_term": term,
+                "term": term,
+                "doc_url": doc_url,
+                "url": doc_url,
+                "title": title,
+            }
+        )
+        kept += 1
+    time.sleep(sleep_s)
+    return rows
+
+
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
@@ -720,42 +902,30 @@ def fetch_canada_documents(
     verify = certifi.where() if verify_ssl_with_certifi else True
     rows: list[dict] = []
     for term in search_terms:
-        q = quote(f'"{term}"' if " " in term else term, safe="")
-        url = f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&adof=on"
-        response = safe_get(url, session=sess, verify=verify, verbose_err=False)
-        if response is None or response.status_code != 200:
-            continue
-        soup = BeautifulSoup(response.text, "html.parser")
-        candidates: list[tuple[str, str]] = []
-        for anchor in soup.find_all("a", href=True):
-            href = anchor["href"].strip()
-            if "search/search.html" in href:
-                continue
-            full = urljoin(CA_BASE, href)
-            if "publications.gc.ca" not in full:
-                continue
-            path = urlparse(full).path.lower()
-            if path.endswith("/home.html") or path.endswith("/browse/index.html") or "/search/" in path:
-                continue
-            if full.lower().endswith(".pdf") or "/site/eng/" in full:
-                candidates.append((full, anchor.get_text(" ").strip()))
-        kept = 0
-        for doc_url, title in list(dict.fromkeys(candidates)):
-            if kept >= max_per_term:
-                break
-            rows.append(
-                {
-                    "jurisdiction": "Canada",
-                    "source": "CA",
-                    "matched_term": term,
-                    "term": term,
-                    "doc_url": doc_url,
-                    "url": doc_url,
-                    "title": title,
-                }
+        term_rows = _fetch_canada_documents_via_ckan(
+            term,
+            max_per_term=max_per_term,
+            session=sess,
+            verify=verify,
+        )
+        if len(term_rows) < max_per_term:
+            fallback_rows = _fetch_canada_documents_via_publications_search(
+                term,
+                max_per_term=max_per_term - len(term_rows),
+                session=sess,
+                verify=verify,
+                sleep_s=sleep_s,
             )
-            kept += 1
-        time.sleep(sleep_s)
+            seen_urls = {str(row.get("url") or "").strip() for row in term_rows}
+            for row in fallback_rows:
+                url = str(row.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                term_rows.append(row)
+                if len(term_rows) >= max_per_term:
+                    break
+        rows.extend(term_rows)
     return _normalize_raw_rows(rows)
 
 
