@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from html import unescape
+from io import BytesIO
 from pathlib import Path
 import json
 import os
@@ -21,6 +22,7 @@ from urllib.request import Request, urlopen
 from bs4 import BeautifulSoup
 import certifi
 import pandas as pd
+from pypdf import PdfReader
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -415,6 +417,75 @@ def clean_canada_full_text(text: str) -> str:
     )
     cleaned = _WS_RE.sub(" ", cleaned)
     return cleaned.strip()
+
+
+def _extract_canada_asset_links(landing_url: str, html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    seen: set[str] = set()
+    results: list[tuple[str, str]] = []
+
+    def add_candidate(url: str, mode: str) -> None:
+        if not url or url in seen:
+            return
+        seen.add(url)
+        results.append((url, mode))
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        anchor_text = _WS_RE.sub(" ", anchor.get_text(" ")).strip().lower()
+        if not href:
+            continue
+        full = urljoin(landing_url, href)
+        parsed = urlparse(full)
+        host = (parsed.netloc or "").lower()
+        lower = full.lower()
+        if not (host.endswith("publications.gc.ca") or host.endswith("canada.ca")):
+            continue
+        if lower.endswith("/publication.html"):
+            continue
+        if lower.endswith(".pdf"):
+            add_candidate(full, "pdf")
+        elif lower.endswith((".html", ".htm")):
+            if (
+                "/marcxml" in lower
+                or "/similarsubjects" in lower
+                or "/contact/" in lower
+                or "/browse/" in lower
+            ):
+                continue
+            if "html" in anchor_text:
+                add_candidate(full, "html")
+
+    if not results:
+        for match in re.findall(r"https?://[^\s\"'<>]+\.pdf(?:\?[^\s\"'<>]*)?", html or "", flags=re.IGNORECASE):
+            add_candidate(match, "pdf")
+        for match in re.findall(r"https?://[^\s\"'<>]+\.html?(?:\?[^\s\"'<>]*)?", html or "", flags=re.IGNORECASE):
+            parsed = urlparse(match)
+            host = (parsed.netloc or "").lower()
+            lower = match.lower()
+            if not (host.endswith("publications.gc.ca") or host.endswith("canada.ca")):
+                continue
+            if lower.endswith("/publication.html"):
+                continue
+            add_candidate(match, "html")
+
+    return results
+
+
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+    except Exception:
+        return ""
+    parts: list[str] = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text.strip():
+            parts.append(text.strip())
+    return _WS_RE.sub(" ", " ".join(parts)).strip()
 
 
 def infer_title(row: pd.Series | dict) -> str:
@@ -1217,7 +1288,16 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
                 deduped.append(candidate)
             return deduped
         return [(url, "html")]
-    if src in ("NZ", "CA"):
+    if src == "CA":
+        if not url:
+            return []
+        lower = url.lower()
+        if lower.endswith("/publication.html"):
+            return [(url, "ca_publication")]
+        if lower.endswith(".pdf"):
+            return [(url, "pdf")]
+        return [(url, "html")]
+    if src == "NZ":
         return [(url, "html")] if url else []
     if src == "US":
         api_self = (rec.get("api_self") or url or "").strip()
@@ -1277,6 +1357,73 @@ def enrich_one_record_fulltext(
                 continue
             if src == "CA" and should_skip_canada_url(candidate_url):
                 last_err = "skipped candidate: data file (zip/csv/xlsx/etc.)"
+                continue
+            if mode == "ca_publication":
+                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                response.raise_for_status()
+                asset_candidates = _extract_canada_asset_links(candidate_url, response.text)
+                for asset_url, asset_mode in asset_candidates:
+                    try:
+                        if obey_robots and not robots.allowed(asset_url):
+                            last_err = f"robots_disallow: {asset_url}"
+                            continue
+                        if should_skip_canada_url(asset_url):
+                            last_err = "skipped candidate: data file (zip/csv/xlsx/etc.)"
+                            continue
+                        if asset_mode == "pdf":
+                            asset_response = session.get(asset_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                            asset_response.raise_for_status()
+                            content_type = str(asset_response.headers.get("content-type", "") or "").lower()
+                            if "pdf" not in content_type and asset_response.content[:5].lower() != b"%pdf-":
+                                last_err = "canada_pdf_unavailable"
+                                continue
+                            text = clean_canada_full_text(_extract_pdf_text(asset_response.content))
+                            if text:
+                                out["full_text"] = text
+                                out["full_text_url"] = asset_url
+                                out["full_text_format"] = "pdf"
+                                out["full_text_error"] = ""
+                                return out
+                            last_err = "canada_pdf_empty"
+                            continue
+                        asset_response = session.get(asset_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                        asset_response.raise_for_status()
+                        text = clean_canada_full_text(html_to_visible_text(asset_response.text))
+                        if text:
+                            out["full_text"] = text
+                            out["full_text_url"] = asset_url
+                            out["full_text_format"] = "html"
+                            out["full_text_error"] = ""
+                            return out
+                        last_err = "canada_asset_html_empty"
+                    except Exception as exc:
+                        last_err = f"{type(exc).__name__}: {exc}"
+                text = clean_canada_full_text(html_to_visible_text(response.text))
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "html"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "canada_landing_page_empty"
+                continue
+            if mode == "pdf":
+                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                response.raise_for_status()
+                content_type = str(response.headers.get("content-type", "") or "").lower()
+                if "pdf" not in content_type and response.content[:5].lower() != b"%pdf-":
+                    last_err = "pdf_unavailable"
+                    continue
+                text = _extract_pdf_text(response.content)
+                if src == "CA":
+                    text = clean_canada_full_text(text)
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "pdf"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "pdf_empty"
                 continue
             if mode == "us_api_json":
                 headers = dict(request_headers)
