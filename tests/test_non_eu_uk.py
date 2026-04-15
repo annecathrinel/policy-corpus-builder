@@ -33,6 +33,22 @@ DUCKDUCKGO_HTML = """
 </html>
 """
 
+UK_ATOM_FEED = """
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Search results</title>
+  <entry>
+    <title>The Environmental Targets (Biodiversity) (England) Regulations 2023</title>
+    <id>https://www.legislation.gov.uk/uksi/2023/91/contents/made</id>
+    <link rel="alternate" href="https://www.legislation.gov.uk/uksi/2023/91/contents/made" />
+  </entry>
+  <entry>
+    <title>Environment Act 2021</title>
+    <id>https://www.legislation.gov.uk/ukpga/2021/30/part/6</id>
+    <link rel="alternate" href="https://www.legislation.gov.uk/ukpga/2021/30/part/6" />
+  </entry>
+</feed>
+"""
+
 UK_XML = """
 <Legislation>
   <Metadata>
@@ -114,13 +130,48 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             ],
         )
 
+    def test_extract_uk_feed_links_decodes_atom_entries(self) -> None:
+        results = non_eu._extract_uk_feed_links(UK_ATOM_FEED)
+
+        self.assertEqual(
+            results,
+            [
+                (
+                    "https://www.legislation.gov.uk/uksi/2023/91",
+                    "The Environmental Targets (Biodiversity) (England) Regulations 2023",
+                ),
+                (
+                    "https://www.legislation.gov.uk/ukpga/2021/30",
+                    "Environment Act 2021",
+                ),
+            ],
+        )
+
     def test_uk_contents_url_preserves_contents_view_separately(self) -> None:
         self.assertEqual(
             non_eu.uk_contents_url("https://www.legislation.gov.uk/uksi/2023/91/contents/made"),
             "https://www.legislation.gov.uk/uksi/2023/91/contents",
         )
 
-    def test_fetch_uk_documents_uses_search_fallback_when_direct_search_is_challenged(self) -> None:
+    def test_fetch_uk_documents_uses_atom_feed_when_available(self) -> None:
+        feed_response = _FakeResponse(200, UK_ATOM_FEED)
+
+        with (
+            patch.object(non_eu, "safe_get", return_value=feed_response),
+            patch.object(non_eu.time, "sleep"),
+        ):
+            df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10)
+
+        self.assertEqual(len(df), 2)
+        self.assertEqual(
+            sorted(df["url"].tolist()),
+            [
+                "https://www.legislation.gov.uk/ukpga/2021/30",
+                "https://www.legislation.gov.uk/uksi/2023/91",
+            ],
+        )
+
+    def test_fetch_uk_documents_uses_search_fallback_when_feed_is_challenged(self) -> None:
         challenged_response = _FakeResponse(
             202,
             "",
@@ -192,8 +243,11 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         self.assertNotIn("<Title>", text)
 
     def test_enrich_one_record_fulltext_uses_uk_xml_when_available(self) -> None:
+        captured_headers: list[dict[str, str]] = []
+
         class _XmlSession:
             def get(self, url, *args, **kwargs):
+                captured_headers.append(dict(kwargs.get("headers", {})))
                 if url.endswith("/data.xml"):
                     return _FakeResponse(200, UK_XML)
                 return _FakeResponse(404, "")
@@ -227,6 +281,18 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         self.assertEqual(
             enriched["full_text_url"],
             "https://www.legislation.gov.uk/ukpga/2021/30/data.xml",
+        )
+        self.assertEqual(
+            captured_headers[0]["User-Agent"],
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        )
+        self.assertEqual(
+            captured_headers[0]["Accept"],
+            "application/xml,text/xml;q=0.9,*/*;q=0.8",
+        )
+        self.assertEqual(
+            captured_headers[0]["Accept-Language"],
+            "en-GB,en;q=0.9",
         )
 
     def test_enrich_one_record_fulltext_marks_waf_challenge_instead_of_html_empty(self) -> None:

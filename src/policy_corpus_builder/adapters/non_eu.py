@@ -41,6 +41,10 @@ except Exception:
 
 
 UA = os.getenv("POLICY_CORPUS_BUILDER_USER_AGENT", "policy-corpus-builder/0.1")
+UK_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+)
 
 
 def _headers_for(user_agent: str | None = None) -> dict[str, str]:
@@ -50,6 +54,18 @@ def _headers_for(user_agent: str | None = None) -> dict[str, str]:
         "Accept-Language": "en-GB,en;q=0.9",
         "Connection": "keep-alive",
     }
+
+
+def _uk_content_headers(*, user_agent: str | None = None, accept_xml: bool = False) -> dict[str, str]:
+    headers = {
+        "User-Agent": (user_agent or UK_BROWSER_UA).strip(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+    if accept_xml:
+        headers["Accept"] = "application/xml,text/xml;q=0.9,*/*;q=0.8"
+    return headers
 
 
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"}
@@ -216,6 +232,17 @@ def _is_uk_search_challenge_response(response: requests.Response | None) -> bool
     return response.status_code == 202 or waf_action == "challenge"
 
 
+def build_uk_search_feed_url(term: str, *, page: int = 1) -> str:
+    query = f'"{term}"' if " " in term else term
+    params: list[tuple[str, str]] = [("text", query)]
+    for dataset in UK_DATASETS:
+        params.append(("type", dataset))
+    if page > 1:
+        params.append(("page", str(page)))
+    query_string = "&".join(f"{quote(key)}={quote(value)}" for key, value in params)
+    return f"{UK_BASE}/search/data.feed?{query_string}"
+
+
 def _looks_like_uk_document_href(href: str) -> bool:
     parsed = urlparse(urljoin(UK_BASE, href))
     if parsed.netloc and "legislation.gov.uk" not in parsed.netloc.lower():
@@ -249,6 +276,45 @@ def _extract_uk_search_result_links(html: str) -> list[tuple[str, str]]:
         seen.add(doc_url)
         title = anchor.get_text(" ").strip()
         results.append((doc_url, title))
+
+    return results
+
+
+def _extract_uk_feed_links(xml_text: str) -> list[tuple[str, str]]:
+    try:
+        root = ET.fromstring(xml_text or "")
+    except ET.ParseError:
+        return []
+
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+        title = ""
+        title_element = entry.find("{http://www.w3.org/2005/Atom}title")
+        if title_element is not None and title_element.text:
+            title = unescape(title_element.text.strip())
+
+        href = ""
+        for link in entry.findall("{http://www.w3.org/2005/Atom}link"):
+            href_candidate = str(link.get("href", "") or "").strip()
+            rel = str(link.get("rel", "") or "").strip().lower()
+            if not href_candidate:
+                continue
+            if rel in {"alternate", ""} and _looks_like_uk_document_href(href_candidate):
+                href = href_candidate
+                break
+        if not href:
+            id_element = entry.find("{http://www.w3.org/2005/Atom}id")
+            if id_element is not None and id_element.text and _looks_like_uk_document_href(id_element.text):
+                href = id_element.text.strip()
+        if not href:
+            continue
+
+        doc_url = canonicalize_uk_doc_url(href)
+        if doc_url in seen:
+            continue
+        seen.add(doc_url)
+        results.append((doc_url, clean_uk_title(title)))
 
     return results
 
@@ -557,16 +623,13 @@ def fetch_uk_documents(
         seen_urls: set[str] = set()
         used_search_fallback = False
         while kept < max_per_term:
-            q = f'"{term}"' if " " in term else term
-            url = f"{UK_BASE}/all?text={quote(q)}"
-            if page > 1:
-                url += f"&page={page}"
+            url = build_uk_search_feed_url(term, page=page)
             response = safe_get(url, session=sess, verify=verify, verbose_err=False)
             if response is None:
                 break
             page_results = []
             if response.status_code == 200 and not _is_uk_search_challenge_response(response):
-                page_results = _extract_uk_search_result_links(response.text)
+                page_results = _extract_uk_feed_links(response.text)
             elif not used_search_fallback:
                 page_results = _fetch_uk_search_results_via_duckduckgo(term)
                 used_search_fallback = True
@@ -1014,7 +1077,6 @@ def aggregate_one_row_per_doc(records: list[dict]) -> list[dict]:
         out.append(value)
     return out
 
-
 def split_by_country(raw_records: list[dict]) -> dict[str, list[dict]]:
     by_country: defaultdict[str, list[dict]] = defaultdict(list)
     for rec in raw_records:
@@ -1278,7 +1340,7 @@ def enrich_one_record_fulltext(
     if not candidates:
         out["full_text_error"] = "no_url_candidate"
         return out
-    request_headers = _headers_for(user_agent)
+    request_headers = _uk_content_headers(user_agent=user_agent) if src == "UK" else _headers_for(user_agent)
     session = _get_thread_session(user_agent)
     robots = _get_thread_robots(user_agent)
     last_err = ""
@@ -1310,7 +1372,7 @@ def enrich_one_record_fulltext(
                     candidate_url,
                     timeout=timeout,
                     verify=certifi.where(),
-                    headers={**request_headers, "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"},
+                    headers=_uk_content_headers(user_agent=user_agent, accept_xml=True),
                 )
                 if _is_waf_challenge_response(response):
                     last_err = "waf_challenge"
