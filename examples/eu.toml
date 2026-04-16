@@ -1,0 +1,25 @@
+[project]
+name = "non-eu-us-example"
+output_dir = "outputs/non-eu-us-example"
+
+[queries]
+inventory = "queries/non_eu_us_queries.txt"
+
+[[sources]]
+name = "us-regulations"
+adapter = "non-eu"
+enabled = true
+
+[sources.settings]
+countries = ["US"]
+max_per_term = 5
+max_workers = 2
+progress_every = 0
+obey_robots = true
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "url"]
+
+[export]
+formats = ["jsonl"]

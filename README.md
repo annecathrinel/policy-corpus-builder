@@ -6,8 +6,7 @@ Version `0.1` is intentionally narrow:
 
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
-- run supported live non-EU workflows for UK legislation, Canada publications, and Australia legislation
-- run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, and API-backed New Zealand legislation
+- run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, API-backed New Zealand legislation, and US Regulations.gov documents
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
 - export the final corpus to JSONL
@@ -18,8 +17,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
-- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, and `countries = ["AUS"]`
-- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, and `countries = ["NZ"]` with an API key
+- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
 - one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
@@ -183,6 +181,22 @@ New Zealand now supports two modes:
 - `nz_mode = "scrape"`: force the legacy no-key scraper path
 
 API mode is the preferred and fully supported path. Scraper mode is fallback-only and provisional because it still depends on the public site remaining accessible to scripted requests.
+
+## Supported US Workflow
+
+The current supported US live workflow uses the `non-eu` adapter with `countries = ["US"]`.
+
+What it supports today:
+
+- Regulations.gov document discovery through the official `/v4/documents` API
+- API-backed document metadata retrieval for normalized corpus text
+- normalized JSONL export through the shared document model
+
+What it requires:
+
+- `REGULATIONS_GOV_API_KEY`
+
+The supported US example config is [examples/non_eu_us.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_us.toml).
 
 ## Normalized Document Model
 

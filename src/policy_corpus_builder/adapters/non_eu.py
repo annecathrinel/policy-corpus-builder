@@ -1428,9 +1428,10 @@ def fetch_us_documents(
         kept = 0
         page = 1
         while kept < max_per_term:
+            request_page_size = max(5, min(page_size, max_per_term - kept))
             params = {
                 "filter[searchTerm]": f'"{term}"' if " " in term else term,
-                "page[size]": min(page_size, max_per_term - kept),
+                "page[size]": request_page_size,
                 "page[number]": page,
                 "api_key": api_key,
             }
@@ -2124,6 +2125,7 @@ def build_non_eu_fulltext_docs(
     obey_robots: bool = True,
     user_agent: str | None = None,
 ) -> pd.DataFrame:
+    resolved_us_api_key = us_api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
     if raw_hits_df.empty:
         return pd.DataFrame(
             columns=["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source"]
@@ -2131,7 +2133,7 @@ def build_non_eu_fulltext_docs(
     grouped_docs = aggregate_one_row_per_doc(raw_hits_df.to_dict(orient="records"))
     enriched = add_full_texts_parallel(
         grouped_docs,
-        us_api_key=us_api_key,
+        us_api_key=resolved_us_api_key,
         max_workers=max_workers,
         progress_every=progress_every,
         obey_robots=obey_robots,
@@ -2237,18 +2239,20 @@ def run_non_eu_query_pipeline(
 ) -> NonEUQueryRun:
     """Run one real non-EU retrieval query through retrieval, full text, and harmonization."""
 
+    resolved_us_api_key = us_api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
+
     raw_hits_df, source_log_df = fetch_non_eu_all(
         [query_text],
         sources=countries,
         nz_api_key=nz_api_key,
         nz_mode=nz_mode,
-        us_api_key=us_api_key,
+        us_api_key=resolved_us_api_key,
         max_per_term=max_per_term,
         user_agent=user_agent,
     )
     fulltext_docs_df = build_non_eu_fulltext_docs(
         raw_hits_df,
-        us_api_key=us_api_key,
+        us_api_key=resolved_us_api_key,
         max_workers=max_workers,
         progress_every=progress_every,
         obey_robots=obey_robots,
