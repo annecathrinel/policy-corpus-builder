@@ -1,13 +1,13 @@
 [project]
-name = "non-eu-us-example"
-output_dir = "outputs/non-eu-us-example"
+name = "eu-example"
+output_dir = "outputs/eu-example"
 
 [queries]
-inventory = "queries/non_eu_us_queries.txt"
+inventory = "queries/eu_queries.txt"
 
 [[sources]]
-name = "us-regulations"
-adapter = "non-eu"
+name = "eu-regulations"
+adapter = "eurlex"
 enabled = true
 
 [sources.settings]
