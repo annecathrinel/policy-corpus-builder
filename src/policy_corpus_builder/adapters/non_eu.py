@@ -70,6 +70,16 @@ def _uk_content_headers(*, user_agent: str | None = None, accept_xml: bool = Fal
     return headers
 
 
+def _us_download_headers(*, detail_url: str, user_agent: str | None = None) -> dict[str, str]:
+    return {
+        "User-Agent": (user_agent or UK_BROWSER_UA).strip(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Referer": detail_url,
+    }
+
+
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"}
 DEFAULT_HEADERS = _headers_for()
 
@@ -2071,7 +2081,7 @@ def enrich_one_record_fulltext(
                             continue
                         download_response = session.get(
                             file_url,
-                            headers=request_headers,
+                            headers=_us_download_headers(detail_url=candidate_url, user_agent=user_agent),
                             timeout=timeout,
                             verify=certifi.where(),
                         )

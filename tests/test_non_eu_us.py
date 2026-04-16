@@ -140,6 +140,8 @@ class USNonEUWorkflowTests(unittest.TestCase):
         self.assertEqual(mocked.call_args.kwargs["us_api_key"], "env-key")
 
     def test_enrich_one_record_fulltext_prefers_us_download_file_over_metadata(self) -> None:
+        captured_download_headers: dict[str, str] = {}
+
         class _FakeResponse:
             def __init__(self, *, json_data=None, text="", content=b"", headers=None, status_code=200):
                 self._json_data = json_data
@@ -174,6 +176,7 @@ class USNonEUWorkflowTests(unittest.TestCase):
                         }
                     )
                 if url == "https://downloads.regulations.gov/ABC-0001/content.htm":
+                    captured_download_headers.update(kwargs.get("headers", {}))
                     return _FakeResponse(text="<html><body><h1>Real document body</h1><p>Section text.</p></body></html>")
                 raise AssertionError(url)
 
@@ -197,6 +200,11 @@ class USNonEUWorkflowTests(unittest.TestCase):
         self.assertEqual(enriched["full_text_url"], "https://downloads.regulations.gov/ABC-0001/content.htm")
         self.assertEqual(enriched["full_text_format"], "html")
         self.assertIn("Real document body", enriched["full_text"])
+        self.assertEqual(
+            captured_download_headers["Referer"],
+            "https://api.regulations.gov/v4/documents/ABC-0001",
+        )
+        self.assertIn("Mozilla/5.0", captured_download_headers["User-Agent"])
 
 
 if __name__ == "__main__":
