@@ -12,10 +12,9 @@ enabled = true
 
 [sources.settings]
 countries = ["NZ"]
-nz_mode = "auto"
-nz_api_key_env = "NZ_LEGISLATION_API_KEY"
-max_per_term = 25
-max_workers = 4
+max_per_term = 500
+max_pages = 5
+max_workers = 8
 progress_every = 0
 obey_robots = true
 

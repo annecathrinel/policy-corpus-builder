@@ -699,6 +699,57 @@ def _extract_canada_asset_links(landing_url: str, html: str) -> list[tuple[str, 
     return results
 
 
+def _extract_aus_embedded_text_assets(wrapper_url: str, html: str) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    wrapper_parsed = urlparse(wrapper_url)
+    wrapper_parts = [part for part in wrapper_parsed.path.split("/") if part]
+    doc_id = wrapper_parts[0] if wrapper_parts else ""
+    seen: set[str] = set()
+    ranked: list[tuple[int, str]] = []
+
+    def add_candidate(candidate_url: str) -> None:
+        parsed = urlparse(candidate_url)
+        parts = [part for part in parsed.path.split("/") if part]
+        lower = candidate_url.lower()
+        if parsed.netloc.lower() != wrapper_parsed.netloc.lower():
+            return
+        if doc_id and (not parts or parts[0] != doc_id):
+            return
+        if not ("/text/original/epub/" in lower or "/text/1/epub/" in lower or re.search(r"/text/\d+/epub/", lower)):
+            return
+        match = re.search(r"/document_(\d+)/document_\1\.html$", parsed.path, re.IGNORECASE)
+        if not match:
+            return
+        normalized = parsed._replace(fragment="", query="").geturl()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        ranked.append((int(match.group(1)), normalized))
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        if not href:
+            continue
+        add_candidate(urljoin(wrapper_url, href))
+
+    for match in re.findall(
+        r"https?://[^\s\"'<>]+/document_\d+/document_\d+\.html(?:#[^\s\"'<>]*)?",
+        html or "",
+        flags=re.IGNORECASE,
+    ):
+        add_candidate(match)
+
+    for match in re.findall(
+        r"//[^\s\"'<>]+/document_\d+/document_\d+\.html(?:#[^\s\"'<>]*)?",
+        html or "",
+        flags=re.IGNORECASE,
+    ):
+        add_candidate(urljoin("https:", match))
+
+    ranked.sort(key=lambda item: item[0])
+    return [url for _, url in ranked]
+
+
 def _canada_ckan_package_url(package: dict) -> str:
     package_id = str(package.get("name") or package.get("id") or "").strip()
     if not package_id:
@@ -1686,10 +1737,10 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
         doc_url = (rec.get("doc_url") or url or "").strip()
         candidates: list[tuple[str, str]] = []
         if text_url:
-            candidates.append((text_url, "html"))
+            candidates.append((text_url, "aus_text_page"))
         if doc_url:
             if not doc_url.rstrip("/").endswith("/text"):
-                candidates.append((doc_url.rstrip("/") + "/text", "html"))
+                candidates.append((doc_url.rstrip("/") + "/text", "aus_text_page"))
             candidates.append((doc_url, "html"))
         return candidates
     if src == "UK":
@@ -1802,6 +1853,41 @@ def enrich_one_record_fulltext(
                 continue
             if src == "CA" and should_skip_canada_url(candidate_url):
                 last_err = "skipped candidate: data file (zip/csv/xlsx/etc.)"
+                continue
+            if mode == "aus_text_page":
+                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                response.raise_for_status()
+                asset_urls = _extract_aus_embedded_text_assets(candidate_url, response.text)
+                if asset_urls:
+                    try:
+                        parts: list[str] = []
+                        for asset_url in asset_urls:
+                            if obey_robots and not robots.allowed(asset_url):
+                                last_err = f"robots_disallow: {asset_url}"
+                                continue
+                            asset_response = session.get(asset_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                            asset_response.raise_for_status()
+                            text = html_to_visible_text(asset_response.text)
+                            if text:
+                                parts.append(text)
+                        combined = "\n\n".join(part for part in parts if part).strip()
+                        if combined:
+                            out["full_text"] = combined
+                            out["full_text_url"] = asset_urls[0] if len(asset_urls) == 1 else json.dumps(asset_urls, ensure_ascii=False)
+                            out["full_text_format"] = "html"
+                            out["full_text_error"] = ""
+                            return out
+                        last_err = "aus_embedded_html_empty"
+                    except Exception as exc:
+                        last_err = f"{type(exc).__name__}: {exc}"
+                text = html_to_visible_text(response.text)
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "html"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "html_empty"
                 continue
             if mode == "ca_publication":
                 response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
