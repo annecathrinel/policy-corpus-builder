@@ -14,6 +14,7 @@ env/
 
 # Project-generated artifacts
 outputs/
+.cache/
 emb_cache/
 docs_df_cleaned/
 
