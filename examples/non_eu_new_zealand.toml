@@ -1,0 +1,27 @@
+[project]
+name = "non-eu-new-zealand-example"
+output_dir = "outputs/non-eu-new-zealand-example"
+
+[queries]
+inventory = "queries/non_eu_new_zealand_queries.txt"
+
+[[sources]]
+name = "new-zealand-legislation"
+adapter = "non-eu"
+enabled = true
+
+[sources.settings]
+countries = ["NZ"]
+nz_mode = "auto"
+nz_api_key_env = "NZ_LEGISLATION_API_KEY"
+max_per_term = 25
+max_workers = 4
+progress_every = 0
+obey_robots = true
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "url"]
+
+[export]
+formats = ["jsonl"]

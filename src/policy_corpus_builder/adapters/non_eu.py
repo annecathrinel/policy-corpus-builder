@@ -78,6 +78,7 @@ UK_DATASETS = ("ukpga", "uksi", "ukla", "asp", "anaw", "wsi", "ssi", "nisr", "ni
 AUS_BASE = "https://www.legislation.gov.au"
 CA_BASE = "https://www.publications.gc.ca"
 NZ_HOSTS = ["www.legislation.govt.nz", "legislation.govt.nz"]
+NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 CANADA_CKAN_PACKAGE_SEARCH = "https://open.canada.ca/data/api/3/action/package_search"
 
@@ -246,7 +247,18 @@ def build_aus_search_url(term: str) -> str:
 
 
 def nz_search_url(base: str, term: str, page: int = 1) -> str:
-    # keep the manual pattern you were using
+    query = "&".join(
+        [
+            f"search_term={quote(term)}",
+            "search_field=content",
+            f"page={page}",
+            "per_page=20",
+        ]
+    )
+    return f"{base.rstrip('/')}/works?{query}"
+
+
+def nz_legacy_search_url(base: str, term: str, page: int = 1) -> str:
     q = term.replace(" ", "+")
     return (
         f'https://{base}/items/?search_field=content&search_term="{q}"&as%5Bty%5D%5B%5D=act&as%5Bty%5D%5B%5D=secondary_legislation'
@@ -266,6 +278,222 @@ def nz_search_url(base: str, term: str, page: int = 1) -> str:
 
 def is_valid_nz_legislation_url(url: str) -> bool:
     return bool(re.search(r"https?://(www\.)?legislation\.govt\.nz/(act|regulation|bill)/", url or "", re.I))
+
+
+def _nz_api_headers(api_key: str, *, user_agent: str | None = None) -> dict[str, str]:
+    headers = _headers_for(user_agent)
+    headers["X-Api-Key"] = api_key.strip()
+    headers["Accept"] = "application/json"
+    return headers
+
+
+def _nz_pick_format_url(formats: list[dict], preferred_type: str) -> str:
+    for item in formats:
+        if str(item.get("type") or "").strip().lower() == preferred_type:
+            return str(item.get("url") or "").strip()
+    return ""
+
+
+def _extract_nz_api_rows(term: str, payload: dict, *, max_per_term: int) -> list[dict]:
+    results = payload.get("results") or []
+    if not isinstance(results, list):
+        return []
+
+    rows: list[dict] = []
+    seen_urls: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        version = result.get("latest_matching_version") or {}
+        if not isinstance(version, dict):
+            continue
+        formats = version.get("formats") or []
+        if not isinstance(formats, list):
+            formats = []
+
+        html_url = _nz_pick_format_url(formats, "html")
+        pdf_url = _nz_pick_format_url(formats, "pdf")
+        xml_url = _nz_pick_format_url(formats, "xml")
+        canonical_doc_url = html_url or pdf_url or xml_url
+        if not canonical_doc_url or canonical_doc_url in seen_urls:
+            continue
+        seen_urls.add(canonical_doc_url)
+
+        rows.append(
+            {
+                "jurisdiction": "New Zealand",
+                "source": "NZ",
+                "matched_term": term,
+                "term": term,
+                "doc_url": canonical_doc_url,
+                "url": canonical_doc_url,
+                "title": str(version.get("title") or "").strip(),
+                "doc_uid": str(version.get("version_id") or result.get("work_id") or "").strip(),
+                "text_url": html_url,
+                "pdf_url": pdf_url,
+                "xml_url": xml_url,
+            }
+        )
+        if len(rows) >= max_per_term:
+            break
+    return rows
+
+
+def _fetch_nz_documents_via_legacy_site(
+    search_terms: list[str],
+    *,
+    max_per_term: int,
+    session: requests.Session,
+    sleep_s: float,
+    verify: bool | str,
+    max_pages: int,
+    verbose: bool,
+    return_diagnostics: bool,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    rows: list[dict] = []
+    diagnostics: list[dict] = []
+    host = next((candidate for candidate in NZ_HOSTS if dns_check(candidate)), None)
+    if host is None:
+        if verbose:
+            print("[NZ] No NZ hosts resolve via DNS on this machine/network right now. Skipping NZ.")
+        diag_df = pd.DataFrame(
+            [
+                {
+                    "host": "",
+                    "term": "",
+                    "page": 0,
+                    "status_code": None,
+                    "candidates_found": 0,
+                    "new_urls_kept": 0,
+                    "kept_total": 0,
+                    "stop_reason": "no_resolvable_host",
+                    "request_url": "",
+                    "mode": "scrape",
+                }
+            ]
+        )
+        empty = _normalize_raw_rows(rows)
+        return (empty, diag_df) if return_diagnostics else empty
+    if verbose:
+        print(f"[NZ] Using legacy site fallback host: {host}")
+    for term in search_terms:
+        kept = 0
+        seen_urls: set[str] = set()
+        if verbose:
+            print(f"\n[NZ] term='{term}' START (scrape fallback)")
+        for page in range(1, max_pages + 1):
+            request_url = nz_legacy_search_url(host, term, page=page)
+            response = safe_get(request_url, session=session, verify=verify, verbose_err=False)
+            if response is None:
+                diagnostics.append(
+                    {
+                        "host": host,
+                        "term": term,
+                        "page": page,
+                        "status_code": None,
+                        "candidates_found": 0,
+                        "new_urls_kept": 0,
+                        "kept_total": kept,
+                        "stop_reason": "request_failed",
+                        "request_url": request_url,
+                        "mode": "scrape",
+                    }
+                )
+                break
+            if response.status_code != 200:
+                diagnostics.append(
+                    {
+                        "host": host,
+                        "term": term,
+                        "page": page,
+                        "status_code": response.status_code,
+                        "candidates_found": 0,
+                        "new_urls_kept": 0,
+                        "kept_total": kept,
+                        "stop_reason": f"http_{response.status_code}",
+                        "request_url": request_url,
+                        "mode": "scrape",
+                    }
+                )
+                break
+            soup = BeautifulSoup(response.text, "html.parser")
+            candidates = [
+                urljoin(f"https://{host}", anchor["href"]).split("#", 1)[0]
+                for anchor in soup.find_all("a", href=True)
+                if is_valid_nz_legislation_url(urljoin(f"https://{host}", anchor["href"]))
+            ]
+            candidates = list(dict.fromkeys(candidates))
+            if not candidates:
+                diagnostics.append(
+                    {
+                        "host": host,
+                        "term": term,
+                        "page": page,
+                        "status_code": response.status_code,
+                        "candidates_found": 0,
+                        "new_urls_kept": 0,
+                        "kept_total": kept,
+                        "stop_reason": "no_candidates",
+                        "request_url": request_url,
+                        "mode": "scrape",
+                    }
+                )
+                break
+            new_urls = [item for item in candidates if item not in seen_urls]
+            if not new_urls:
+                diagnostics.append(
+                    {
+                        "host": host,
+                        "term": term,
+                        "page": page,
+                        "status_code": response.status_code,
+                        "candidates_found": len(candidates),
+                        "new_urls_kept": 0,
+                        "kept_total": kept,
+                        "stop_reason": "no_new_docs",
+                        "request_url": request_url,
+                        "mode": "scrape",
+                    }
+                )
+                break
+            new_kept = 0
+            for doc_url in new_urls:
+                if kept >= max_per_term:
+                    break
+                seen_urls.add(doc_url)
+                rows.append(
+                    {
+                        "jurisdiction": "New Zealand",
+                        "source": "NZ",
+                        "matched_term": term,
+                        "term": term,
+                        "doc_url": doc_url,
+                        "url": doc_url,
+                        "title": "",
+                    }
+                )
+                kept += 1
+                new_kept += 1
+            diagnostics.append(
+                {
+                    "host": host,
+                    "term": term,
+                    "page": page,
+                    "status_code": response.status_code,
+                    "candidates_found": len(candidates),
+                    "new_urls_kept": new_kept,
+                    "kept_total": kept,
+                    "stop_reason": "continue" if kept < max_per_term else "max_per_term_reached",
+                    "request_url": request_url,
+                    "mode": "scrape",
+                }
+            )
+            if kept >= max_per_term:
+                break
+            time.sleep(sleep_s)
+    result_df = _normalize_raw_rows(rows)
+    diagnostics_df = pd.DataFrame(diagnostics)
+    return (result_df, diagnostics_df) if return_diagnostics else result_df
 
 
 def canonical_url(url: str) -> str:
@@ -930,11 +1158,14 @@ def fetch_canada_documents(
 def fetch_nz_documents(
     search_terms: list[str],
     *,
+    api_key: str | None = None,
+    mode: str = "auto",
     max_per_term: int = 500,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
     max_pages: int = 5,
+    user_agent: str | None = None,
     verbose: bool = True,
     return_diagnostics: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
@@ -942,48 +1173,71 @@ def fetch_nz_documents(
     verify = certifi.where() if verify is None else verify
     rows: list[dict] = []
     diagnostics: list[dict] = []
+    resolved_api_key = (api_key or "").strip()
+    resolved_mode = str(mode or "auto").strip().lower()
+    if resolved_mode not in {"auto", "api", "scrape"}:
+        raise ValueError("NZ retrieval mode must be one of: auto, api, scrape")
+    use_api = bool(resolved_api_key) and resolved_mode in {"auto", "api"}
     if verbose:
-        print("\n========== NZ retrieval (v2) ==========")
+        print("\n========== NZ retrieval ==========")
         print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | max_pages: {max_pages}")
-    host = next((candidate for candidate in NZ_HOSTS if dns_check(candidate)), None)
-    if host is None:
+    if not use_api:
+        if resolved_mode == "api":
+            if verbose:
+                print("[NZ] API mode requested but no NZ legislation API key is configured; skipping NZ.")
+            diag_df = pd.DataFrame(
+                [
+                    {
+                        "host": "api.legislation.govt.nz",
+                        "term": "",
+                        "page": 0,
+                        "status_code": 401,
+                        "candidates_found": 0,
+                        "new_urls_kept": 0,
+                        "kept_total": 0,
+                        "stop_reason": "missing_api_key",
+                        "request_url": f"{NZ_API_BASE}/works",
+                        "mode": "api",
+                    }
+                ]
+            )
+            empty = _normalize_raw_rows(rows)
+            return (empty, diag_df) if return_diagnostics else empty
         if verbose:
-            print("[NZ] No NZ hosts resolve via DNS on this machine/network right now. Skipping NZ.")
-        diag_df = pd.DataFrame(
-            [
-                {
-                    "host": "",
-                    "term": "",
-                    "page": 0,
-                    "status_code": None,
-                    "candidates_found": 0,
-                    "new_urls_kept": 0,
-                    "kept_total": 0,
-                    "stop_reason": "no_resolvable_host",
-                    "request_url": "",
-                }
-            ]
+            print("[NZ] No NZ API key configured; using legacy scraper fallback.")
+        return _fetch_nz_documents_via_legacy_site(
+            search_terms,
+            max_per_term=max_per_term,
+            session=sess,
+            sleep_s=sleep_s,
+            verify=verify,
+            max_pages=max_pages,
+            verbose=verbose,
+            return_diagnostics=return_diagnostics,
         )
-        empty = _normalize_raw_rows(rows)
-        return (empty, diag_df) if return_diagnostics else empty
     if verbose:
-        print(f"[NZ] Using host: {host}")
+        print("[NZ] Using official API: api.legislation.govt.nz/v0/works")
     for term in search_terms:
         kept = 0
-        seen_urls: set[str] = set()
         if verbose:
             print(f"\n[NZ] term='{term}' START")
         for page in range(1, max_pages + 1):
-            request_url = nz_search_url(host, term, page=page)
+            request_url = nz_search_url(NZ_API_BASE, term, page=page)
             if verbose:
                 print(f"[NZ] term='{term}' page={page} -> {request_url}")
-            response = safe_get(request_url, session=sess, verify=verify, verbose_err=False)
+            response = safe_get(
+                request_url,
+                session=sess,
+                verify=verify,
+                verbose_err=False,
+                headers=_nz_api_headers(resolved_api_key, user_agent=user_agent),
+            )
             if response is None:
                 if verbose:
                     print(f"[NZ] term='{term}' page={page} ERROR -> request failed; stopping this term")
                 diagnostics.append(
                     {
-                        "host": host,
+                        "host": "api.legislation.govt.nz",
                         "term": term,
                         "page": page,
                         "status_code": None,
@@ -992,6 +1246,7 @@ def fetch_nz_documents(
                         "kept_total": kept,
                         "stop_reason": "request_failed",
                         "request_url": request_url,
+                        "mode": "api",
                     }
                 )
                 break
@@ -1000,7 +1255,7 @@ def fetch_nz_documents(
                     print(f"[NZ] term='{term}' page={page} -> HTTP 403 blocked; skipping NZ term")
                 diagnostics.append(
                     {
-                        "host": host,
+                        "host": "api.legislation.govt.nz",
                         "term": term,
                         "page": page,
                         "status_code": 403,
@@ -1009,6 +1264,7 @@ def fetch_nz_documents(
                         "kept_total": kept,
                         "stop_reason": "http_403",
                         "request_url": request_url,
+                        "mode": "api",
                     }
                 )
                 break
@@ -1017,7 +1273,7 @@ def fetch_nz_documents(
                     print(f"[NZ] term='{term}' page={page} ERROR -> HTTP {response.status_code}; stopping this term")
                 diagnostics.append(
                     {
-                        "host": host,
+                        "host": "api.legislation.govt.nz",
                         "term": term,
                         "page": page,
                         "status_code": response.status_code,
@@ -1026,22 +1282,24 @@ def fetch_nz_documents(
                         "kept_total": kept,
                         "stop_reason": f"http_{response.status_code}",
                         "request_url": request_url,
+                        "mode": "api",
                     }
                 )
                 break
-            soup = BeautifulSoup(response.text, "html.parser")
-            candidates = [
-                urljoin(f"https://{host}", anchor["href"]).split("#", 1)[0]
-                for anchor in soup.find_all("a", href=True)
-                if is_valid_nz_legislation_url(urljoin(f"https://{host}", anchor["href"]))
-            ]
-            candidates = list(dict.fromkeys(candidates))
-            if not candidates:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            total_results = payload.get("total")
+            response_page = payload.get("page", page)
+            response_per_page = payload.get("per_page", len(payload.get("results") or []))
+            page_rows = _extract_nz_api_rows(term, payload, max_per_term=max_per_term - kept)
+            if not page_rows:
                 if verbose:
                     print(f"[NZ] term='{term}' page={page} -> no candidates; stopping")
                 diagnostics.append(
                     {
-                        "host": host,
+                        "host": "api.legislation.govt.nz",
                         "term": term,
                         "page": page,
                         "status_code": response.status_code,
@@ -1050,56 +1308,29 @@ def fetch_nz_documents(
                         "kept_total": kept,
                         "stop_reason": "no_candidates",
                         "request_url": request_url,
-                    }
-                )
-                break
-            new_urls = [item for item in candidates if item not in seen_urls]
-            if not new_urls:
-                if verbose:
-                    print(f"[NZ] term='{term}' page={page} -> 0 new docs; stopping")
-                diagnostics.append(
-                    {
-                        "host": host,
-                        "term": term,
-                        "page": page,
-                        "status_code": response.status_code,
-                        "candidates_found": len(candidates),
-                        "new_urls_kept": 0,
-                        "kept_total": kept,
-                        "stop_reason": "no_new_docs",
-                        "request_url": request_url,
+                        "mode": "api",
                     }
                 )
                 break
             new_kept = 0
-            for doc_url in new_urls:
+            for row in page_rows:
                 if kept >= max_per_term:
                     break
-                seen_urls.add(doc_url)
-                rows.append(
-                    {
-                        "jurisdiction": "New Zealand",
-                        "source": "NZ",
-                        "matched_term": term,
-                        "term": term,
-                        "doc_url": doc_url,
-                        "url": doc_url,
-                        "title": "",
-                    }
-                )
+                rows.append(row)
                 kept += 1
                 new_kept += 1
             diagnostics.append(
                 {
-                    "host": host,
+                    "host": "api.legislation.govt.nz",
                     "term": term,
                     "page": page,
                     "status_code": response.status_code,
-                    "candidates_found": len(candidates),
+                    "candidates_found": len(page_rows),
                     "new_urls_kept": new_kept,
                     "kept_total": kept,
                     "stop_reason": "continue" if kept < max_per_term else "max_per_term_reached",
                     "request_url": request_url,
+                    "mode": "api",
                 }
             )
             if verbose:
@@ -1107,6 +1338,16 @@ def fetch_nz_documents(
             if kept >= max_per_term:
                 if verbose:
                     print(f"[NZ] term='{term}' reached max_per_term={max_per_term}; stopping")
+                break
+            if (
+                isinstance(total_results, int)
+                and isinstance(response_page, int)
+                and isinstance(response_per_page, int)
+                and response_per_page > 0
+                and response_page * response_per_page >= total_results
+            ):
+                if verbose:
+                    print(f"[NZ] term='{term}' reached final API page; stopping")
                 break
             time.sleep(sleep_s)
         if verbose:
@@ -1177,8 +1418,11 @@ def fetch_non_eu_all(
     search_terms: list[str],
     *,
     sources: tuple[str, ...] = ("UK", "AUS", "NZ", "CA", "US"),
+    nz_api_key: str | None = None,
+    nz_mode: str = "auto",
     us_api_key: str | None = None,
     max_per_term: int = 500,
+    user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     session = build_session()
     verify_default = certifi.where()
@@ -1187,7 +1431,15 @@ def fetch_non_eu_all(
     source_map = {
         "UK": lambda: fetch_uk_documents(search_terms, max_per_term=max_per_term, session=session, verify=verify_default),
         "AUS": lambda: fetch_aus_documents(search_terms, max_per_term=max_per_term, session=session, verify=verify_default),
-        "NZ": lambda: fetch_nz_documents(search_terms, max_per_term=max_per_term, session=session, verify=verify_default),
+        "NZ": lambda: fetch_nz_documents(
+            search_terms,
+            api_key=nz_api_key,
+            mode=nz_mode,
+            max_per_term=max_per_term,
+            session=session,
+            verify=verify_default,
+            user_agent=user_agent,
+        ),
         "CA": lambda: fetch_canada_documents(search_terms, max_per_term=max_per_term, session=session),
         "US": lambda: fetch_us_documents(search_terms, api_key=us_api_key, max_per_term=max_per_term, session=session),
     }
@@ -1230,7 +1482,19 @@ def aggregate_one_row_per_doc(records: list[dict]) -> list[dict]:
         if term:
             current["matched_terms"].add(term)
         current["title"] = pick_better(current.get("title", ""), rec.get("title", ""))
-        for col in ["lang", "celex", "date", "format", "public_timestamp", "description", "doc_url", "text_url", "api_self"]:
+        for col in [
+            "lang",
+            "celex",
+            "date",
+            "format",
+            "public_timestamp",
+            "description",
+            "doc_url",
+            "text_url",
+            "xml_url",
+            "pdf_url",
+            "api_self",
+        ]:
             if not current.get(col) and rec.get(col):
                 current[col] = rec[col]
         current.setdefault("sources", set()).add(rec.get("source"))
@@ -1466,7 +1730,20 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
             return [(url, "pdf")]
         return [(url, "html")]
     if src == "NZ":
-        return [(url, "html")] if url else []
+        candidates: list[tuple[str, str]] = []
+        xml_url = (rec.get("xml_url") or "").strip()
+        pdf_url = (rec.get("pdf_url") or "").strip()
+        text_url = (rec.get("text_url") or "").strip()
+        doc_url = (rec.get("doc_url") or url or "").strip()
+        if xml_url:
+            candidates.append((xml_url, "nz_xml"))
+        if pdf_url:
+            candidates.append((pdf_url, "pdf"))
+        if text_url:
+            candidates.append((text_url, "html"))
+        if doc_url and doc_url not in {candidate_url for candidate_url, _ in candidates}:
+            candidates.append((doc_url, "html"))
+        return candidates
     if src == "US":
         api_self = (rec.get("api_self") or url or "").strip()
         candidates = []
@@ -1627,6 +1904,26 @@ def enrich_one_record_fulltext(
                     out["full_text_error"] = ""
                     return out
                 last_err = "uk_xml_empty"
+                continue
+            if mode == "nz_xml":
+                response = session.get(
+                    candidate_url,
+                    timeout=timeout,
+                    verify=certifi.where(),
+                    headers=_headers_for(user_agent),
+                )
+                if _is_waf_challenge_response(response):
+                    last_err = "waf_challenge"
+                    continue
+                response.raise_for_status()
+                text = uk_xml_to_text(response.text)
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "nz_xml"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "nz_xml_empty"
                 continue
             response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
             if _is_waf_challenge_response(response):
@@ -1843,6 +2140,8 @@ def run_non_eu_query_pipeline(
     query_text: str,
     *,
     countries: tuple[str, ...] = ("UK",),
+    nz_api_key: str | None = None,
+    nz_mode: str = "auto",
     us_api_key: str | None = None,
     max_per_term: int = 100,
     max_workers: int = 4,
@@ -1855,8 +2154,11 @@ def run_non_eu_query_pipeline(
     raw_hits_df, source_log_df = fetch_non_eu_all(
         [query_text],
         sources=countries,
+        nz_api_key=nz_api_key,
+        nz_mode=nz_mode,
         us_api_key=us_api_key,
         max_per_term=max_per_term,
+        user_agent=user_agent,
     )
     fulltext_docs_df = build_non_eu_fulltext_docs(
         raw_hits_df,

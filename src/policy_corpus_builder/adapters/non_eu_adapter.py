@@ -48,6 +48,7 @@ class NonEUAdapter:
         self._require_non_negative_int(settings, "progress_every", default=0)
         self._require_bool(settings, "obey_robots", default=True)
         self._resolve_user_agent(settings)
+        nz_mode = self._resolve_nz_mode(settings)
 
         if "US" in countries:
             api_key = self._resolve_us_api_key(settings)
@@ -56,6 +57,14 @@ class NonEUAdapter:
                 raise AdapterConfigError(
                     "non-eu adapter requires a US API key when countries includes 'US'. "
                     f"Set environment variable {env_name} or remove 'US' from countries."
+                )
+        if "NZ" in countries and nz_mode == "api":
+            api_key = self._resolve_nz_api_key(settings)
+            if not api_key:
+                env_name = self._resolve_nz_api_key_env(settings)
+                raise AdapterConfigError(
+                    "non-eu adapter requires a New Zealand legislation API key when countries includes 'NZ' and source.settings.nz_mode is 'api'. "
+                    f"Set environment variable {env_name}, switch nz_mode to 'auto' or 'scrape', or remove 'NZ' from countries."
                 )
 
     def collect(
@@ -72,6 +81,8 @@ class NonEUAdapter:
         workflow_result = run_non_eu_query_pipeline(
             query.text,
             countries=self._resolve_countries(settings),
+            nz_api_key=self._resolve_nz_api_key(settings),
+            nz_mode=self._resolve_nz_mode(settings),
             us_api_key=self._resolve_us_api_key(settings),
             max_per_term=self._require_positive_int(settings, "max_per_term", default=100),
             max_workers=self._require_positive_int(settings, "max_workers", default=4),
@@ -175,6 +186,31 @@ class NonEUAdapter:
     def _resolve_us_api_key(self, settings: dict[str, Any]) -> str | None:
         env_name = self._resolve_us_api_key_env(settings)
         return os.getenv(env_name) or None
+
+    def _resolve_nz_api_key_env(self, settings: dict[str, Any]) -> str:
+        raw_value = settings.get("nz_api_key_env", "NZ_LEGISLATION_API_KEY")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_api_key_env must be a non-empty string."
+            )
+        return raw_value.strip()
+
+    def _resolve_nz_api_key(self, settings: dict[str, Any]) -> str | None:
+        env_name = self._resolve_nz_api_key_env(settings)
+        return os.getenv(env_name) or None
+
+    def _resolve_nz_mode(self, settings: dict[str, Any]) -> str:
+        raw_value = settings.get("nz_mode", "auto")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
+            )
+        cleaned = raw_value.strip().lower()
+        if cleaned not in {"auto", "api", "scrape"}:
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
+            )
+        return cleaned
 
     def _resolve_user_agent(self, settings: dict[str, Any]) -> str | None:
         raw_value = settings.get("user_agent")

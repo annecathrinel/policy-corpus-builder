@@ -24,6 +24,27 @@ class NonEUOutputContractTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "source.settings.user_agent"):
             adapter.validate_source_config(source, base_path=Path("."))
 
+    def test_non_eu_adapter_requires_nz_api_key_when_nz_mode_is_api(self) -> None:
+        adapter = NonEUAdapter()
+        source = SourceConfig(
+            name="nz-legislation",
+            adapter="non-eu",
+            settings={"countries": ["NZ"], "nz_mode": "api"},
+        )
+
+        with self.assertRaisesRegex(Exception, "New Zealand legislation API key"):
+            adapter.validate_source_config(source, base_path=Path("."))
+
+    def test_non_eu_adapter_allows_nz_auto_mode_without_api_key(self) -> None:
+        adapter = NonEUAdapter()
+        source = SourceConfig(
+            name="nz-legislation",
+            adapter="non-eu",
+            settings={"countries": ["NZ"], "nz_mode": "auto"},
+        )
+
+        adapter.validate_source_config(source, base_path=Path("."))
+
     def test_non_eu_adapter_promotes_cleaned_full_text_and_trims_legacy_fields(self) -> None:
         adapter = NonEUAdapter()
         source = SourceConfig(name="uk-legislation", adapter="non-eu")

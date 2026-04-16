@@ -7,6 +7,7 @@ Version `0.1` is intentionally narrow:
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
 - run supported live non-EU workflows for UK legislation, Canada publications, and Australia legislation
+- run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, and API-backed New Zealand legislation
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
 - export the final corpus to JSONL
@@ -18,6 +19,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
 - supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, and `countries = ["AUS"]`
+- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, and `countries = ["NZ"]` with an API key
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
 - one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
@@ -54,6 +56,7 @@ cp .env.example .env
 Currently relevant environment variables include:
 
 - `REGULATIONS_GOV_API_KEY`
+- `NZ_LEGISLATION_API_KEY`
 - `EURLEX_USER`
 - `EURLEX_WEB_PASS`
 - `EURLEX_WS_USER`
@@ -156,6 +159,30 @@ What it supports today:
 The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).
 
 The current Canada path is the strongest non-UK migrated workflow in this repository and is the next explicitly supported live non-EU path after UK.
+
+## Supported New Zealand Workflow
+
+The current supported New Zealand live workflow uses the `non-eu` adapter with `countries = ["NZ"]`.
+
+What it supports today:
+
+- official `api.legislation.govt.nz` discovery via `/v0/works`
+- API-returned version format selection for XML, PDF, and HTML
+- normalized JSONL export through the shared document model
+
+What it requires:
+
+- for fully supported API mode, an `NZ_LEGISLATION_API_KEY`
+
+The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml).
+
+New Zealand now supports two modes:
+
+- `nz_mode = "auto"`: use the official API when `NZ_LEGISLATION_API_KEY` is present; otherwise fall back to the legacy website scraper
+- `nz_mode = "api"`: require the API key and fail cleanly if it is missing
+- `nz_mode = "scrape"`: force the legacy no-key scraper path
+
+API mode is the preferred and fully supported path. Scraper mode is fallback-only and provisional because it still depends on the public site remaining accessible to scripted requests.
 
 ## Normalized Document Model
 
