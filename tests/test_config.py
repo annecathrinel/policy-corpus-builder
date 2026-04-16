@@ -26,6 +26,15 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.sources[0].adapter, "placeholder")
         self.assertEqual(config.export.formats, ("jsonl",))
 
+    def test_valid_eurlex_example_config_loads(self) -> None:
+        config = load_and_validate_config(Path("examples/eu.toml"))
+
+        self.assertEqual(config.project.name, "eurlex-example")
+        self.assertEqual(config.queries.inventory, "queries/eu_queries.txt")
+        self.assertEqual(config.sources[0].adapter, "eurlex")
+        self.assertEqual(config.sources[0].settings["fulltext_mode"], "supported_only")
+        self.assertEqual(config.export.formats, ("jsonl",))
+
     def test_config_summary_is_useful(self) -> None:
         config = load_and_validate_config(Path("examples/minimal.toml"))
         summary = format_config_summary(config)

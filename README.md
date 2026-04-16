@@ -6,6 +6,7 @@ Version `0.1` is intentionally narrow:
 
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
+- run one supported ordinary EUR-Lex workflow through the `eurlex` adapter
 - run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, API-backed New Zealand legislation, and US Regulations.gov documents
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
@@ -17,6 +18,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
+- one supported ordinary EUR-Lex adapter path: `eurlex`
 - supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
@@ -302,6 +304,25 @@ formats = ["jsonl"]
 ```
 
 The live UK example is [examples/non_eu_uk.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_uk.toml). For that workflow, `source.settings.user_agent` is optional but recommended.
+
+## Supported EUR-Lex Workflow
+
+The current supported EUR-Lex live workflow uses the `eurlex` adapter with the ordinary EU WebService search path plus ordinary EU CELEX full-text retrieval.
+
+What it supports today:
+
+- query-inventory-driven EUR-Lex WebService search
+- CELEX-based ordinary EU document consolidation
+- CELEX full-text retrieval for supported document types
+- normalized JSONL export through the shared document model
+
+What it requires:
+
+- `EURLEX_WS_USER` and `EURLEX_WS_PASS`
+
+Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatibility.
+
+The supported EUR-Lex example config is [examples/eu.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu.toml).
 
 ## Output
 

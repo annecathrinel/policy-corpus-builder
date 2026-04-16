@@ -1,25 +1,39 @@
 [project]
-name = "eu-example"
-output_dir = "outputs/eu-example"
+name = "eurlex-example"
+output_dir = "outputs/eurlex-example"
 
 [queries]
 inventory = "queries/eu_queries.txt"
 
 [[sources]]
-name = "eu-regulations"
+name = "eurlex-ordinary-eu"
 adapter = "eurlex"
 enabled = true
 
 [sources.settings]
-countries = ["US"]
-max_per_term = 5
-max_workers = 2
+search_language = "en"
+search_fields = ["TI", "TE"]
+expert_scope = "DTS_SUBDOM = ALL_ALL"
+fulltext_mode = "supported_only"
+page_size = 100
+max_pages = 20
+timeout_s = 45
+retry_5xx = 3
+min_interval_s = 1.6
+fulltext_retries = 4
+fulltext_min_interval_s = 2.0
+use_cache = true
+retry_failures = true
+cache_every = 50
 progress_every = 0
-obey_robots = true
+success_min_chars = 500
+cache_dir = ".cache/eurlex/example"
+webservice_user_env = "EURLEX_WS_USER"
+webservice_password_env = "EURLEX_WS_PASS"
 
 [normalization]
 deduplicate = true
-deduplicate_fields = ["title", "url"]
+deduplicate_fields = ["source_document_id", "title", "url"]
 
 [export]
 formats = ["jsonl"]
