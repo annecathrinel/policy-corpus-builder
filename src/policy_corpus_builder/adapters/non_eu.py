@@ -241,10 +241,8 @@ def build_uk_search_feed_url(term: str, *, page: int = 1) -> str:
 
 def build_aus_search_url(term: str) -> str:
     term = term.strip()
-    if " " in term:
-        term = f'""{term}""'
-    q = quote(term, safe="")
-    return f"{AUS_BASE}/search/text({q},nameandtext,contains)/pointintime(latest)/sort(searchcontexts%2Ftext%2Frelevance%20desc)"
+    quoted_term = quote(f'"{term}"', safe="")
+    return f"{AUS_BASE}/search/text({quoted_term},nameAndText,contains)/pointintime(Latest)"
 
 
 def nz_search_url(base: str, term: str, page: int = 1) -> str:

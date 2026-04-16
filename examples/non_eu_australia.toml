@@ -1,0 +1,25 @@
+[project]
+name = "non-eu-australia-example"
+output_dir = "outputs/non-eu-australia-example"
+
+[queries]
+items = ["biodiversity"]
+
+[[sources]]
+name = "australia-legislation"
+adapter = "non-eu"
+enabled = true
+
+[sources.settings]
+countries = ["AUS"]
+max_per_term = 25
+max_workers = 4
+progress_every = 0
+obey_robots = true
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["title", "url"]
+
+[export]
+formats = ["jsonl"]

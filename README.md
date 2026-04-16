@@ -6,7 +6,7 @@ Version `0.1` is intentionally narrow:
 
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
-- run supported live non-EU workflows for UK legislation and Canada publications
+- run supported live non-EU workflows for UK legislation, Canada publications, and Australia legislation
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
 - export the final corpus to JSONL
@@ -17,7 +17,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
-- supported live non-EU paths: `non-eu` with `countries = ["UK"]` and `countries = ["CA"]`
+- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, and `countries = ["AUS"]`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
 - one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)

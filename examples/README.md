@@ -5,6 +5,7 @@ Recommended starting points:
 - `local_file.toml`: the main end-to-end example config
 - `non_eu_uk.toml`: live non-EU retrieval example using the supported `non-eu` adapter
 - `non_eu_canada.toml`: live Canada retrieval example using the supported `non-eu` adapter
+- `non_eu_australia.toml`: live Australia retrieval example using the supported `non-eu` adapter
 - `fixtures/policies.jsonl`: fixture data for the `local-file` adapter
 - `queries/example_queries.txt`: example query inventory
 - `queries/non_eu_canada_queries.txt`: small live query inventory for the Canada workflow
@@ -20,6 +21,7 @@ Notes:
 
 - `non_eu_uk.toml` is a live network example and may take time to run.
 - `non_eu_canada.toml` is a live network example and may take time to run.
+- `non_eu_australia.toml` is a live network example and may take time to run.
 - The first supported non-EU workflow is intentionally narrow: it uses the `non-eu` adapter with `countries = ["UK"]`.
 - Canada is the next explicitly supported non-EU workflow after UK and currently has the strongest live full-text performance among the migrated non-UK paths.
 - The Canada workflow now prefers the Open Government / CKAN API for discovery and resource metadata, and only falls back to `publications.gc.ca` landing-page extraction when needed.
