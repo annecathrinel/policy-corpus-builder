@@ -1823,6 +1823,95 @@ def us_json_to_text(js: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _normalize_us_file_format_entries(
+    entries: list[dict] | None,
+    *,
+    source_kind: str,
+    attachment_title: str = "",
+    attachment_order: int = 0,
+) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        file_url = str(entry.get("fileUrl") or "").strip()
+        fmt = str(entry.get("format") or "").strip().lower()
+        if not file_url or not fmt:
+            continue
+        normalized.append(
+            {
+                "file_url": file_url,
+                "format": fmt,
+                "source_kind": source_kind,
+                "attachment_title": attachment_title,
+                "attachment_order": attachment_order,
+            }
+        )
+    return normalized
+
+
+def _score_us_download_candidate(candidate: dict[str, object]) -> tuple[int, int, int, int, str]:
+    file_url = str(candidate.get("file_url") or "")
+    fmt = str(candidate.get("format") or "").lower()
+    source_kind = str(candidate.get("source_kind") or "")
+    lower_url = file_url.lower()
+
+    source_score = 200 if source_kind == "document" else 100
+    format_score = {
+        "htm": 50,
+        "html": 50,
+        "txt": 45,
+        "pdf": 40,
+        "xml": 20,
+        "docx": 10,
+        "doc": 5,
+    }.get(fmt, -1000)
+    content_bonus = 20 if "content." in lower_url else 0
+    attachment_order = int(candidate.get("attachment_order") or 0)
+    attachment_bias = -attachment_order if source_kind == "attachment" else 0
+
+    return (source_score, format_score, content_bonus, attachment_bias, file_url)
+
+
+def extract_us_download_candidates(detail_payload: dict) -> list[dict[str, object]]:
+    data = detail_payload.get("data") or {}
+    if not isinstance(data, dict):
+        return []
+
+    candidates: list[dict[str, object]] = []
+    attrs = data.get("attributes") or {}
+    if isinstance(attrs, dict):
+        candidates.extend(
+            _normalize_us_file_format_entries(
+                attrs.get("fileFormats"),
+                source_kind="document",
+            )
+        )
+
+    included = detail_payload.get("included") or []
+    if isinstance(included, list):
+        for item in included:
+            if not isinstance(item, dict) or item.get("type") != "attachments":
+                continue
+            attachment_attrs = item.get("attributes") or {}
+            if not isinstance(attachment_attrs, dict):
+                continue
+            candidates.extend(
+                _normalize_us_file_format_entries(
+                    attachment_attrs.get("fileFormats"),
+                    source_kind="attachment",
+                    attachment_title=str(attachment_attrs.get("title") or "").strip(),
+                    attachment_order=int(attachment_attrs.get("docOrder") or 0),
+                )
+            )
+
+    deduped: dict[str, dict[str, object]] = {}
+    for candidate in sorted(candidates, key=_score_us_download_candidate, reverse=True):
+        file_url = str(candidate.get("file_url") or "")
+        deduped.setdefault(file_url, candidate)
+    return list(deduped.values())
+
+
 def enrich_one_record_fulltext(
     rec: dict,
     *,
@@ -1961,9 +2050,69 @@ def enrich_one_record_fulltext(
                 headers = dict(request_headers)
                 if us_api_key:
                     headers["X-Api-Key"] = us_api_key
-                response = session.get(candidate_url, headers=headers, timeout=timeout, verify=certifi.where())
+                response = session.get(
+                    candidate_url,
+                    headers=headers,
+                    params={"include": "attachments"},
+                    timeout=timeout,
+                    verify=certifi.where(),
+                )
                 response.raise_for_status()
-                text = us_json_to_text(response.json())
+                detail_payload = response.json()
+                file_candidates = extract_us_download_candidates(detail_payload)
+                for file_candidate in file_candidates:
+                    file_url = str(file_candidate.get("file_url") or "")
+                    file_format = str(file_candidate.get("format") or "").lower()
+                    if not file_url:
+                        continue
+                    try:
+                        if obey_robots and not robots.allowed(file_url):
+                            last_err = f"robots_disallow: {file_url}"
+                            continue
+                        download_response = session.get(
+                            file_url,
+                            headers=request_headers,
+                            timeout=timeout,
+                            verify=certifi.where(),
+                        )
+                        download_response.raise_for_status()
+                        if file_format in {"pdf"}:
+                            content_type = str(download_response.headers.get("content-type", "") or "").lower()
+                            if "pdf" not in content_type and download_response.content[:5].lower() != b"%pdf-":
+                                last_err = "us_pdf_unavailable"
+                                continue
+                            text = _extract_pdf_text(download_response.content)
+                            if text:
+                                out["full_text"] = text
+                                out["full_text_url"] = file_url
+                                out["full_text_format"] = "pdf"
+                                out["full_text_error"] = ""
+                                return out
+                            last_err = "us_pdf_empty"
+                            continue
+                        if file_format in {"htm", "html", "xml"}:
+                            text = html_to_visible_text(download_response.text)
+                            if text:
+                                out["full_text"] = text
+                                out["full_text_url"] = file_url
+                                out["full_text_format"] = "html"
+                                out["full_text_error"] = ""
+                                return out
+                            last_err = "us_html_empty"
+                            continue
+                        if file_format in {"txt"}:
+                            text = str(download_response.text or "").strip()
+                            if text:
+                                out["full_text"] = text
+                                out["full_text_url"] = file_url
+                                out["full_text_format"] = "txt"
+                                out["full_text_error"] = ""
+                                return out
+                            last_err = "us_txt_empty"
+                            continue
+                    except Exception as exc:
+                        last_err = f"{type(exc).__name__}: {exc}"
+                text = us_json_to_text(detail_payload)
                 if text:
                     out["full_text"] = text
                     out["full_text_url"] = candidate_url
