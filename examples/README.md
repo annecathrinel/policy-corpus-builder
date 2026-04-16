@@ -28,6 +28,7 @@ Notes:
 - `non_eu_australia.toml` is a live network example and may take time to run.
 - `non_eu_new_zealand.toml` is a live network example. It prefers API mode when `NZ_LEGISLATION_API_KEY` is present and otherwise falls back to the provisional scraper path.
 - `non_eu_us.toml` is a live network example and requires `REGULATIONS_GOV_API_KEY`.
+- The bundled US example query inventory is chosen to demonstrate file-backed Regulations.gov results rather than metadata-only fallback.
 - The first supported non-EU workflow is intentionally narrow: it uses the `non-eu` adapter with `countries = ["UK"]`.
 - Canada is the next explicitly supported non-EU workflow after UK and currently has the strongest live full-text performance among the migrated non-UK paths.
 - The Canada workflow now prefers the Open Government / CKAN API for discovery and resource metadata, and only falls back to `publications.gc.ca` landing-page extraction when needed.
