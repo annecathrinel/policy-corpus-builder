@@ -7,6 +7,7 @@ Version `0.1` is intentionally narrow:
 - load queries from a config file
 - read structured local policy records with the `local-file` adapter
 - run one supported ordinary EUR-Lex workflow through the `eurlex` adapter
+- run one supported EUR-Lex NIM workflow through the `eurlex-nim` adapter
 - run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, API-backed New Zealand legislation, and US Regulations.gov documents
 - normalize records into one shared `NormalizedDocument` model
 - deduplicate deterministically
@@ -19,6 +20,7 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 - one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
 - one real adapter: `local-file`
 - one supported ordinary EUR-Lex adapter path: `eurlex`
+- one supported EUR-Lex NIM adapter path: `eurlex-nim`
 - supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
@@ -323,6 +325,26 @@ What it requires:
 Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatibility.
 
 The supported EUR-Lex example config is [examples/eu.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu.toml).
+
+## Supported EUR-Lex NIM Workflow
+
+The current supported EUR-Lex NIM live workflow uses the `eurlex-nim` adapter.
+
+What it supports today:
+
+- CELEX-seeded national implementation retrieval for one EU legal act
+- query-seeded EUR-Lex act lookup followed by NIM retrieval for eligible legal acts
+- national measure record normalization into the shared document model
+- optional NIM full-text retrieval through the migrated EUR-Lex/NIM helper subset
+- normalized JSONL export through the shared document model
+
+What it requires:
+
+- `EURLEX_WS_USER` and `EURLEX_WS_PASS`
+
+Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatibility.
+
+The supported EUR-Lex NIM example config is [examples/eu_nim.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu_nim.toml).
 
 ## Output
 

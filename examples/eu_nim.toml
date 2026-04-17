@@ -1,0 +1,42 @@
+[project]
+name = "eurlex-nim-example"
+output_dir = "outputs/eurlex-nim-example"
+
+[queries]
+items = ["32014L0089"]
+
+[[sources]]
+name = "eurlex-nim-supported"
+adapter = "eurlex-nim"
+enabled = true
+
+[sources.settings]
+search_language = "en"
+search_fields = ["TI", "TE"]
+expert_scope = "DTS_SUBDOM = ALL_ALL"
+page_size = 20
+max_pages = 1
+timeout_s = 45
+retry_5xx = 3
+min_interval_s = 1.6
+nim_page_size = 100
+nim_sleep_s = 0.2
+fetch_full_text = true
+use_cache = true
+fulltext_connect_timeout_s = 15
+fulltext_read_timeout_s = 90
+fulltext_retries = 3
+fulltext_min_interval_s = 0.5
+cache_every = 50
+progress_every = 0
+success_min_chars = 500
+cache_dir = ".cache/eurlex_nim/example"
+webservice_user_env = "EURLEX_WS_USER"
+webservice_password_env = "EURLEX_WS_PASS"
+
+[normalization]
+deduplicate = true
+deduplicate_fields = ["source_document_id", "title", "url"]
+
+[export]
+formats = ["jsonl"]

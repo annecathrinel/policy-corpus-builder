@@ -15,6 +15,7 @@ ADAPTERS: dict[str, type[SourceAdapter]] = {
 
 LAZY_ADAPTERS: dict[str, tuple[str, str]] = {
     "eurlex": ("policy_corpus_builder.adapters.eurlex_adapter", "EurlexAdapter"),
+    "eurlex-nim": ("policy_corpus_builder.adapters.eurlex_nim_adapter", "EurlexNIMAdapter"),
     "non-eu": ("policy_corpus_builder.adapters.non_eu_adapter", "NonEUAdapter"),
 }
 
