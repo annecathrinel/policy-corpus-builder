@@ -375,6 +375,79 @@ class QueryAndPipelineTests(unittest.TestCase):
         self.assertEqual(len(documents), 1)
         self.assertEqual(documents[0].full_text, "Cleaned full text body.")
 
+    def test_eurlex_normalization_slims_raw_metadata_and_lightly_cleans_full_text(self) -> None:
+        source = SourceConfig(name="eurlex-source", adapter="eurlex")
+        query = Query(
+            text="nature restoration",
+            query_id="inventory-001",
+            origin="inventory",
+            source_path="queries/inventory.txt",
+        )
+
+        documents = normalize_adapter_results(
+            [
+                AdapterResult(
+                    payload={
+                        "document_id": "eurlex-source:EU:52022AR4206",
+                        "source_document_id": "52022AR4206",
+                        "title": "Opinion of the European Committee of the Regions on the EU Nature Restoration Law",
+                        "document_type": "Committee of the Regions opinion",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2023-02-09",
+                        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022AR4206",
+                        "download_url": "http://publications.europa.eu/resource/cellar/example/DOC_1",
+                        "full_text": (
+                            "C_2023157EN.01003801.xml\n\n"
+                            "3.5.2023   \n\n"
+                            "EN\n\n"
+                            "Official Journal of the European Union\n\n\n"
+                            "Opinion of the European Committee of the Regions on the EU Nature Restoration Law"
+                        ),
+                        "retrieved_at": "2026-04-17T10:01:01.411396Z",
+                        "content_path": "cache/text_cache/52022AR4206.txt",
+                        "raw_record": {
+                            "celex": "52022AR4206",
+                            "celex_full": "52022AR4206",
+                            "query_langs": ["en"],
+                            "date": "2023-02-09",
+                            "text_path": "cache/text_cache/52022AR4206.txt",
+                            "text_source_url": "http://publications.europa.eu/resource/cellar/example/DOC_1",
+                            "retrieval_status": 200,
+                            "route_used": "cache_resume",
+                        },
+                    }
+                )
+            ],
+            source=source,
+            query=query,
+        )
+
+        self.assertEqual(len(documents), 1)
+        document = documents[0]
+        self.assertFalse(document.full_text.startswith("C_2023157EN.01003801.xml"))
+        self.assertTrue(document.full_text.startswith("3.5.2023"))
+        self.assertIn("Official Journal of the European Union", document.full_text)
+        self.assertEqual(
+            document.raw_metadata,
+            {
+                "_query_id": "inventory-001",
+                "_query_origin": "inventory",
+                "_adapter_result_index": 0,
+                "_adapter_name": "eurlex",
+                "_query_source_path": "queries/inventory.txt",
+                "raw_record": {
+                    "celex": "52022AR4206",
+                    "celex_full": "52022AR4206",
+                    "query_langs": ["en"],
+                    "text_path": "cache/text_cache/52022AR4206.txt",
+                    "text_source_url": "http://publications.europa.eu/resource/cellar/example/DOC_1",
+                    "retrieval_status": 200,
+                    "route_used": "cache_resume",
+                },
+            },
+        )
+
     def test_normalization_rejects_missing_document_id(self) -> None:
         source = SourceConfig(name="placeholder-source", adapter="placeholder")
         query = Query(text="energy security", query_id="inline-001", origin="inline")

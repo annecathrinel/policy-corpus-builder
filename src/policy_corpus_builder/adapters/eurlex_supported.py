@@ -547,6 +547,29 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
+def _normalize_cached_clean_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"[ \t\f\v]+", " ", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+    lines = normalized.split("\n")
+    if lines:
+        first_line = lines[0].strip()
+        remaining_text = "\n".join(lines[1:]).strip()
+        if (
+            re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:xml|html|xhtml|txt)", first_line, flags=re.IGNORECASE)
+            and remaining_text
+            and "official journal of the european union" in remaining_text.lower()
+        ):
+            normalized = remaining_text
+
+    return normalized.strip()
+
+
 def _response_content_type(response: requests.Response | None) -> str:
     if response is None:
         return ""
@@ -1127,6 +1150,98 @@ def rebuild_fulltext_cache_state_from_files(cache_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+def _read_cached_text_file(path_value: object) -> str:
+    text_path = str(path_value or "").strip()
+    if not text_path:
+        return ""
+    try:
+        return _normalize_cached_clean_text(
+            Path(text_path).read_text(encoding="utf-8", errors="replace")
+        )
+    except Exception:
+        return ""
+
+
+def _build_cached_resume_rows(
+    df_docs: pd.DataFrame,
+    cache_state_df: pd.DataFrame,
+) -> list[dict]:
+    if df_docs.empty or cache_state_df.empty:
+        return []
+
+    docs_df = df_docs.copy()
+    if "celex_full" not in docs_df.columns and "celex" in docs_df.columns:
+        docs_df["celex_full"] = docs_df["celex"]
+    docs_df["celex_full"] = docs_df["celex_full"].fillna("").astype(str)
+    celex_parts = docs_df["celex_full"].apply(split_celex_identifier)
+    docs_df["celex"] = celex_parts.apply(lambda x: x[1])
+    docs_df["celex_version"] = celex_parts.apply(lambda x: x[2])
+
+    cached_df = cache_state_df.loc[cache_state_df["cache_state"].eq("successful")].copy()
+    if cached_df.empty:
+        return []
+    cached_df["celex_full"] = cached_df["celex_full"].fillna("").astype(str)
+    cached_df = cached_df.sort_values(["celex_full", "timestamp"]).drop_duplicates(
+        subset=["celex_full"],
+        keep="last",
+    )
+
+    merged_df = docs_df.merge(
+        cached_df[
+            [
+                "celex_full",
+                "celex",
+                "celex_version",
+                "lang",
+                "retrieval_status",
+                "retrieval_error",
+                "text_len",
+                "source_url",
+                "timestamp",
+                "text_path",
+            ]
+        ],
+        on=["celex_full", "celex", "celex_version"],
+        how="inner",
+    )
+
+    rows: list[dict] = []
+    for _, row in merged_df.iterrows():
+        text_clean = _read_cached_text_file(row.get("text_path"))
+        if not text_clean.strip():
+            continue
+        celex_full = str(row.get("celex_full", "") or "").strip()
+        celex_meta = classify_celex_for_fulltext(celex_full)
+        lang = str(row.get("lang", "") or "").strip() or (
+            lang_candidates_from_row(row)[0] if lang_candidates_from_row(row) else "en"
+        )
+        rows.append(
+            {
+                "celex_full": celex_full,
+                "celex": str(row.get("celex", "") or "").strip(),
+                "celex_version": str(row.get("celex_version", "") or "").strip(),
+                "title": str(row.get("title", "") or "").strip(),
+                "url": str(row.get("url_fix", "") or row.get("url", "") or "").strip(),
+                "text_source_url": str(row.get("source_url", "") or "").strip() or "CACHE",
+                "full_text_raw": "",
+                "full_text_clean": text_clean,
+                "text_len": len(text_clean),
+                "retrieval_status": int(row.get("retrieval_status", 0) or 0),
+                "retrieval_error": str(row.get("retrieval_error", "") or "").strip(),
+                "lang": lang,
+                "lang_source_fulltext": _lang_source_for_doc_row(row, lang),
+                "fetch_seconds": 0.0,
+                "fetched_from_cache": True,
+                "text_path": str(row.get("text_path", "") or "").strip(),
+                "celex_variant_used": "",
+                "route_used": "cache_resume",
+                "content_type": "",
+                **celex_meta,
+            }
+        )
+    return rows
+
+
 def summarize_fulltext_cache_state(
     cache_dir: Path,
     df_docs: pd.DataFrame,
@@ -1247,7 +1362,9 @@ def fetch_eurlex_fulltext_for_row(
     html_path = _cache_path_for_celex(celex_full, html_cache_dir, "html")
 
     if use_cache and text_path.exists() and text_path.stat().st_size > 0:
-        text_clean = text_path.read_text(encoding="utf-8", errors="replace")
+        text_clean = _normalize_cached_clean_text(
+            text_path.read_text(encoding="utf-8", errors="replace")
+        )
         if verbose:
             print(
                 f"[EURLEX TEXT] {progress_label} CELEX={celex} success length={len(text_clean)} source=CACHE",
@@ -1369,11 +1486,15 @@ def batch_fetch_eurlex_fulltext(
         work_df,
         success_min_chars=success_min_chars,
     )
+    cached_rows: list[dict] = []
     if resume:
         if "celex_full" not in work_df.columns and "celex" in work_df.columns:
             work_df["celex_full"] = work_df["celex"]
+        work_df["celex_full"] = work_df["celex_full"].fillna("").astype(str)
         successful_celex = set(cache_state_df.loc[cache_state_df["cache_state"].eq("successful"), "celex_full"].astype(str))
         failed_celex = set(cache_state_df.loc[cache_state_df["cache_state"].eq("failed"), "celex_full"].astype(str))
+        cached_docs_df = work_df.loc[work_df["celex_full"].isin(successful_celex)].copy()
+        cached_rows = _build_cached_resume_rows(cached_docs_df, cache_state_df)
         keep_mask = ~work_df["celex_full"].astype(str).isin(successful_celex)
         if not retry_failures:
             keep_mask &= ~work_df["celex_full"].astype(str).isin(failed_celex)
@@ -1427,7 +1548,7 @@ def batch_fetch_eurlex_fulltext(
     if rows:
         merge_and_save_fulltext_cache(cache_dir, rows)
 
-    out_df = pd.DataFrame(rows)
+    out_df = pd.DataFrame(cached_rows + rows)
     if not out_df.empty:
         out_df["failure_category"] = out_df.apply(_classify_failure, axis=1)
     if type_summary_rows:

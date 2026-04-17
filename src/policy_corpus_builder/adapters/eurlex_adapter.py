@@ -96,6 +96,7 @@ def run_eurlex_query_pipeline(
         "celex",
         "celex_version",
         "text_source_url",
+        "full_text_raw",
         "full_text_clean",
         "retrieval_status",
         "retrieval_error",
@@ -120,23 +121,26 @@ def run_eurlex_query_pipeline(
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     documents: list[dict[str, object]] = []
     for row in merged_df.to_dict(orient="records"):
+        row = _coalesce_merge_artifacts(row)
         celex_full = _stringify(row.get("celex_full"))
         title = _stringify(row.get("title")) or celex_full or _stringify(row.get("url_fix"))
         language = _stringify(row.get("lang")) or search_language
+        full_text = _resolve_full_text(row)
+        download_url = _resolve_download_url(row)
         row["document_id"] = f"{source.name}:EU:{celex_full}"
         row["source_document_id"] = celex_full
         row["title"] = title
         row["document_type"] = _stringify(row.get("celex_descriptor_label")) or "eu_legal_document"
         row["language"] = language
         row["jurisdiction"] = "European Union"
-        row["publication_date"] = _stringify(row.get("date"))
+        row["publication_date"] = _optional_text(row.get("date"))
         row["url"] = _stringify(row.get("url_fix")) or _stringify(row.get("url"))
-        row["download_url"] = _stringify(row.get("text_source_url")) or row["url"]
-        row["full_text"] = _stringify(row.get("full_text_clean"))
+        row["download_url"] = download_url
+        row["full_text"] = full_text
         row["retrieved_at"] = timestamp
-        row["content_path"] = _stringify(row.get("text_path"))
+        row["content_path"] = _optional_text(row.get("text_path"))
         row["query_text"] = query_text
-        documents.append(row)
+        documents.append(_sanitize_row(row))
 
     return documents
 
@@ -203,6 +207,7 @@ class EurlexAdapter:
             os.environ.setdefault("EURLEX_WS_PASS", password)
 
     def _row_to_result(self, row: dict[str, object]) -> AdapterResult:
+        raw_record = _build_raw_record(row)
         result = build_adapter_result(
             row,
             field_mapping=EURLEX_FIELD_MAPPING,
@@ -211,7 +216,7 @@ class EurlexAdapter:
                 "download_url": _stringify(row.get("download_url")) or _stringify(row.get("url")),
             },
         )
-        result.payload["raw_record"] = dict(row)
+        result.payload["raw_record"] = raw_record
         return result
 
 
@@ -351,3 +356,138 @@ def _stringify(value: object) -> str:
     except Exception:
         pass
     return str(value).strip()
+
+
+def _optional_text(value: object) -> str | None:
+    text = _stringify(value)
+    return text or None
+
+
+def _resolve_full_text(row: dict[str, object]) -> str | None:
+    cleaned_text = _optional_text(row.get("full_text_clean"))
+    if cleaned_text:
+        return cleaned_text
+    return _optional_text(row.get("full_text_raw")) or _optional_text(row.get("full_text"))
+
+
+def _resolve_download_url(row: dict[str, object]) -> str | None:
+    text_source_url = _optional_text(row.get("text_source_url"))
+    if text_source_url and text_source_url != "CACHE":
+        return text_source_url
+    return _optional_text(row.get("url_fix")) or _optional_text(row.get("url"))
+
+
+def _coalesce_merge_artifacts(row: dict[str, object]) -> dict[str, object]:
+    merged = dict(row)
+    suffix_roots = {
+        key[:-2]
+        for key in merged
+        if key.endswith("_x") or key.endswith("_y")
+    }
+    for root in suffix_roots:
+        left_value = merged.pop(f"{root}_x", None)
+        right_value = merged.pop(f"{root}_y", None)
+        merged[root] = _first_present_value(right_value, left_value)
+    return merged
+
+
+def _first_present_value(*values: object) -> object | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _sanitize_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        key: _sanitize_value(value)
+        for key, value in row.items()
+    }
+
+
+def _sanitize_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _sanitize_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return value
+
+
+def _parse_list_field(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [item for item in (_optional_text(v) for v in value) if item]
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not (text.startswith("[") and text.endswith("]")):
+        return [text]
+    try:
+        import json
+
+        parsed = json.loads(text)
+    except Exception:
+        return [text]
+    if not isinstance(parsed, list):
+        return [text]
+    return [item for item in (_optional_text(v) for v in parsed) if item]
+
+
+def _build_raw_record(row: dict[str, object]) -> dict[str, object]:
+    raw_record = {
+        "source": _optional_text(row.get("source")),
+        "celex": _optional_text(row.get("celex")),
+        "celex_full": _optional_text(row.get("celex_full")),
+        "celex_version": _optional_text(row.get("celex_version")),
+        "celex_class": _optional_text(row.get("celex_class")),
+        "celex_sector": _optional_text(row.get("celex_sector")),
+        "celex_sector_label": _optional_text(row.get("celex_sector_label")),
+        "celex_descriptor": _optional_text(row.get("celex_descriptor")),
+        "celex_descriptor_label": _optional_text(row.get("celex_descriptor_label")),
+        "celex_notes": _optional_text(row.get("celex_notes")),
+        "celex_valid": row.get("celex_valid"),
+        "celex_is_consolidated": row.get("celex_is_consolidated"),
+        "celex_is_corrigendum": row.get("celex_is_corrigendum"),
+        "celex_variant_used": _optional_text(row.get("celex_variant_used")),
+        "fulltext_support": _optional_text(row.get("fulltext_support")),
+        "scopes": _parse_list_field(row.get("scopes")),
+        "query_langs": _parse_list_field(row.get("query_langs")),
+        "query_term_groups": _parse_list_field(row.get("query_term_groups")),
+        "text_source_url": _optional_text(row.get("text_source_url")),
+        "text_path": _optional_text(row.get("text_path")),
+        "content_type": _optional_text(row.get("content_type")),
+        "route_used": _optional_text(row.get("route_used")),
+        "retrieval_status": row.get("retrieval_status"),
+        "retrieval_error": _optional_text(row.get("retrieval_error")),
+        "fetch_seconds": row.get("fetch_seconds"),
+        "fetched_from_cache": row.get("fetched_from_cache"),
+        "url_fix": _optional_text(row.get("url_fix")),
+        "date": _optional_text(row.get("date")),
+        "query_text": _optional_text(row.get("query_text")),
+    }
+    return {
+        key: value
+        for key, value in _sanitize_row(raw_record).items()
+        if value is not None
+    }
