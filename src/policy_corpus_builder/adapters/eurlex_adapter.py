@@ -11,7 +11,7 @@ import pandas as pd
 
 from policy_corpus_builder.adapters.base import AdapterConfigError, AdapterResult
 from policy_corpus_builder.adapters.mapping import build_adapter_result
-from policy_corpus_builder.adapters.eurlex import (
+from policy_corpus_builder.adapters.eurlex_supported import (
     batch_fetch_eurlex_fulltext,
     build_eu_doc_tables,
     fetch_eurlex_job,

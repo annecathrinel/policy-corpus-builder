@@ -13,6 +13,14 @@ from policy_corpus_builder.schemas import SourceConfig  # noqa: E402
 
 
 class EurlexAdapterTests(unittest.TestCase):
+    def test_adapter_uses_supported_helper_module(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_adapter as eurlex_adapter_module
+
+        self.assertEqual(
+            eurlex_adapter_module.fetch_eurlex_job.__module__,
+            "policy_corpus_builder.adapters.eurlex_supported",
+        )
+
     def test_validate_source_config_requires_credentials(self) -> None:
         adapter = EurlexAdapter()
         source = SourceConfig(name="eurlex-source", adapter="eurlex")

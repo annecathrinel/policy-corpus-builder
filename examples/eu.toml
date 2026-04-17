@@ -15,8 +15,8 @@ search_language = "en"
 search_fields = ["TI", "TE"]
 expert_scope = "DTS_SUBDOM = ALL_ALL"
 fulltext_mode = "supported_only"
-page_size = 100
-max_pages = 20
+page_size = 20
+max_pages = 1
 timeout_s = 45
 retry_5xx = 3
 min_interval_s = 1.6
