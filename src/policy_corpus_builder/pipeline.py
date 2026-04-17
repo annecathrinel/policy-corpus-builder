@@ -71,6 +71,17 @@ def _build_raw_metadata(
         if query.source_path:
             raw_metadata["_query_source_path"] = query.source_path
         return raw_metadata
+    if source.adapter == "non-eu":
+        raw_metadata = {
+            "_query_id": query.query_id,
+            "_query_origin": query.origin,
+            "_adapter_result_index": index,
+            "_adapter_name": source.adapter,
+            "raw_record": _slim_non_eu_raw_record(payload.get("raw_record")),
+        }
+        if query.source_path:
+            raw_metadata["_query_source_path"] = query.source_path
+        return raw_metadata
 
     raw_metadata = dict(payload)
     raw_metadata.setdefault("_query_id", query.query_id)
@@ -138,3 +149,30 @@ def _slim_eurlex_raw_record(raw_value: object) -> dict[str, object]:
     raw_record.pop("query_text", None)
     raw_record.pop("date", None)
     return raw_record
+
+
+def _slim_non_eu_raw_record(raw_value: object) -> dict[str, object]:
+    raw_record = _copy_dict(raw_value)
+    return {
+        key: sanitized
+        for key, value in raw_record.items()
+        if (sanitized := _sanitize_raw_metadata_value(value)) is not None
+    }
+
+
+def _sanitize_raw_metadata_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: sanitized
+            for key, item in value.items()
+            if (sanitized := _sanitize_raw_metadata_value(item)) is not None
+        }
+    if isinstance(value, list):
+        return [
+            sanitized
+            for item in value
+            if (sanitized := _sanitize_raw_metadata_value(item)) is not None
+        ]
+    if isinstance(value, str):
+        return _optional_string(value)
+    return value

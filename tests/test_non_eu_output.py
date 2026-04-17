@@ -8,7 +8,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_corpus_builder.adapters.non_eu_adapter import NonEUAdapter  # noqa: E402
+from policy_corpus_builder.adapters.base import AdapterResult  # noqa: E402
 from policy_corpus_builder.models import Query  # noqa: E402
+from policy_corpus_builder.pipeline import normalize_adapter_results  # noqa: E402
 from policy_corpus_builder.schemas import SourceConfig  # noqa: E402
 
 
@@ -89,11 +91,91 @@ class NonEUOutputContractTests(unittest.TestCase):
             "https://www.legislation.gov.uk/ukpga/2024/1/contents",
         )
         self.assertEqual(result.payload["raw_record"]["retrieval_status"], "ok")
+        self.assertEqual(result.payload["raw_record"]["has_text"], True)
+        self.assertEqual(result.payload["raw_record"]["text_len"], 18)
+        self.assertEqual(result.payload["raw_record"]["year"], 2024)
+        self.assertEqual(result.payload["raw_record"]["matched_terms"], ["biodiversity"])
+        self.assertNotIn("doc_id", result.payload["raw_record"])
+        self.assertNotIn("doc_uid", result.payload["raw_record"])
+        self.assertNotIn("title", result.payload["raw_record"])
+        self.assertNotIn("url", result.payload["raw_record"])
+        self.assertNotIn("jurisdiction", result.payload["raw_record"])
+        self.assertNotIn("lang", result.payload["raw_record"])
+        self.assertNotIn("date", result.payload["raw_record"])
+        self.assertNotIn("source_file", result.payload["raw_record"])
         self.assertNotIn("raw_cache_note", result.payload["raw_record"])
         self.assertNotIn("retrieval_track", result.payload["raw_record"])
         self.assertNotIn("raw_text", result.payload["raw_record"])
         self.assertNotIn("text_norm", result.payload["raw_record"])
         self.assertNotIn("text_missing", result.payload["raw_record"])
+
+    def test_non_eu_normalization_slims_raw_metadata_and_preserves_typed_raw_record(self) -> None:
+        source = SourceConfig(name="uk-legislation", adapter="non-eu")
+        query = Query(
+            text="biodiversity",
+            query_id="inventory-001",
+            origin="inventory",
+            source_path="queries/inventory.txt",
+        )
+
+        documents = normalize_adapter_results(
+            [
+                AdapterResult(
+                    payload={
+                        "document_id": "uk-legislation:ukpga_2024_1",
+                        "source_document_id": "ukpga_2024_1",
+                        "title": "Environment Act 2024",
+                        "document_type": "policy_document",
+                        "language": "en",
+                        "jurisdiction": "United Kingdom",
+                        "publication_date": "2024",
+                        "url": "https://www.legislation.gov.uk/ukpga/2024/1",
+                        "download_url": "https://www.legislation.gov.uk/ukpga/2024/1/contents",
+                        "full_text": "Cleaned body text.",
+                        "retrieved_at": "2026-04-17T12:00:00Z",
+                        "raw_record": {
+                            "country": "United Kingdom",
+                            "contents_url": "https://www.legislation.gov.uk/ukpga/2024/1/contents",
+                            "full_text_error": None,
+                            "full_text_format": "html",
+                            "has_text": True,
+                            "matched_terms": ["biodiversity"],
+                            "retrieval_status": "ok",
+                            "source": "UK",
+                            "source_log": [{"source": "UK", "ok": True}],
+                            "text_len": 18,
+                            "year": 2024,
+                        },
+                    }
+                )
+            ],
+            source=source,
+            query=query,
+        )
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(
+            documents[0].raw_metadata,
+            {
+                "_query_id": "inventory-001",
+                "_query_origin": "inventory",
+                "_adapter_result_index": 0,
+                "_adapter_name": "non-eu",
+                "_query_source_path": "queries/inventory.txt",
+                "raw_record": {
+                    "country": "United Kingdom",
+                    "contents_url": "https://www.legislation.gov.uk/ukpga/2024/1/contents",
+                    "full_text_format": "html",
+                    "has_text": True,
+                    "matched_terms": ["biodiversity"],
+                    "retrieval_status": "ok",
+                    "source": "UK",
+                    "source_log": [{"source": "UK", "ok": True}],
+                    "text_len": 18,
+                    "year": 2024,
+                },
+            },
+        )
 
     def test_non_eu_adapter_passes_user_agent_to_workflow(self) -> None:
         adapter = NonEUAdapter()
@@ -124,6 +206,43 @@ class NonEUOutputContractTests(unittest.TestCase):
             mocked.call_args.kwargs["user_agent"],
             "policy-corpus-builder/0.1 (contact@example.org)",
         )
+
+    def test_non_eu_adapter_populates_retrieved_at(self) -> None:
+        adapter = NonEUAdapter()
+        source = SourceConfig(name="uk-legislation", adapter="non-eu")
+        query = Query(text="biodiversity", query_id="inline-001", origin="inline")
+
+        class _RunResult:
+            source_log = [{"source": "UK", "ok": True}]
+
+            class _Frame:
+                @staticmethod
+                def to_dict(orient: str = "records"):
+                    return [
+                        {
+                            "doc_id": "ukpga_2024_1",
+                            "doc_uid": "ukpga_2024_1",
+                            "title": "Environment Act 2024",
+                            "jurisdiction": "United Kingdom",
+                            "lang": "en",
+                            "date": "2024",
+                            "url": "https://www.legislation.gov.uk/ukpga/2024/1",
+                            "full_text_clean": "Cleaned body text.",
+                            "full_text_url": "https://www.legislation.gov.uk/ukpga/2024/1/contents",
+                            "source": "UK",
+                        }
+                    ]
+
+            harmonized_docs_df = _Frame()
+
+        with patch(
+            "policy_corpus_builder.adapters.non_eu_adapter.run_non_eu_query_pipeline",
+            return_value=_RunResult(),
+        ):
+            results = adapter.collect(source, query, base_path=Path("."))
+
+        self.assertEqual(len(results), 1)
+        self.assertRegex(results[0].payload["retrieved_at"], r"^\d{4}-\d{2}-\d{2}T")
 
     def test_build_non_eu_fulltext_docs_marks_waf_blocks_as_upstream_blocked(self) -> None:
         raw_hits_df = __import__("pandas").DataFrame(

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -90,12 +92,14 @@ class NonEUAdapter:
             obey_robots=self._require_bool(settings, "obey_robots", default=True),
             user_agent=self._resolve_user_agent(settings),
         )
+        retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         return [
             self._row_to_result(
                 row,
                 source=source,
                 source_log=workflow_result.source_log,
+                retrieved_at=retrieved_at,
             )
             for row in workflow_result.harmonized_docs_df.to_dict(orient="records")
         ]
@@ -106,6 +110,7 @@ class NonEUAdapter:
         *,
         source: SourceConfig,
         source_log: list[dict[str, object]],
+        retrieved_at: str | None = None,
     ) -> AdapterResult:
         normalized_row = {
             key: self._stringify(value)
@@ -134,28 +139,12 @@ class NonEUAdapter:
         )
         result.payload["document_id"] = f"{source.name}:{result.payload['document_id']}"
         result.payload["document_type"] = "policy_document"
-        result.payload["raw_record"] = {
-            "country": normalized_row.get("country", ""),
-            "contents_url": normalized_row.get("contents_url", ""),
-            "date": normalized_row.get("date", ""),
-            "doc_id": normalized_row.get("doc_id", ""),
-            "doc_uid": normalized_row.get("doc_uid", ""),
-            "full_text_error": normalized_row.get("full_text_error", ""),
-            "full_text_format": normalized_row.get("full_text_format", ""),
-            "full_text_url": normalized_row.get("full_text_url", ""),
-            "has_text": normalized_row.get("has_text", ""),
-            "jurisdiction": normalized_row.get("jurisdiction", ""),
-            "lang": normalized_row.get("lang", ""),
-            "matched_terms": normalized_row.get("matched_terms", ""),
-            "retrieval_status": normalized_row.get("retrieval_status", ""),
-            "source": normalized_row.get("source", ""),
-            "source_log": source_log,
-            "source_file": normalized_row.get("source_file", ""),
-            "text_len": normalized_row.get("text_len", ""),
-            "title": normalized_row.get("title", ""),
-            "url": normalized_row.get("url", ""),
-            "year": normalized_row.get("year", ""),
-        }
+        if retrieved_at:
+            result.payload["retrieved_at"] = retrieved_at
+        result.payload["raw_record"] = _build_non_eu_raw_record(
+            normalized_row,
+            source_log=source_log,
+        )
         return result
 
     def _resolve_countries(self, settings: dict[str, Any]) -> tuple[str, ...]:
@@ -276,3 +265,90 @@ class NonEUAdapter:
         if pd is not None and pd.isna(value):
             return ""
         return str(value).strip()
+
+
+def _build_non_eu_raw_record(
+    normalized_row: dict[str, str],
+    *,
+    source_log: list[dict[str, object]],
+) -> dict[str, object]:
+    raw_record = {
+        "country": _optional_string(normalized_row.get("country")),
+        "contents_url": _optional_string(normalized_row.get("contents_url")),
+        "full_text_error": _optional_string(normalized_row.get("full_text_error")),
+        "full_text_format": _optional_string(normalized_row.get("full_text_format")),
+        "full_text_url": _optional_string(normalized_row.get("full_text_url")),
+        "has_text": _parse_bool(normalized_row.get("has_text")),
+        "matched_terms": _parse_string_list(normalized_row.get("matched_terms")),
+        "retrieval_status": _optional_string(normalized_row.get("retrieval_status")),
+        "source": _optional_string(normalized_row.get("source")),
+        "source_log": _sanitize_value(source_log),
+        "text_len": _parse_int(normalized_row.get("text_len")),
+        "year": _parse_int(normalized_row.get("year")),
+    }
+    return {
+        key: value
+        for key, value in raw_record.items()
+        if value is not None
+    }
+
+
+def _optional_string(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _parse_bool(value: object) -> bool | None:
+    text = _optional_string(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return None
+
+
+def _parse_int(value: object) -> int | None:
+    text = _optional_string(value)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _parse_string_list(value: object) -> list[str] | None:
+    if isinstance(value, list):
+        cleaned = [_optional_string(item) for item in value]
+        result = [item for item in cleaned if item]
+        return result or None
+    text = _optional_string(value)
+    if text is None:
+        return None
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            cleaned = [_optional_string(item) for item in parsed]
+            result = [item for item in cleaned if item]
+            return result or None
+    return [text]
+
+
+def _sanitize_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: sanitized
+            for key, item in value.items()
+            if (sanitized := _sanitize_value(item)) is not None
+        }
+    if isinstance(value, list):
+        return [sanitized for item in value if (sanitized := _sanitize_value(item)) is not None]
+    if isinstance(value, str):
+        return _optional_string(value)
+    return value
