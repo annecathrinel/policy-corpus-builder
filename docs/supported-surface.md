@@ -71,6 +71,8 @@ The following workflows or modes are not part of the supported contract:
 - New Zealand `nz_mode = "scrape"` because it is a no-key fallback mode tied to the public website
 - placeholder/demo-only retrieval surfaces such as the `placeholder` adapter
 
+For explicit internal developer use, provisional `non-eu` modes can still be validated by setting `source.settings.allow_internal = true`. That escape hatch is intentionally opt-in and is not part of the default supported surface.
+
 ## Examples And Notebooks
 
 Examples and notebooks are user guidance, not stable import surfaces.

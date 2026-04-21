@@ -112,6 +112,8 @@ The following modules and workflows are intentionally not part of the supported 
 
 Examples and notebooks are documentation aids, not stable implementation entry points. The supported implementation surface is the adapter registry, the adapter wrapper modules, the shared pipeline/orchestration functions, and the normalized model/export pipeline documented here.
 
+For explicit internal developer use, provisional `non-eu` modes can still be validated by setting `source.settings.allow_internal = true`. That escape hatch is intentionally opt-in and outside the default supported surface.
+
 ## Happy Path
 
 The simplest end-to-end example uses the bundled local fixture-backed adapter and config:

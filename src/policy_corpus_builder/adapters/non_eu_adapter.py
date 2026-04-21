@@ -15,6 +15,14 @@ from policy_corpus_builder.models import Query
 from policy_corpus_builder.schemas import SourceConfig
 
 SUPPORTED_NON_EU_COUNTRIES = ("UK", "AUS", "NZ", "CA", "US")
+SUPPORTED_NON_EU_SINGLE_COUNTRY_WORKFLOWS = (
+    ("UK",),
+    ("CA",),
+    ("AUS",),
+    ("US",),
+    ("NZ",),
+)
+ALLOW_INTERNAL_SETTINGS_KEY = "allow_internal"
 NON_EU_FIELD_MAPPING = {
     "document_id": "doc_id",
     "source_document_id": "doc_uid",
@@ -37,6 +45,7 @@ class NonEUAdapter:
     def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         settings = source.settings
         countries = self._resolve_countries(settings)
+        allow_internal = self._resolve_allow_internal(settings)
         invalid_countries = sorted(set(countries) - set(SUPPORTED_NON_EU_COUNTRIES))
         if invalid_countries:
             allowed = ", ".join(SUPPORTED_NON_EU_COUNTRIES)
@@ -51,22 +60,29 @@ class NonEUAdapter:
         self._require_bool(settings, "obey_robots", default=True)
         self._resolve_user_agent(settings)
         nz_mode = self._resolve_nz_mode(settings)
+        self._validate_supported_workflow_boundary(
+            countries,
+            nz_mode=nz_mode,
+            allow_internal=allow_internal,
+        )
 
         if "US" in countries:
             api_key = self._resolve_us_api_key(settings)
             if not api_key:
                 env_name = self._resolve_us_api_key_env(settings)
                 raise AdapterConfigError(
-                    "non-eu adapter requires a US API key when countries includes 'US'. "
-                    f"Set environment variable {env_name} or remove 'US' from countries."
+                    "non-eu adapter requires a US API key for the supported US workflow "
+                    "(countries = ['US']). "
+                    f"Set environment variable {env_name} before validating or running this config."
                 )
         if "NZ" in countries and nz_mode == "api":
             api_key = self._resolve_nz_api_key(settings)
             if not api_key:
                 env_name = self._resolve_nz_api_key_env(settings)
                 raise AdapterConfigError(
-                    "non-eu adapter requires a New Zealand legislation API key when countries includes 'NZ' and source.settings.nz_mode is 'api'. "
-                    f"Set environment variable {env_name}, switch nz_mode to 'auto' or 'scrape', or remove 'NZ' from countries."
+                    "non-eu adapter requires a New Zealand legislation API key for the supported "
+                    "New Zealand workflow (countries = ['NZ'], nz_mode = 'api'). "
+                    f"Set environment variable {env_name} before validating or running this config."
                 )
 
     def collect(
@@ -200,6 +216,41 @@ class NonEUAdapter:
                 "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
             )
         return cleaned
+
+    def _resolve_allow_internal(self, settings: dict[str, Any]) -> bool:
+        raw_value = settings.get(ALLOW_INTERNAL_SETTINGS_KEY, False)
+        if not isinstance(raw_value, bool):
+            raise AdapterConfigError(
+                f"non-eu adapter source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} must be a boolean."
+            )
+        return raw_value
+
+    def _validate_supported_workflow_boundary(
+        self,
+        countries: tuple[str, ...],
+        *,
+        nz_mode: str,
+        allow_internal: bool,
+    ) -> None:
+        if countries in SUPPORTED_NON_EU_SINGLE_COUNTRY_WORKFLOWS:
+            if countries == ("NZ",) and nz_mode != "api" and not allow_internal:
+                raise AdapterConfigError(
+                    "non-eu adapter supports New Zealand only in API mode by default: "
+                    "use countries = ['NZ'] with source.settings.nz_mode = 'api'. "
+                    "The 'auto' and 'scrape' modes are provisional/internal. "
+                    f"Set source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} = true only for explicit internal developer use."
+                )
+            return
+
+        if allow_internal:
+            return
+
+        raise AdapterConfigError(
+            "non-eu adapter supports only these documented workflows by default: "
+            "countries = ['UK'], ['CA'], ['AUS'], ['US'], or ['NZ'] with nz_mode = 'api'. "
+            "Multi-country configs and provisional/internal workflow modes require "
+            f"source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} = true."
+        )
 
     def _resolve_user_agent(self, settings: dict[str, Any]) -> str | None:
         raw_value = settings.get("user_agent")

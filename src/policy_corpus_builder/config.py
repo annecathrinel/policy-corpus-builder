@@ -8,7 +8,8 @@ from typing import Any
 
 import tomllib
 
-from policy_corpus_builder.adapters import available_adapters
+from policy_corpus_builder.adapters import available_adapters, get_adapter
+from policy_corpus_builder.adapters.base import AdapterError
 from policy_corpus_builder.models import NormalizedDocument
 from policy_corpus_builder.schemas.config import (
     BuilderConfig,
@@ -75,6 +76,7 @@ def validate_config_dict(
     project = _validate_project(raw_data["project"])
     queries = _validate_queries(raw_data["queries"], base_path=base_path)
     sources = _validate_sources(raw_data["sources"])
+    _validate_source_configs(sources, base_path=base_path)
     normalization = _validate_normalization(raw_data["normalization"])
     export = _validate_export(raw_data["export"])
 
@@ -226,6 +228,25 @@ def _validate_normalization(raw_value: Any) -> NormalizationConfig:
         deduplicate=deduplicate,
         deduplicate_fields=deduplicate_fields,
     )
+
+
+def _validate_source_configs(
+    sources: tuple[SourceConfig, ...],
+    *,
+    base_path: Path | None,
+) -> None:
+    resolved_base_path = base_path or Path(".")
+
+    for index, source in enumerate(sources):
+        try:
+            get_adapter(source.adapter).validate_source_config(
+                source,
+                base_path=resolved_base_path,
+            )
+        except AdapterError as exc:
+            raise ConfigValidationError(
+                f"sources[{index}] ('{source.name}', adapter='{source.adapter}') failed adapter validation: {exc}"
+            ) from exc
 
 
 def _validate_export(raw_value: Any) -> ExportConfig:

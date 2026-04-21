@@ -1,7 +1,9 @@
+import os
 import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -27,13 +29,42 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.export.formats, ("jsonl",))
 
     def test_valid_eurlex_example_config_loads(self) -> None:
-        config = load_and_validate_config(Path("examples/eu.toml"))
+        with patch.dict(
+            "os.environ",
+            {"EURLEX_WS_USER": "demo-user", "EURLEX_WS_PASS": "demo-pass"},
+            clear=False,
+        ):
+            config = load_and_validate_config(Path("examples/eu.toml"))
 
         self.assertEqual(config.project.name, "eurlex-example")
         self.assertEqual(config.queries.inventory, "queries/eu_queries.txt")
         self.assertEqual(config.sources[0].adapter, "eurlex")
         self.assertEqual(config.sources[0].settings["fulltext_mode"], "supported_only")
         self.assertEqual(config.export.formats, ("jsonl",))
+
+    def test_valid_eurlex_nim_example_config_loads(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"EURLEX_WS_USER": "demo-user", "EURLEX_WS_PASS": "demo-pass"},
+            clear=False,
+        ):
+            config = load_and_validate_config(Path("examples/eu_nim.toml"))
+
+        self.assertEqual(config.project.name, "eurlex-nim-example")
+        self.assertEqual(config.sources[0].adapter, "eurlex-nim")
+        self.assertEqual(config.export.formats, ("jsonl",))
+
+    def test_valid_supported_non_eu_nz_example_loads(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"NZ_LEGISLATION_API_KEY": "nz-demo-key"},
+            clear=False,
+        ):
+            config = load_and_validate_config(Path("examples/non_eu_new_zealand.toml"))
+
+        self.assertEqual(config.project.name, "non-eu-new-zealand-example")
+        self.assertEqual(config.sources[0].adapter, "non-eu")
+        self.assertEqual(config.sources[0].settings["nz_mode"], "api")
 
     def test_config_summary_is_useful(self) -> None:
         config = load_and_validate_config(Path("examples/minimal.toml"))
@@ -180,6 +211,132 @@ class ConfigValidationTests(unittest.TestCase):
                     "export": {"formats": ["jsonl"]},
                 }
             )
+
+    def test_non_eu_nz_requires_supported_api_mode_by_default(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigValidationError,
+            "supports New Zealand only in API mode by default",
+        ):
+            validate_config_dict(
+                {
+                    "project": {"name": "demo", "output_dir": "outputs/demo"},
+                    "queries": {"items": ["policy"]},
+                    "sources": [
+                        {
+                            "name": "nz-source",
+                            "adapter": "non-eu",
+                            "settings": {"countries": ["NZ"], "nz_mode": "auto"},
+                        }
+                    ],
+                    "normalization": {
+                        "deduplicate": True,
+                        "deduplicate_fields": ["title"],
+                    },
+                    "export": {"formats": ["jsonl"]},
+                }
+            )
+
+    def test_non_eu_nz_auto_mode_can_be_explicitly_allowed_for_internal_use(self) -> None:
+        config = validate_config_dict(
+            {
+                "project": {"name": "demo", "output_dir": "outputs/demo"},
+                "queries": {"items": ["policy"]},
+                "sources": [
+                    {
+                        "name": "nz-source",
+                        "adapter": "non-eu",
+                        "settings": {
+                            "countries": ["NZ"],
+                            "nz_mode": "auto",
+                            "allow_internal": True,
+                        },
+                    }
+                ],
+                "normalization": {
+                    "deduplicate": True,
+                    "deduplicate_fields": ["title"],
+                },
+                "export": {"formats": ["jsonl"]},
+            }
+        )
+
+        self.assertTrue(config.sources[0].settings["allow_internal"])
+
+    def test_non_eu_multi_country_config_requires_internal_escape_hatch(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigValidationError,
+            "supports only these documented workflows by default",
+        ):
+            validate_config_dict(
+                {
+                    "project": {"name": "demo", "output_dir": "outputs/demo"},
+                    "queries": {"items": ["policy"]},
+                    "sources": [
+                        {
+                            "name": "non-eu-source",
+                            "adapter": "non-eu",
+                            "settings": {"countries": ["UK", "CA"]},
+                        }
+                    ],
+                    "normalization": {
+                        "deduplicate": True,
+                        "deduplicate_fields": ["title"],
+                    },
+                    "export": {"formats": ["jsonl"]},
+                }
+            )
+
+    def test_supported_non_eu_us_requires_api_key_during_config_validation(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                ConfigValidationError,
+                "requires a US API key for the supported US workflow",
+            ):
+                validate_config_dict(
+                    {
+                        "project": {"name": "demo", "output_dir": "outputs/demo"},
+                        "queries": {"items": ["policy"]},
+                        "sources": [
+                            {
+                                "name": "us-source",
+                                "adapter": "non-eu",
+                                "settings": {"countries": ["US"]},
+                            }
+                        ],
+                        "normalization": {
+                            "deduplicate": True,
+                            "deduplicate_fields": ["title"],
+                        },
+                        "export": {"formats": ["jsonl"]},
+                    }
+                )
+
+    def test_supported_non_eu_us_with_api_key_passes_config_validation(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"REGULATIONS_GOV_API_KEY": "us-demo-key"},
+            clear=False,
+        ):
+            config = validate_config_dict(
+                {
+                    "project": {"name": "demo", "output_dir": "outputs/demo"},
+                    "queries": {"items": ["policy"]},
+                    "sources": [
+                        {
+                            "name": "us-source",
+                            "adapter": "non-eu",
+                            "settings": {"countries": ["US"]},
+                        }
+                    ],
+                    "normalization": {
+                        "deduplicate": True,
+                        "deduplicate_fields": ["title"],
+                    },
+                    "export": {"formats": ["jsonl"]},
+                }
+            )
+
+        self.assertEqual(config.sources[0].settings["countries"], ["US"])
 
 
 if __name__ == "__main__":
