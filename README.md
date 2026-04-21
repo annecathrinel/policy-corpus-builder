@@ -24,8 +24,32 @@ The package is library-first. The CLI is a thin convenience layer on top of the 
 - supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
 - deterministic deduplication using configured normalized fields
 - one export format: JSONL
-- one end-to-end notebook example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
+- one local-file notebook walkthrough example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
 - one minimal CLI for config validation and running the same workflow
+
+## Supported Surface
+
+The currently supported workflows are:
+
+- UK via `adapter = "non-eu"` with `countries = ["UK"]`
+- Canada via `adapter = "non-eu"` with `countries = ["CA"]`
+- Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
+- US via `adapter = "non-eu"` with `countries = ["US"]`
+- New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
+- ordinary EUR-Lex via `adapter = "eurlex"`
+- EUR-Lex NIM via `adapter = "eurlex-nim"`
+
+The supported adapter entry points are:
+
+- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
+- `LocalFileAdapter` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py)
+- `NonEUAdapter` in [src/policy_corpus_builder/adapters/non_eu_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu_adapter.py)
+- `EurlexAdapter` in [src/policy_corpus_builder/adapters/eurlex_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_adapter.py)
+- `EurlexNIMAdapter` in [src/policy_corpus_builder/adapters/eurlex_nim_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim_adapter.py)
+
+The public implementation surface is the adapter registry plus those adapter wrapper modules. Importing deeper helper modules directly is not part of the supported API.
+
+For a stable summary of supported versus provisional code paths, see [docs/supported-surface.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/supported-surface.md).
 
 ## Small Public API
 
@@ -38,6 +62,8 @@ These are the main functions and modules worth treating as the v0.1 public surfa
 - `deduplicate_documents` in [src/policy_corpus_builder/postprocess.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/postprocess.py)
 - `export_documents_jsonl` in [src/policy_corpus_builder/exporters/jsonl.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/exporters/jsonl.py)
 - `run_from_config_path` in [src/policy_corpus_builder/orchestration.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/orchestration.py)
+
+The adapter wrapper modules listed in the supported surface section above are also part of the supported import surface for workflow-specific integrations.
 
 ## Install
 
@@ -55,17 +81,36 @@ For local-only secrets, copy `.env.example` to `.env`, fill in your real credent
 cp .env.example .env
 ```
 
-Currently relevant environment variables include:
+Supported workflow credentials and environment variables:
 
-- `REGULATIONS_GOV_API_KEY`
-- `NZ_LEGISLATION_API_KEY`
+- UK via `non-eu`: no required credential; set `POLICY_CORPUS_BUILDER_USER_AGENT` or `source.settings.user_agent` for responsible access
+- Canada via `non-eu`: no required credential
+- Australia via `non-eu`: no required credential
+- US via `non-eu`: `REGULATIONS_GOV_API_KEY`
+- New Zealand API mode via `non-eu`: `NZ_LEGISLATION_API_KEY`
+- ordinary EUR-Lex via `eurlex`: `EURLEX_WS_USER` and `EURLEX_WS_PASS`
+- EUR-Lex NIM via `eurlex-nim`: `EURLEX_WS_USER` and `EURLEX_WS_PASS`
+
+Compatibility environment variables:
+
 - `EURLEX_USER`
 - `EURLEX_WEB_PASS`
-- `EURLEX_WS_USER`
-- `EURLEX_WS_PASS`
-- `POLICY_CORPUS_BUILDER_USER_AGENT`
 
 The package will load `.env` automatically if it is present in the repository root (or a parent directory when importing the package locally). Never commit `.env`.
+
+## Provisional And Internal Surface
+
+The following modules and workflows are intentionally not part of the supported public surface:
+
+- legacy migrated [src/policy_corpus_builder/adapters/eurlex.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex.py): internal migrated helper module with notebook-era ports, diagnostics, cache summaries, and manual inspection helpers
+- legacy migrated [src/policy_corpus_builder/adapters/eurlex_nim.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim.py): internal migrated helper module with notebook-era ports, summaries, and bulk helper logic
+- [src/policy_corpus_builder/adapters/non_eu.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu.py): internal implementation module behind the supported `non-eu` adapter wrapper
+- notebook-era diagnostics, bulk loaders, cache summaries, and summary helpers inside those migrated modules: internal and subject to change without notice
+- New Zealand `nz_mode = "auto"`: convenience mode only; not the supported contract because it can route into fallback scraping
+- New Zealand `nz_mode = "scrape"`: provisional no-key fallback only
+- placeholder and minimal/demo-only surfaces such as `placeholder` and [examples/minimal.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/minimal.toml): internal scaffolding rather than a supported retrieval workflow
+
+Examples and notebooks are documentation aids, not stable implementation entry points. The supported implementation surface is the adapter registry, the adapter wrapper modules, the shared pipeline/orchestration functions, and the normalized model/export pipeline documented here.
 
 ## Happy Path
 
@@ -162,6 +207,21 @@ The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/ac
 
 The current Canada path is the strongest non-UK migrated workflow in this repository and is the next explicitly supported live non-EU path after UK.
 
+## Supported Australia Workflow
+
+The current supported Australia live workflow uses the `non-eu` adapter with `countries = ["AUS"]`.
+
+What it supports today:
+
+- query-driven Australia legislation discovery
+- normalized JSONL export through the shared document model
+
+What it requires:
+
+- no credential at present
+
+The supported Australia example config is [examples/non_eu_australia.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_australia.toml).
+
 ## Supported New Zealand Workflow
 
 The current supported New Zealand live workflow uses the `non-eu` adapter with `countries = ["NZ"]`.
@@ -176,7 +236,7 @@ What it requires:
 
 - for fully supported API mode, an `NZ_LEGISLATION_API_KEY`
 
-The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml).
+The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml). Treat `nz_mode = "api"` as the supported contract.
 
 New Zealand now supports two modes:
 

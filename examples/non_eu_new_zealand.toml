@@ -11,7 +11,10 @@ adapter = "non-eu"
 enabled = true
 
 [sources.settings]
+# Supported New Zealand workflow: API mode with NZ_LEGISLATION_API_KEY.
+# `auto` and `scrape` remain provisional fallback modes.
 countries = ["NZ"]
+nz_mode = "api"
 max_per_term = 500
 max_pages = 5
 max_workers = 8
