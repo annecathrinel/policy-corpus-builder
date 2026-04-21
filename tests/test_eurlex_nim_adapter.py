@@ -16,9 +16,10 @@ from policy_corpus_builder.schemas import SourceConfig  # noqa: E402
 
 class EurlexNIMAdapterTests(unittest.TestCase):
     def test_retrieve_nim_rows_normalizes_act_celex_into_celex(self) -> None:
-        import policy_corpus_builder.adapters.eurlex_nim_adapter as nim_adapter_module
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
 
-        original_fetch = nim_adapter_module.get_national_transpositions_by_celex_ws
+        original_fetch = nim_workflow_module.get_national_transpositions_by_celex_ws
 
         def fake_fetch(*args, **kwargs):
             return pd.DataFrame(
@@ -36,9 +37,9 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 ]
             )
 
-        nim_adapter_module.get_national_transpositions_by_celex_ws = fake_fetch
+        nim_workflow_module.get_national_transpositions_by_celex_ws = fake_fetch
         try:
-            result = nim_adapter_module._retrieve_nim_rows(
+            result = nim_workflow_module._retrieve_nim_rows(
                 pd.DataFrame(
                     [
                         {
@@ -52,7 +53,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 {},
             )
         finally:
-            nim_adapter_module.get_national_transpositions_by_celex_ws = original_fetch
+            nim_workflow_module.get_national_transpositions_by_celex_ws = original_fetch
 
         self.assertIn("celex", result.columns)
         self.assertEqual(result.iloc[0]["celex"], "32014L0089")
@@ -81,10 +82,10 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 os.environ["EURLEX_WEB_PASS"] = original_legacy_pass
 
     def test_collect_supports_direct_celex_seed(self) -> None:
-        import policy_corpus_builder.adapters.eurlex_nim_adapter as nim_adapter_module
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
 
-        original_retrieve = nim_adapter_module._retrieve_nim_rows
-        original_batch = nim_adapter_module.batch_fetch_nim_fulltext
+        original_retrieve = nim_workflow_module._retrieve_nim_rows
+        original_batch = nim_workflow_module.batch_fetch_nim_fulltext
         original_user = os.environ.get("EURLEX_WS_USER")
         original_pass = os.environ.get("EURLEX_WS_PASS")
 
@@ -144,8 +145,8 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 ]
             )
 
-        nim_adapter_module._retrieve_nim_rows = fake_retrieve
-        nim_adapter_module.batch_fetch_nim_fulltext = fake_batch
+        nim_workflow_module._retrieve_nim_rows = fake_retrieve
+        nim_workflow_module.batch_fetch_nim_fulltext = fake_batch
         os.environ["EURLEX_WS_USER"] = "demo-user"
         os.environ["EURLEX_WS_PASS"] = "demo-pass"
         try:
@@ -157,8 +158,8 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 base_path=Path("."),
             )
         finally:
-            nim_adapter_module._retrieve_nim_rows = original_retrieve
-            nim_adapter_module.batch_fetch_nim_fulltext = original_batch
+            nim_workflow_module._retrieve_nim_rows = original_retrieve
+            nim_workflow_module.batch_fetch_nim_fulltext = original_batch
             if original_user is None:
                 os.environ.pop("EURLEX_WS_USER", None)
             else:
@@ -194,10 +195,10 @@ class EurlexNIMAdapterTests(unittest.TestCase):
         self.assertNotIn("query_text", documents[0].raw_metadata["raw_record"])
 
     def test_collect_merges_gracefully_when_fulltext_returns_empty_frame(self) -> None:
-        import policy_corpus_builder.adapters.eurlex_nim_adapter as nim_adapter_module
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
 
-        original_retrieve = nim_adapter_module._retrieve_nim_rows
-        original_batch = nim_adapter_module.batch_fetch_nim_fulltext
+        original_retrieve = nim_workflow_module._retrieve_nim_rows
+        original_batch = nim_workflow_module.batch_fetch_nim_fulltext
         original_user = os.environ.get("EURLEX_WS_USER")
         original_pass = os.environ.get("EURLEX_WS_PASS")
 
@@ -220,8 +221,8 @@ class EurlexNIMAdapterTests(unittest.TestCase):
         def fake_batch(df, **kwargs):
             return pd.DataFrame()
 
-        nim_adapter_module._retrieve_nim_rows = fake_retrieve
-        nim_adapter_module.batch_fetch_nim_fulltext = fake_batch
+        nim_workflow_module._retrieve_nim_rows = fake_retrieve
+        nim_workflow_module.batch_fetch_nim_fulltext = fake_batch
         os.environ["EURLEX_WS_USER"] = "demo-user"
         os.environ["EURLEX_WS_PASS"] = "demo-pass"
         try:
@@ -233,8 +234,8 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 base_path=Path("."),
             )
         finally:
-            nim_adapter_module._retrieve_nim_rows = original_retrieve
-            nim_adapter_module.batch_fetch_nim_fulltext = original_batch
+            nim_workflow_module._retrieve_nim_rows = original_retrieve
+            nim_workflow_module.batch_fetch_nim_fulltext = original_batch
             if original_user is None:
                 os.environ.pop("EURLEX_WS_USER", None)
             else:
@@ -251,12 +252,12 @@ class EurlexNIMAdapterTests(unittest.TestCase):
         self.assertNotIn("full_text", payload)
 
     def test_collect_supports_query_seed_resolution(self) -> None:
-        import policy_corpus_builder.adapters.eurlex_nim_adapter as nim_adapter_module
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
 
-        original_fetch = nim_adapter_module.fetch_eurlex_job
-        original_build_tables = nim_adapter_module.build_eu_doc_tables
-        original_select = nim_adapter_module.select_eligible_celex_acts
-        original_retrieve = nim_adapter_module._retrieve_nim_rows
+        original_fetch = nim_workflow_module.fetch_eurlex_job
+        original_build_tables = nim_workflow_module.build_eu_doc_tables
+        original_select = nim_workflow_module.select_eligible_celex_acts
+        original_retrieve = nim_workflow_module._retrieve_nim_rows
         original_user = os.environ.get("EURLEX_WS_USER")
         original_pass = os.environ.get("EURLEX_WS_PASS")
 
@@ -317,10 +318,10 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 ]
             )
 
-        nim_adapter_module.fetch_eurlex_job = fake_fetch
-        nim_adapter_module.build_eu_doc_tables = fake_build_tables
-        nim_adapter_module.select_eligible_celex_acts = fake_select
-        nim_adapter_module._retrieve_nim_rows = fake_retrieve
+        nim_workflow_module.fetch_eurlex_job = fake_fetch
+        nim_workflow_module.build_eu_doc_tables = fake_build_tables
+        nim_workflow_module.select_eligible_celex_acts = fake_select
+        nim_workflow_module._retrieve_nim_rows = fake_retrieve
         os.environ["EURLEX_WS_USER"] = "demo-user"
         os.environ["EURLEX_WS_PASS"] = "demo-pass"
         try:
@@ -336,10 +337,10 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 base_path=Path("."),
             )
         finally:
-            nim_adapter_module.fetch_eurlex_job = original_fetch
-            nim_adapter_module.build_eu_doc_tables = original_build_tables
-            nim_adapter_module.select_eligible_celex_acts = original_select
-            nim_adapter_module._retrieve_nim_rows = original_retrieve
+            nim_workflow_module.fetch_eurlex_job = original_fetch
+            nim_workflow_module.build_eu_doc_tables = original_build_tables
+            nim_workflow_module.select_eligible_celex_acts = original_select
+            nim_workflow_module._retrieve_nim_rows = original_retrieve
             if original_user is None:
                 os.environ.pop("EURLEX_WS_USER", None)
             else:
@@ -362,6 +363,16 @@ class EurlexNIMAdapterTests(unittest.TestCase):
             "https://eur-lex.europa.eu/legal-content/DA/TXT/?uri=CELEX:72014L0089DNK_270540",
         )
         self.assertNotIn("full_text", payload)
+
+    def test_public_adapter_no_longer_imports_legacy_eurlex_nim_module(self) -> None:
+        adapter_source = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "policy_corpus_builder"
+            / "adapters"
+            / "eurlex_nim_adapter.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("policy_corpus_builder.adapters.eurlex_nim import", adapter_source)
 
 
 if __name__ == "__main__":
