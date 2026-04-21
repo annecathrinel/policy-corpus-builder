@@ -8,6 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from policy_corpus_builder.adapters.eurlex_nim_supported.surface import normalize_legal_act_celex
 from policy_corpus_builder.adapters import get_adapter
 from policy_corpus_builder.exporters import export_documents_jsonl, export_run_manifest
 from policy_corpus_builder.models import NormalizedDocument, Query
@@ -23,6 +24,8 @@ INTERMEDIATE_SUBDIR = "jurisdictions"
 NIM_SUBDIR = "nim"
 CACHE_SUBDIR = "cache"
 RUN_MANIFEST_FILENAME = "run-manifest.json"
+RESULT_SCHEMA_VERSION = "1.0"
+MANIFEST_SCHEMA_VERSION = "1.0"
 
 JURISDICTION_LABELS = {
     "EU": "European Union",
@@ -44,11 +47,35 @@ class CorpusBuildValidationError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyCorpusBuildResult:
-    """Summary of a completed top-level policy corpus build."""
+class JurisdictionBuildResult:
+    """Stable per-jurisdiction output summary."""
 
+    jurisdiction_code: str
+    jurisdiction_label: str
+    intermediate_corpus_path: Path
+    document_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "jurisdiction_code": self.jurisdiction_code,
+            "jurisdiction_label": self.jurisdiction_label,
+            "intermediate_corpus_path": str(self.intermediate_corpus_path),
+            "document_count": self.document_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyCorpusBuildResult:
+    """Stable public result contract for a top-level corpus build."""
+
+    schema_version: str
     outputs_path: Path
+    query_terms: tuple[str, ...]
     selected_jurisdictions: tuple[str, ...]
+    include_translations: bool
+    translated_terms: tuple[str, ...]
+    include_nim: bool
+    jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
     final_corpus_path: Path
     nim_corpus_path: Path | None
@@ -56,7 +83,50 @@ class PolicyCorpusBuildResult:
     merged_document_count: int
     final_document_count: int
     duplicates_removed: int
+    nim_status: str
+    nim_seed_count: int
+    nim_eligible_seed_count: int
     nim_document_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "outputs_path": str(self.outputs_path),
+            "query_terms": list(self.query_terms),
+            "selected_jurisdictions": list(self.selected_jurisdictions),
+            "include_translations": self.include_translations,
+            "translated_terms": list(self.translated_terms),
+            "include_nim": self.include_nim,
+            "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
+            "per_jurisdiction_output_paths": {
+                jurisdiction: str(path)
+                for jurisdiction, path in self.intermediate_paths.items()
+            },
+            "final_corpus_path": str(self.final_corpus_path),
+            "nim_corpus_path": str(self.nim_corpus_path) if self.nim_corpus_path else None,
+            "manifest_path": str(self.manifest_path),
+            "merged_document_count": self.merged_document_count,
+            "final_document_count": self.final_document_count,
+            "duplicates_removed": self.duplicates_removed,
+            "nim_status": self.nim_status,
+            "nim_seed_count": self.nim_seed_count,
+            "nim_eligible_seed_count": self.nim_eligible_seed_count,
+            "nim_document_count": self.nim_document_count,
+        }
+
+    def to_manifest_dict(self) -> dict[str, object]:
+        payload = self.to_dict()
+        payload["manifest_schema_version"] = MANIFEST_SCHEMA_VERSION
+        payload["timestamp_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        payload["output_layout"] = {
+            "cache": str((self.outputs_path / CACHE_SUBDIR).resolve()),
+            "jurisdictions": str((self.outputs_path / INTERMEDIATE_SUBDIR).resolve()),
+            "final": str((self.outputs_path / FINAL_CORPUS_SUBDIR).resolve()),
+            "nim": str((self.outputs_path / NIM_SUBDIR).resolve()),
+        }
+        payload["tool_version"] = TOOL_VERSION
+        payload["pipeline"] = "build_policy_corpus"
+        return payload
 
 
 def build_policy_corpus(
@@ -69,6 +139,7 @@ def build_policy_corpus(
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions."""
 
+    _emit_progress("Starting build_policy_corpus: validating inputs.")
     cleaned_query_terms = _clean_terms(query_terms, field_name="query_terms", required=True)
     cleaned_jurisdictions = _clean_jurisdictions(jurisdictions)
     cleaned_translated_terms = _clean_terms(
@@ -89,8 +160,14 @@ def build_policy_corpus(
 
     jurisdiction_documents: dict[str, tuple[NormalizedDocument, ...]] = {}
     intermediate_paths: dict[str, Path] = {}
+    jurisdiction_results: list[JurisdictionBuildResult] = []
+
+    _emit_progress(
+        "Running jurisdictions: " + ", ".join(cleaned_jurisdictions) + "."
+    )
 
     for jurisdiction in cleaned_jurisdictions:
+        _emit_progress(f"Starting jurisdiction {jurisdiction}.")
         documents = _run_jurisdiction(
             jurisdiction,
             query_terms=cleaned_query_terms,
@@ -104,12 +181,24 @@ def build_policy_corpus(
         jurisdiction_output_dir = intermediate_root / jurisdiction.lower()
         path = export_documents_jsonl(documents, output_dir=jurisdiction_output_dir)
         intermediate_paths[jurisdiction] = path
+        jurisdiction_results.append(
+            JurisdictionBuildResult(
+                jurisdiction_code=jurisdiction,
+                jurisdiction_label=JURISDICTION_LABELS[jurisdiction],
+                intermediate_corpus_path=path,
+                document_count=len(documents),
+            )
+        )
+        _emit_progress(
+            f"Finished jurisdiction {jurisdiction}: {len(documents)} documents."
+        )
 
     merged_documents: tuple[NormalizedDocument, ...] = tuple(
         document
         for jurisdiction in cleaned_jurisdictions
         for document in jurisdiction_documents[jurisdiction]
     )
+    _emit_progress("Merging jurisdiction corpora and deduplicating final corpus.")
     deduplication_result = deduplicate_documents(
         merged_documents,
         config=NormalizationConfig(
@@ -123,11 +212,22 @@ def build_policy_corpus(
     )
 
     nim_corpus_path: Path | None = None
+    nim_status = "not_requested"
+    nim_seed_count = 0
+    nim_eligible_seed_count = 0
     nim_document_count = 0
     nim_documents: tuple[NormalizedDocument, ...] = tuple()
     if include_nim and "EU" in cleaned_jurisdictions:
-        eu_celex_seeds = _extract_eu_celex_seeds(jurisdiction_documents.get("EU", tuple()))
+        _emit_progress("Running NIM from EU CELEX results.")
+        nim_status = "requested"
+        nim_seed_candidates = _extract_eu_celex_seed_candidates(
+            jurisdiction_documents.get("EU", tuple())
+        )
+        nim_seed_count = len(nim_seed_candidates)
+        eu_celex_seeds = _filter_eligible_nim_celex_seeds(nim_seed_candidates)
+        nim_eligible_seed_count = len(eu_celex_seeds)
         if eu_celex_seeds:
+            nim_status = "ran"
             nim_documents = _run_eu_nim(
                 eu_celex_seeds,
                 output_root=output_root,
@@ -144,39 +244,67 @@ def build_policy_corpus(
             nim_document_count = len(nim_documents)
             nim_root.mkdir(parents=True, exist_ok=True)
             nim_corpus_path = export_documents_jsonl(nim_documents, output_dir=nim_root)
+            _emit_progress(f"Finished NIM: {nim_document_count} documents.")
+        else:
+            nim_status = "skipped_no_eligible_eu_legal_acts"
+            _emit_progress(
+                "Skipping NIM: EU results contained no eligible legal-act CELEX seeds."
+            )
+    elif include_nim:
+        nim_status = "skipped_eu_not_selected"
+        _emit_progress("Skipping NIM: EU was not selected.")
 
-    manifest_path = export_run_manifest(
-        _build_manifest(
-            outputs_path=output_root,
-            selected_jurisdictions=cleaned_jurisdictions,
-            query_terms=cleaned_query_terms,
-            include_translations=include_translations,
-            translated_terms=cleaned_translated_terms,
-            include_nim=include_nim,
-            intermediate_paths=intermediate_paths,
-            jurisdiction_documents=jurisdiction_documents,
-            final_corpus_path=final_corpus_path,
-            nim_corpus_path=nim_corpus_path,
-            merged_document_count=len(merged_documents),
-            final_document_count=len(deduplication_result.documents),
-            duplicates_removed=deduplication_result.duplicates_removed,
-            nim_document_count=nim_document_count,
-        ),
-        output_dir=output_root,
-    )
-
-    return PolicyCorpusBuildResult(
+    _emit_progress("Writing final outputs and manifest.")
+    result = PolicyCorpusBuildResult(
+        schema_version=RESULT_SCHEMA_VERSION,
         outputs_path=output_root,
+        query_terms=cleaned_query_terms,
         selected_jurisdictions=cleaned_jurisdictions,
+        include_translations=include_translations,
+        translated_terms=cleaned_translated_terms,
+        include_nim=include_nim,
+        jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
         final_corpus_path=final_corpus_path,
         nim_corpus_path=nim_corpus_path,
-        manifest_path=manifest_path,
+        manifest_path=output_root / RUN_MANIFEST_FILENAME,
         merged_document_count=len(merged_documents),
         final_document_count=len(deduplication_result.documents),
         duplicates_removed=deduplication_result.duplicates_removed,
+        nim_status=nim_status,
+        nim_seed_count=nim_seed_count,
+        nim_eligible_seed_count=nim_eligible_seed_count,
         nim_document_count=nim_document_count,
     )
+    manifest_path = export_run_manifest(
+        result.to_manifest_dict(),
+        output_dir=output_root,
+    )
+    result = PolicyCorpusBuildResult(
+        schema_version=result.schema_version,
+        outputs_path=result.outputs_path,
+        query_terms=result.query_terms,
+        selected_jurisdictions=result.selected_jurisdictions,
+        include_translations=result.include_translations,
+        translated_terms=result.translated_terms,
+        include_nim=result.include_nim,
+        jurisdiction_results=result.jurisdiction_results,
+        intermediate_paths=result.intermediate_paths,
+        final_corpus_path=result.final_corpus_path,
+        nim_corpus_path=result.nim_corpus_path,
+        manifest_path=manifest_path,
+        merged_document_count=result.merged_document_count,
+        final_document_count=result.final_document_count,
+        duplicates_removed=result.duplicates_removed,
+        nim_status=result.nim_status,
+        nim_seed_count=result.nim_seed_count,
+        nim_eligible_seed_count=result.nim_eligible_seed_count,
+        nim_document_count=result.nim_document_count,
+    )
+    _emit_progress(
+        f"Completed build_policy_corpus: {result.final_document_count} final documents written."
+    )
+    return result
 
 
 def _run_jurisdiction(
@@ -266,7 +394,7 @@ def _build_inline_queries(terms: tuple[str, ...], *, origin: str) -> tuple[Query
     )
 
 
-def _extract_eu_celex_seeds(documents: tuple[NormalizedDocument, ...]) -> tuple[str, ...]:
+def _extract_eu_celex_seed_candidates(documents: tuple[NormalizedDocument, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
     for document in documents:
@@ -285,56 +413,15 @@ def _extract_eu_celex_seeds(documents: tuple[NormalizedDocument, ...]) -> tuple[
     return tuple(ordered)
 
 
-def _build_manifest(
-    *,
-    outputs_path: Path,
-    selected_jurisdictions: tuple[str, ...],
-    query_terms: tuple[str, ...],
-    include_translations: bool,
-    translated_terms: tuple[str, ...],
-    include_nim: bool,
-    intermediate_paths: dict[str, Path],
-    jurisdiction_documents: dict[str, tuple[NormalizedDocument, ...]],
-    final_corpus_path: Path,
-    nim_corpus_path: Path | None,
-    merged_document_count: int,
-    final_document_count: int,
-    duplicates_removed: int,
-    nim_document_count: int,
-) -> dict[str, Any]:
-    timestamp_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    jurisdiction_summaries = {
-        jurisdiction: {
-            "label": JURISDICTION_LABELS[jurisdiction],
-            "document_count": len(jurisdiction_documents.get(jurisdiction, tuple())),
-            "intermediate_corpus_path": str(intermediate_paths[jurisdiction]),
-        }
-        for jurisdiction in selected_jurisdictions
-    }
-    return {
-        "pipeline": "build_policy_corpus",
-        "tool_version": TOOL_VERSION,
-        "timestamp_utc": timestamp_utc,
-        "outputs_path": str(outputs_path),
-        "selected_jurisdictions": list(selected_jurisdictions),
-        "query_terms": list(query_terms),
-        "include_translations": include_translations,
-        "translated_terms": list(translated_terms),
-        "include_nim": include_nim,
-        "jurisdictions": jurisdiction_summaries,
-        "merged_document_count_before_deduplication": merged_document_count,
-        "final_document_count": final_document_count,
-        "duplicates_removed": duplicates_removed,
-        "final_corpus_path": str(final_corpus_path),
-        "nim_document_count": nim_document_count,
-        "nim_corpus_path": str(nim_corpus_path) if nim_corpus_path else None,
-        "output_layout": {
-            "cache": str((outputs_path / CACHE_SUBDIR).resolve()),
-            "jurisdictions": str((outputs_path / INTERMEDIATE_SUBDIR).resolve()),
-            "final": str((outputs_path / FINAL_CORPUS_SUBDIR).resolve()),
-            "nim": str((outputs_path / NIM_SUBDIR).resolve()),
-        },
-    }
+def _filter_eligible_nim_celex_seeds(candidates: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    eligible: list[str] = []
+    for candidate in candidates:
+        normalized = normalize_legal_act_celex(candidate)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            eligible.append(normalized)
+    return tuple(eligible)
 
 
 def _clean_terms(
@@ -382,8 +469,13 @@ def _clean_jurisdictions(raw_jurisdictions: list[str]) -> tuple[str, ...]:
     return tuple(cleaned)
 
 
+def _emit_progress(message: str) -> None:
+    print(f"[policy-corpus-builder] {message}", flush=True)
+
+
 __all__ = [
     "CorpusBuildValidationError",
+    "JurisdictionBuildResult",
     "PolicyCorpusBuildResult",
     "SUPPORTED_JURISDICTIONS",
     "build_policy_corpus",

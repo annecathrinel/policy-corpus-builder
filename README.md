@@ -1,69 +1,136 @@
 # policy-corpus-builder
 
-`policy-corpus-builder` is a small Python toolkit for building clean policy document corpora.
+`policy-corpus-builder` is a Python toolkit for building clean policy document corpora across supported jurisdictions.
 
-Version `0.1` is intentionally narrow:
+The main happy-path public entry point is:
 
-- load queries from a config file
-- read structured local policy records with the `local-file` adapter
-- run one supported ordinary EUR-Lex workflow through the `eurlex` adapter
-- run one supported EUR-Lex NIM workflow through the `eurlex-nim` adapter
-- run supported live non-EU workflows for UK legislation, Canada publications, Australia legislation, API-backed New Zealand legislation, and US Regulations.gov documents
-- normalize records into one shared `NormalizedDocument` model
-- deduplicate deterministically
-- export the final corpus to JSONL
+`build_policy_corpus(...)`
 
-The package is library-first. The CLI is a thin convenience layer on top of the same workflow.
+Use that function first when you want one final normalized corpus written to disk from a simple top-level call. The lower-level adapter and config surfaces are still available, but they are now secondary to the top-level builder workflow.
 
-## What v0.1 Includes
+## Main Happy Path
 
-- one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
-- one real adapter: `local-file`
-- one supported ordinary EUR-Lex adapter path: `eurlex`
-- one supported EUR-Lex NIM adapter path: `eurlex-nim`
-- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
-- deterministic deduplication using configured normalized fields
-- one export format: JSONL
-- one local-file notebook walkthrough example: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
-- one minimal CLI for config validation and running the same workflow
+The main user-facing function is:
 
-## Supported Surface
+```python
+build_policy_corpus(
+    query_terms: list[str],
+    jurisdictions: list[str],
+    outputs_path: str | Path,
+    include_translations: bool = False,
+    translated_terms: list[str] | None = None,
+    include_nim: bool = False,
+) -> PolicyCorpusBuildResult
+```
 
-The currently supported workflows are:
+It is available directly from the package root:
 
-- UK via `adapter = "non-eu"` with `countries = ["UK"]`
-- Canada via `adapter = "non-eu"` with `countries = ["CA"]`
-- Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
-- US via `adapter = "non-eu"` with `countries = ["US"]`
-- New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
-- ordinary EUR-Lex via `adapter = "eurlex"`
-- EUR-Lex NIM via `adapter = "eurlex-nim"`
+```python
+from policy_corpus_builder import build_policy_corpus
+```
 
-The supported adapter entry points are:
+## Copy-Paste Example
 
-- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
-- `LocalFileAdapter` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py)
-- `NonEUAdapter` in [src/policy_corpus_builder/adapters/non_eu_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu_adapter.py)
-- `EurlexAdapter` in [src/policy_corpus_builder/adapters/eurlex_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_adapter.py)
-- `EurlexNIMAdapter` in [src/policy_corpus_builder/adapters/eurlex_nim_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim_adapter.py)
+```python
+from pathlib import Path
 
-The public implementation surface is the adapter registry plus those adapter wrapper modules. Importing deeper helper modules directly is not part of the supported API.
+from policy_corpus_builder import build_policy_corpus
 
-For a stable summary of supported versus provisional code paths, see [docs/supported-surface.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/supported-surface.md).
+result = build_policy_corpus(
+    query_terms=[
+        "marine spatial planning",
+        "offshore renewable energy",
+    ],
+    jurisdictions=["EU", "UK", "CA"],
+    outputs_path=Path("outputs/policy-corpus-demo"),
+    include_translations=True,
+    translated_terms=[
+        "planification de l'espace maritime",
+        "energie renouvelable en mer",
+    ],
+    include_nim=True,
+)
 
-## Small Public API
+print(result.final_corpus_path)
+print(result.manifest_path)
+print(result.final_document_count)
+```
 
-These are the main functions and modules worth treating as the v0.1 public surface:
+`build_policy_corpus(...)` prints a lightweight progress stream while it runs, writes intermediate and final corpus artifacts to disk, and returns a stable `PolicyCorpusBuildResult` object for programmatic use.
 
-- `load_and_validate_config` in [src/policy_corpus_builder/config.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/config.py)
-- `load_queries` in [src/policy_corpus_builder/queries.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/queries.py)
-- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
-- `normalize_adapter_results` in [src/policy_corpus_builder/pipeline.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/pipeline.py)
-- `deduplicate_documents` in [src/policy_corpus_builder/postprocess.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/postprocess.py)
-- `export_documents_jsonl` in [src/policy_corpus_builder/exporters/jsonl.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/exporters/jsonl.py)
-- `run_from_config_path` in [src/policy_corpus_builder/orchestration.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/orchestration.py)
+## What It Writes To Disk
 
-The adapter wrapper modules listed in the supported surface section above are also part of the supported import surface for workflow-specific integrations.
+Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
+
+- `outputs/policy-corpus-demo/cache/`
+- `outputs/policy-corpus-demo/jurisdictions/eu/documents.jsonl`
+- `outputs/policy-corpus-demo/jurisdictions/uk/documents.jsonl`
+- `outputs/policy-corpus-demo/jurisdictions/ca/documents.jsonl`
+- `outputs/policy-corpus-demo/jurisdictions/aus/documents.jsonl` when selected
+- `outputs/policy-corpus-demo/jurisdictions/nz/documents.jsonl` when selected
+- `outputs/policy-corpus-demo/jurisdictions/us/documents.jsonl` when selected
+- `outputs/policy-corpus-demo/final/documents.jsonl`
+- `outputs/policy-corpus-demo/nim/documents.jsonl` when `include_nim=True` and NIM results are produced
+- `outputs/policy-corpus-demo/run-manifest.json`
+
+The final merged corpus is always written to `final/documents.jsonl`.
+
+## How `include_translations` Works
+
+`include_translations` only affects the EU path.
+
+- If `include_translations=False`, the EU branch runs only `query_terms`.
+- If `include_translations=True`, the EU branch runs both `query_terms` and `translated_terms`.
+- Non-EU jurisdictions continue to run only `query_terms`.
+
+This keeps the top-level API simple while preserving the current supported workflow boundary.
+
+## How `include_nim` Works
+
+`include_nim` only does anything when `EU` is included in `jurisdictions`.
+
+- The main EU corpus is built first through the ordinary EUR-Lex path.
+- CELEX identifiers are extracted from the EU results.
+- Those CELEX identifiers are filtered to eligible EU legal acts only.
+- Only eligible legal-act CELEXs compatible with the supported NIM path are used to seed the existing EUR-Lex NIM workflow.
+- NIM results are written to a separate corpus under `nim/documents.jsonl`.
+
+NIM is not merged into the main final corpus. The main final corpus remains the merged, deduplicated jurisdiction corpus only.
+
+If the EU result set contains no eligible legal-act CELEXs, NIM is skipped cleanly. In that case the top-level builder still succeeds, reports the skip in progress output and the run manifest, and does not write a NIM corpus file.
+
+## Public Result Object
+
+`build_policy_corpus(...)` returns a stable `PolicyCorpusBuildResult` object. It includes:
+
+- selected jurisdictions
+- query terms
+- whether EU translations were included
+- whether NIM was included
+- per-jurisdiction output paths and document counts
+- final corpus path
+- NIM corpus path when produced
+- merged document count before final deduplication
+- final document count
+- duplicates removed
+- manifest path
+
+For programmatic consumption, `PolicyCorpusBuildResult.to_dict()` returns a stable summary payload, and the run manifest on disk mirrors that same top-level contract.
+
+## Progress Output
+
+The builder emits lightweight progress messages directly from `build_policy_corpus(...)`.
+
+At minimum it reports:
+
+- pipeline start and input validation
+- each selected jurisdiction starting
+- each selected jurisdiction finishing with a document count
+- whether NIM is running or skipped
+- final merge and deduplication
+- final output write and completion
+
+The goal is readable build-stage visibility, not verbose logging.
 
 ## Install
 
@@ -98,31 +165,57 @@ Compatibility environment variables:
 
 The package will load `.env` automatically if it is present in the repository root (or a parent directory when importing the package locally). Never commit `.env`.
 
-## Provisional And Internal Surface
+## What v0.1 Includes
 
-The following modules and workflows are intentionally not part of the supported public surface:
+- one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
+- one supported top-level builder: `build_policy_corpus(...)`
+- one supported ordinary EUR-Lex adapter path: `eurlex`
+- one supported EUR-Lex NIM adapter path: `eurlex-nim`
+- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
+- deterministic final deduplication
+- JSONL corpus export
+- machine-readable run manifest export
 
-- legacy migrated [src/policy_corpus_builder/adapters/eurlex.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex.py): internal migrated helper module with notebook-era ports, diagnostics, cache summaries, and manual inspection helpers
-- legacy migrated [src/policy_corpus_builder/adapters/eurlex_nim.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim.py): internal migrated helper module with notebook-era ports, summaries, and bulk helper logic
-- [src/policy_corpus_builder/adapters/non_eu.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu.py): internal implementation module behind the supported `non-eu` adapter wrapper
-- notebook-era diagnostics, bulk loaders, cache summaries, and summary helpers inside those migrated modules: internal and subject to change without notice
-- New Zealand `nz_mode = "auto"`: convenience mode only; not the supported contract because it can route into fallback scraping
-- New Zealand `nz_mode = "scrape"`: provisional no-key fallback only
-- placeholder and minimal/demo-only surfaces such as `placeholder` and [examples/minimal.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/minimal.toml): internal scaffolding rather than a supported retrieval workflow
+## Supported Surface
 
-Examples and notebooks are documentation aids, not stable implementation entry points. The supported implementation surface is the adapter registry, the adapter wrapper modules, the shared pipeline/orchestration functions, and the normalized model/export pipeline documented here.
+The currently supported workflows are:
 
-For explicit internal developer use, provisional `non-eu` modes can still be validated by setting `source.settings.allow_internal = true`. That escape hatch is intentionally opt-in and outside the default supported surface.
+- UK via `adapter = "non-eu"` with `countries = ["UK"]`
+- Canada via `adapter = "non-eu"` with `countries = ["CA"]`
+- Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
+- US via `adapter = "non-eu"` with `countries = ["US"]`
+- New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
+- ordinary EUR-Lex via `adapter = "eurlex"`
+- EUR-Lex NIM via `adapter = "eurlex-nim"`
 
-## Happy Path
+The main public API worth treating as stable is:
 
-The simplest end-to-end example uses the bundled local fixture-backed adapter and config:
+- `build_policy_corpus` in [src/policy_corpus_builder/corpus_builder.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/corpus_builder.py)
+- `PolicyCorpusBuildResult` in [src/policy_corpus_builder/corpus_builder.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/corpus_builder.py)
+- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
+- `LocalFileAdapter` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py)
+- `NonEUAdapter` in [src/policy_corpus_builder/adapters/non_eu_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu_adapter.py)
+- `EurlexAdapter` in [src/policy_corpus_builder/adapters/eurlex_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_adapter.py)
+- `EurlexNIMAdapter` in [src/policy_corpus_builder/adapters/eurlex_nim_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim_adapter.py)
 
-- config: [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml)
-- fixture data: [examples/fixtures/policies.jsonl](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/fixtures/policies.jsonl)
-- notebook walkthrough: [examples/notebooks/local_file_end_to_end.ipynb](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/notebooks/local_file_end_to_end.ipynb)
+The lower-level adapter/config workflow remains supported for advanced integrations, but it is no longer the first workflow users should reach for.
 
-### Library Usage
+For a stable summary of supported versus provisional code paths, see [docs/supported-surface.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/supported-surface.md).
+
+## Lower-Level Config And Adapter Usage
+
+If you need direct control over config files, adapters, query loading, normalization, or exports, those surfaces still exist. They are now secondary to `build_policy_corpus(...)`.
+
+The most relevant lower-level functions are:
+
+- `load_and_validate_config` in [src/policy_corpus_builder/config.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/config.py)
+- `load_queries` in [src/policy_corpus_builder/queries.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/queries.py)
+- `normalize_adapter_results` in [src/policy_corpus_builder/pipeline.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/pipeline.py)
+- `deduplicate_documents` in [src/policy_corpus_builder/postprocess.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/postprocess.py)
+- `export_documents_jsonl` in [src/policy_corpus_builder/exporters/jsonl.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/exporters/jsonl.py)
+- `run_from_config_path` in [src/policy_corpus_builder/orchestration.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/orchestration.py)
+
+### Example: Lower-Level Library Usage
 
 ```python
 from pathlib import Path
@@ -170,7 +263,21 @@ policy-corpus-builder validate-config --config examples/local_file.toml
 policy-corpus-builder run --config examples/local_file.toml
 ```
 
-The CLI runs the same in-memory pipeline and writes `documents.jsonl` when `jsonl` is enabled in the config.
+The CLI remains config-oriented and runs the lower-level config pipeline rather than the new top-level builder.
+
+## Provisional And Internal Surface
+
+The following modules and workflows are intentionally not part of the supported public surface:
+
+- legacy migrated [src/policy_corpus_builder/adapters/eurlex.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex.py)
+- legacy migrated [src/policy_corpus_builder/adapters/eurlex_nim.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim.py)
+- [src/policy_corpus_builder/adapters/non_eu.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu.py)
+- notebook-era diagnostics, bulk loaders, cache summaries, and summary helpers inside those migrated modules
+- New Zealand `nz_mode = "auto"` as a supported contract
+- New Zealand `nz_mode = "scrape"` as a supported contract
+- placeholder and demo-only surfaces such as `placeholder` and [examples/minimal.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/minimal.toml)
+
+Examples and notebooks are documentation aids, not stable implementation entry points.
 
 ## Supported UK Workflow
 
@@ -207,8 +314,6 @@ What it supports today:
 
 The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).
 
-The current Canada path is the strongest non-UK migrated workflow in this repository and is the next explicitly supported live non-EU path after UK.
-
 ## Supported Australia Workflow
 
 The current supported Australia live workflow uses the `non-eu` adapter with `countries = ["AUS"]`.
@@ -217,10 +322,6 @@ What it supports today:
 
 - query-driven Australia legislation discovery
 - normalized JSONL export through the shared document model
-
-What it requires:
-
-- no credential at present
 
 The supported Australia example config is [examples/non_eu_australia.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_australia.toml).
 
@@ -240,14 +341,6 @@ What it requires:
 
 The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml). Treat `nz_mode = "api"` as the supported contract.
 
-New Zealand now supports two modes:
-
-- `nz_mode = "auto"`: use the official API when `NZ_LEGISLATION_API_KEY` is present; otherwise fall back to the legacy website scraper
-- `nz_mode = "api"`: require the API key and fail cleanly if it is missing
-- `nz_mode = "scrape"`: force the legacy no-key scraper path
-
-API mode is the preferred and fully supported path. Scraper mode is fallback-only and provisional because it still depends on the public site remaining accessible to scripted requests.
-
 ## Supported US Workflow
 
 The current supported US live workflow uses the `non-eu` adapter with `countries = ["US"]`.
@@ -264,118 +357,13 @@ What it requires:
 
 The supported US example config is [examples/non_eu_us.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_us.toml).
 
-## Normalized Document Model
-
-The shared normalized record is [NormalizedDocument](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py:14).
-
-Core fields include:
-
-- `document_id`
-- `source_name`
-- `source_document_id`
-- `title`
-- `summary`
-- `document_type`
-- `language`
-- `jurisdiction`
-- `publication_date`
-- `effective_date`
-- `url`
-- `download_url`
-- `query`
-- `full_text`
-- `retrieved_at`
-- `checksum`
-- `content_path`
-- `raw_metadata`
-
-Source-specific leftovers stay in `raw_metadata`.
-
-## Local-File Adapter
-
-The bundled v0.1 adapter is `local-file` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py).
-
-It reads local JSON or JSONL files from `source.settings.path`.
-
-Supported input shapes:
-
-- JSONL: one JSON object per line
-- JSON: a top-level list of objects
-- JSON: an object with `records: [...]`
-
-Required record fields:
-
-- `id`
-- `title`
-
-Optional fields:
-
-- `summary`
-- `document_type`
-- `language`
-- `jurisdiction`
-- `publication_date`
-- `effective_date`
-- `url`
-- `download_url`
-- `retrieved_at`
-- `checksum`
-- `content_path`
-- `source_document_id`
-
-Optional query matching:
-
-- by default the adapter looks for a `queries` field on each record
-- `queries` can be a string or list of strings
-- matching records are emitted for the active query
-- if the field is missing, the record is treated as query-agnostic
-
-## Config Shape
-
-v0.1 uses TOML with five top-level sections:
-
-- `[project]`
-- `[queries]`
-- `[[sources]]`
-- `[normalization]`
-- `[export]`
-
-The bundled example config is [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml).
-
-```toml
-[project]
-name = "local-file-example"
-output_dir = "outputs/local-file-example"
-
-[queries]
-inventory = "queries/example_queries.txt"
-
-[[sources]]
-name = "fixture-policies"
-adapter = "local-file"
-
-[sources.settings]
-path = "fixtures/policies.jsonl"
-format = "jsonl"
-query_field = "queries"
-
-[normalization]
-deduplicate = true
-deduplicate_fields = ["title", "publication_date", "url"]
-
-[export]
-formats = ["jsonl"]
-```
-
-The live UK example is [examples/non_eu_uk.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_uk.toml). For that workflow, `source.settings.user_agent` is optional but recommended.
-
 ## Supported EUR-Lex Workflow
 
 The current supported EUR-Lex live workflow uses the `eurlex` adapter with the ordinary EU WebService search path plus ordinary EU CELEX full-text retrieval.
 
 What it supports today:
 
-- query-inventory-driven EUR-Lex WebService search
+- query-driven EUR-Lex WebService search
 - CELEX-based ordinary EU document consolidation
 - CELEX full-text retrieval for supported document types
 - normalized JSONL export through the shared document model
@@ -408,31 +396,60 @@ Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatib
 
 The supported EUR-Lex NIM example config is [examples/eu_nim.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu_nim.toml).
 
-## Output
+## Normalized Document Model
 
-The v0.1 export format is JSONL. Each line is one normalized document record produced by `NormalizedDocument.to_dict()`.
+The shared normalized record is [NormalizedDocument](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py:14).
 
-Typical run output goes under the configured project output directory, for example:
+Core fields include:
 
-- [examples/outputs/local-file-example/documents.jsonl](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/outputs/local-file-example/documents.jsonl)
+- `document_id`
+- `source_name`
+- `source_document_id`
+- `title`
+- `summary`
+- `document_type`
+- `language`
+- `jurisdiction`
+- `publication_date`
+- `effective_date`
+- `url`
+- `download_url`
+- `query`
+- `full_text`
+- `retrieved_at`
+- `checksum`
+- `content_path`
+- `raw_metadata`
 
-The current implementation also writes a small run manifest alongside corpus exports, but that is a secondary artifact rather than the main v0.1 feature.
+Source-specific leftovers stay in `raw_metadata`.
+
+## Config Shape
+
+The lower-level config system still uses TOML with five top-level sections:
+
+- `[project]`
+- `[queries]`
+- `[[sources]]`
+- `[normalization]`
+- `[export]`
+
+The bundled example config is [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml).
 
 ## Repository Scope
 
-This repository is intentionally separate from `NiD-Policy-Analysis-clean`.
+This repository is intentionally separate from project-specific downstream analysis work.
 
 `policy-corpus-builder` is for:
 
-- query loading
 - source access
 - normalization
 - corpus cleaning
-- export
+- corpus export
+- stable top-level corpus building
 
 It is not for:
 
 - research questions
 - project-specific dictionaries
-- notebooks tied to one analysis project
 - report generation
+- project-specific analysis logic

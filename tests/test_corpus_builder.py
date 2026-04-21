@@ -2,6 +2,8 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,6 +48,87 @@ class _FakeEurlexAdapter(_FakeAdapter):
                         "download_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
                         "full_text": f"Full text for {query.text}",
                         "raw_record": {"celex": "32014L0089", "celex_full": "32014L0089"},
+                    }
+                },
+            )()
+        ]
+
+
+class _MixedFakeEurlexAdapter(_FakeAdapter):
+    name = "eurlex"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        self._tracker["eu_queries"].append(query.text)
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": "eu-eurlex:EU:32014L0089",
+                        "source_document_id": "32014L0089",
+                        "title": f"Eligible EU hit for {query.text}",
+                        "document_type": "directive",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2014-07-23",
+                        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                        "download_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                        "full_text": f"Eligible full text for {query.text}",
+                        "raw_record": {"celex": "32014L0089", "celex_full": "32014L0089"},
+                    }
+                },
+            )(),
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": "eu-eurlex:EU:52022AR4206",
+                        "source_document_id": "52022AR4206",
+                        "title": f"Ineligible EU hit for {query.text}",
+                        "document_type": "opinion",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2023-02-09",
+                        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022AR4206",
+                        "download_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022AR4206",
+                        "full_text": f"Ineligible full text for {query.text}",
+                        "raw_record": {"celex": "52022AR4206", "celex_full": "52022AR4206"},
+                    }
+                },
+            )(),
+        ]
+
+
+class _IneligibleOnlyFakeEurlexAdapter(_FakeAdapter):
+    name = "eurlex"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        self._tracker["eu_queries"].append(query.text)
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": "eu-eurlex:EU:52022AR4206",
+                        "source_document_id": "52022AR4206",
+                        "title": f"Ineligible EU hit for {query.text}",
+                        "document_type": "opinion",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2023-02-09",
+                        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022AR4206",
+                        "download_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022AR4206",
+                        "full_text": f"Ineligible full text for {query.text}",
+                        "raw_record": {"celex": "52022AR4206", "celex_full": "52022AR4206"},
                     }
                 },
             )()
@@ -122,9 +205,12 @@ class _FakeNIMAdapter(_FakeAdapter):
 
 class PolicyCorpusBuilderTests(unittest.TestCase):
     def _build_fake_get_adapter(self, tracker):
+        return self._build_custom_fake_get_adapter(tracker, eurlex_adapter_class=_FakeEurlexAdapter)
+
+    def _build_custom_fake_get_adapter(self, tracker, *, eurlex_adapter_class):
         def _fake_get_adapter(adapter_name):
             if adapter_name == "eurlex":
-                return _FakeEurlexAdapter(tracker)
+                return eurlex_adapter_class(tracker)
             if adapter_name == "non-eu":
                 return _FakeNonEUAdapter(tracker)
             if adapter_name == "eurlex-nim":
@@ -138,10 +224,11 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
             with patch(
                 "policy_corpus_builder.corpus_builder.get_adapter",
                 side_effect=self._build_fake_get_adapter(tracker),
-            ):
+            ), redirect_stdout(stdout):
                 result = build_policy_corpus(
                     query_terms=["marine spatial planning"],
                     jurisdictions=["EU", "UK"],
@@ -160,11 +247,24 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result.final_corpus_path, final_corpus)
             self.assertEqual(result.nim_corpus_path, nim_corpus)
             self.assertEqual(result.manifest_path, manifest_path)
+            self.assertEqual(result.schema_version, "1.0")
+            self.assertEqual(result.query_terms, ("marine spatial planning",))
             self.assertEqual(result.selected_jurisdictions, ("EU", "UK"))
+            self.assertEqual(result.include_translations, True)
+            self.assertEqual(result.translated_terms, ("planification marine",))
+            self.assertEqual(result.include_nim, True)
             self.assertEqual(result.merged_document_count, 3)
             self.assertEqual(result.final_document_count, 2)
             self.assertEqual(result.duplicates_removed, 1)
+            self.assertEqual(result.nim_status, "ran")
+            self.assertEqual(result.nim_seed_count, 1)
+            self.assertEqual(result.nim_eligible_seed_count, 1)
             self.assertEqual(result.nim_document_count, 1)
+            self.assertEqual(len(result.jurisdiction_results), 2)
+            self.assertEqual(result.jurisdiction_results[0].jurisdiction_code, "EU")
+            self.assertEqual(result.jurisdiction_results[0].document_count, 2)
+            self.assertEqual(result.jurisdiction_results[1].jurisdiction_code, "UK")
+            self.assertEqual(result.jurisdiction_results[1].document_count, 1)
 
             self.assertTrue((output_root / "cache").exists())
             self.assertTrue(eu_intermediate.exists())
@@ -179,10 +279,34 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(len(nim_corpus.read_text(encoding="utf-8").splitlines()), 1)
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            result_payload = result.to_dict()
+            self.assertEqual(result_payload["schema_version"], "1.0")
+            self.assertEqual(result_payload["query_terms"], ["marine spatial planning"])
+            self.assertEqual(result_payload["selected_jurisdictions"], ["EU", "UK"])
+            self.assertEqual(result_payload["include_translations"], True)
+            self.assertEqual(result_payload["include_nim"], True)
             self.assertEqual(manifest["selected_jurisdictions"], ["EU", "UK"])
-            self.assertEqual(manifest["merged_document_count_before_deduplication"], 3)
+            self.assertEqual(manifest["query_terms"], ["marine spatial planning"])
+            self.assertEqual(manifest["translated_terms"], ["planification marine"])
+            self.assertEqual(manifest["merged_document_count"], 3)
             self.assertEqual(manifest["final_document_count"], 2)
+            self.assertEqual(manifest["duplicates_removed"], 1)
+            self.assertEqual(manifest["nim_status"], "ran")
+            self.assertEqual(manifest["nim_seed_count"], 1)
+            self.assertEqual(manifest["nim_eligible_seed_count"], 1)
             self.assertEqual(manifest["nim_document_count"], 1)
+            self.assertEqual(manifest["per_jurisdiction_output_paths"]["EU"], str(eu_intermediate))
+            self.assertEqual(manifest["jurisdictions"][0]["jurisdiction_code"], "EU")
+            self.assertEqual(manifest["jurisdictions"][0]["document_count"], 2)
+            self.assertEqual(manifest["jurisdictions"][1]["jurisdiction_code"], "UK")
+            self.assertEqual(manifest["jurisdictions"][1]["document_count"], 1)
+            progress = stdout.getvalue()
+            self.assertIn("Starting build_policy_corpus: validating inputs.", progress)
+            self.assertIn("Starting jurisdiction EU.", progress)
+            self.assertIn("Finished jurisdiction UK: 1 documents.", progress)
+            self.assertIn("Running NIM from EU CELEX results.", progress)
+            self.assertIn("Merging jurisdiction corpora and deduplicating final corpus.", progress)
+            self.assertIn("Completed build_policy_corpus: 2 final documents written.", progress)
             self.assertEqual(
                 tracker["eu_queries"],
                 ["marine spatial planning", "planification marine"],
@@ -210,6 +334,104 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         self.assertEqual(tracker["eu_queries"], [])
         self.assertEqual(tracker["non_eu_queries"], [("UK", "biodiversity")])
         self.assertEqual(tracker["nim_queries"], [])
+
+    def test_policy_corpus_build_result_exposes_stable_public_contract_without_nim(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(tracker),
+            ):
+                result = build_policy_corpus(
+                    query_terms=["resilience"],
+                    jurisdictions=["US"],
+                    outputs_path=output_root,
+                )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["schema_version"], "1.0")
+        self.assertEqual(payload["query_terms"], ["resilience"])
+        self.assertEqual(payload["selected_jurisdictions"], ["US"])
+        self.assertEqual(payload["include_translations"], False)
+        self.assertEqual(payload["translated_terms"], [])
+        self.assertEqual(payload["include_nim"], False)
+        self.assertEqual(payload["nim_corpus_path"], None)
+        self.assertEqual(payload["merged_document_count"], 1)
+        self.assertEqual(payload["final_document_count"], 1)
+        self.assertEqual(payload["duplicates_removed"], 0)
+        self.assertEqual(payload["nim_status"], "not_requested")
+        self.assertEqual(payload["nim_seed_count"], 0)
+        self.assertEqual(payload["nim_eligible_seed_count"], 0)
+        self.assertEqual(payload["jurisdictions"][0]["jurisdiction_code"], "US")
+        self.assertEqual(payload["jurisdictions"][0]["document_count"], 1)
+
+    def test_nim_seeding_filters_ineligible_eu_celexs_from_mixed_result_set(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_MixedFakeEurlexAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.nim_status, "ran")
+        self.assertEqual(result.nim_seed_count, 2)
+        self.assertEqual(result.nim_eligible_seed_count, 1)
+        self.assertEqual(tracker["nim_queries"], ["32014L0089"])
+        self.assertEqual(manifest["nim_status"], "ran")
+        self.assertEqual(manifest["nim_seed_count"], 2)
+        self.assertEqual(manifest["nim_eligible_seed_count"], 1)
+        self.assertIn("Running NIM from EU CELEX results.", stdout.getvalue())
+
+    def test_nim_skips_cleanly_when_no_eligible_eu_legal_act_celexs_exist(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_IneligibleOnlyFakeEurlexAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["nature restoration"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.nim_status, "skipped_no_eligible_eu_legal_acts")
+        self.assertEqual(result.nim_seed_count, 1)
+        self.assertEqual(result.nim_eligible_seed_count, 0)
+        self.assertEqual(result.nim_document_count, 0)
+        self.assertIsNone(result.nim_corpus_path)
+        self.assertEqual(tracker["nim_queries"], [])
+        self.assertEqual(manifest["nim_status"], "skipped_no_eligible_eu_legal_acts")
+        self.assertEqual(manifest["nim_seed_count"], 1)
+        self.assertEqual(manifest["nim_eligible_seed_count"], 0)
+        self.assertEqual(manifest["nim_document_count"], 0)
+        self.assertIn(
+            "Skipping NIM: EU results contained no eligible legal-act CELEX seeds.",
+            stdout.getvalue(),
+        )
 
     def test_invalid_jurisdiction_fails_validation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

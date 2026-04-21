@@ -2,6 +2,7 @@
 
 from policy_corpus_builder.corpus_builder import (
     CorpusBuildValidationError,
+    JurisdictionBuildResult,
     PolicyCorpusBuildResult,
     build_policy_corpus,
 )
@@ -10,6 +11,7 @@ from policy_corpus_builder.env import load_local_env
 __all__ = [
     "__version__",
     "CorpusBuildValidationError",
+    "JurisdictionBuildResult",
     "PolicyCorpusBuildResult",
     "build_policy_corpus",
 ]
