@@ -1,0 +1,234 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from policy_corpus_builder.corpus_builder import (  # noqa: E402
+    CorpusBuildValidationError,
+    build_policy_corpus,
+)
+from policy_corpus_builder.exporters import JSONL_FILENAME  # noqa: E402
+
+
+class _FakeAdapter:
+    execution_mode = "query-aware"
+
+    def validate_source_config(self, source, *, base_path):
+        return None
+
+
+class _FakeEurlexAdapter(_FakeAdapter):
+    name = "eurlex"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        self._tracker["eu_queries"].append(query.text)
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": "eu-eurlex:EU:32014L0089",
+                        "source_document_id": "32014L0089",
+                        "title": f"EU hit for {query.text}",
+                        "document_type": "directive",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2014-07-23",
+                        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                        "download_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                        "full_text": f"Full text for {query.text}",
+                        "raw_record": {"celex": "32014L0089", "celex_full": "32014L0089"},
+                    }
+                },
+            )()
+        ]
+
+
+class _FakeNonEUAdapter(_FakeAdapter):
+    name = "non-eu"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        country = source.settings["countries"][0]
+        self._tracker["non_eu_queries"].append((country, query.text))
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": f"{source.name}:{country.lower()}-doc-1",
+                        "source_document_id": f"{country.lower()}-doc-1",
+                        "title": f"{country} hit for {query.text}",
+                        "document_type": "policy_document",
+                        "language": "en",
+                        "jurisdiction": country,
+                        "publication_date": "2024",
+                        "url": f"https://example.org/{country.lower()}/doc-1",
+                        "download_url": f"https://example.org/{country.lower()}/doc-1.txt",
+                        "full_text": f"{country} full text",
+                        "raw_record": {"source": country},
+                    }
+                },
+            )()
+        ]
+
+
+class _FakeNIMAdapter(_FakeAdapter):
+    name = "eurlex-nim"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        self._tracker["nim_queries"].append(query.text)
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": "eu-nim:NIM:DNK:270540",
+                        "source_document_id": "270540",
+                        "title": "Bekendtgorelse om havplanlaegning",
+                        "summary": "National implementation measure for 32014L0089",
+                        "document_type": "national_implementation_measure",
+                        "language": "da",
+                        "jurisdiction": "Denmark",
+                        "publication_date": "2016-06-01",
+                        "url": "https://eur-lex.europa.eu/legal-content/DA/TXT/?uri=CELEX:72014L0089DNK_270540",
+                        "download_url": "https://example.org/nim/270540.pdf",
+                        "full_text": "National implementation measure full text.",
+                        "raw_record": {
+                            "celex": query.text,
+                            "nim_celex": "72014L0089DNK_270540",
+                            "national_measure_id": "270540",
+                        },
+                    }
+                },
+            )()
+        ]
+
+
+class PolicyCorpusBuilderTests(unittest.TestCase):
+    def _build_fake_get_adapter(self, tracker):
+        def _fake_get_adapter(adapter_name):
+            if adapter_name == "eurlex":
+                return _FakeEurlexAdapter(tracker)
+            if adapter_name == "non-eu":
+                return _FakeNonEUAdapter(tracker)
+            if adapter_name == "eurlex-nim":
+                return _FakeNIMAdapter(tracker)
+            raise KeyError(adapter_name)
+
+        return _fake_get_adapter
+
+    def test_build_policy_corpus_writes_intermediates_final_manifest_and_separate_nim(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(tracker),
+            ):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["EU", "UK"],
+                    outputs_path=output_root,
+                    include_translations=True,
+                    translated_terms=["planification marine"],
+                    include_nim=True,
+                )
+
+            eu_intermediate = output_root / "jurisdictions" / "eu" / JSONL_FILENAME
+            uk_intermediate = output_root / "jurisdictions" / "uk" / JSONL_FILENAME
+            final_corpus = output_root / "final" / JSONL_FILENAME
+            nim_corpus = output_root / "nim" / JSONL_FILENAME
+            manifest_path = output_root / "run-manifest.json"
+
+            self.assertEqual(result.final_corpus_path, final_corpus)
+            self.assertEqual(result.nim_corpus_path, nim_corpus)
+            self.assertEqual(result.manifest_path, manifest_path)
+            self.assertEqual(result.selected_jurisdictions, ("EU", "UK"))
+            self.assertEqual(result.merged_document_count, 3)
+            self.assertEqual(result.final_document_count, 2)
+            self.assertEqual(result.duplicates_removed, 1)
+            self.assertEqual(result.nim_document_count, 1)
+
+            self.assertTrue((output_root / "cache").exists())
+            self.assertTrue(eu_intermediate.exists())
+            self.assertTrue(uk_intermediate.exists())
+            self.assertTrue(final_corpus.exists())
+            self.assertTrue(nim_corpus.exists())
+            self.assertTrue(manifest_path.exists())
+
+            self.assertEqual(len(eu_intermediate.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(len(uk_intermediate.read_text(encoding="utf-8").splitlines()), 1)
+            self.assertEqual(len(final_corpus.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(len(nim_corpus.read_text(encoding="utf-8").splitlines()), 1)
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["selected_jurisdictions"], ["EU", "UK"])
+            self.assertEqual(manifest["merged_document_count_before_deduplication"], 3)
+            self.assertEqual(manifest["final_document_count"], 2)
+            self.assertEqual(manifest["nim_document_count"], 1)
+            self.assertEqual(
+                tracker["eu_queries"],
+                ["marine spatial planning", "planification marine"],
+            )
+            self.assertEqual(tracker["non_eu_queries"], [("UK", "marine spatial planning")])
+            self.assertEqual(tracker["nim_queries"], ["32014L0089"])
+
+    def test_translated_terms_only_affect_eu_path(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(tracker),
+            ):
+                build_policy_corpus(
+                    query_terms=["biodiversity"],
+                    jurisdictions=["UK"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                    include_translations=True,
+                    translated_terms=["biodiversite"],
+                    include_nim=False,
+                )
+
+        self.assertEqual(tracker["eu_queries"], [])
+        self.assertEqual(tracker["non_eu_queries"], [("UK", "biodiversity")])
+        self.assertEqual(tracker["nim_queries"], [])
+
+    def test_invalid_jurisdiction_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(CorpusBuildValidationError, "Unsupported jurisdiction"):
+                build_policy_corpus(
+                    query_terms=["energy security"],
+                    jurisdictions=["DK"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                )
+
+    def test_empty_query_terms_fail_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(CorpusBuildValidationError, "query_terms"):
+                build_policy_corpus(
+                    query_terms=[],
+                    jurisdictions=["EU"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
