@@ -1,12 +1,14 @@
 # policy-corpus-builder
 
-`policy-corpus-builder` is a Python toolkit for building clean policy document corpora across supported jurisdictions.
+`policy-corpus-builder` is a Python toolkit for building clean policy document corpora across supported jurisdictions. It is first and foremost built around EUR-Lex / EU retrieval: the ordinary EUR-Lex workflow is currently the most stable, best-supported, and most robust live retrieval surface in the repository.
 
 The main happy-path public entry point is:
 
 `build_policy_corpus(...)`
 
 Use that function first when you want one final normalized corpus written to disk from a simple top-level call. The lower-level adapter and config surfaces are still available, but they are now secondary to the top-level builder workflow.
+
+Non-EU retrieval workflows are supported where listed below, but live legal and policy retrieval always depends on upstream systems outside this package. Government websites, public APIs, search endpoints, page structures, access controls, robots policies, and anti-bot systems can change without notice, causing retrieval behavior to degrade or stop working until the relevant adapter is updated.
 
 ## Main Happy Path
 
@@ -446,13 +448,15 @@ The package will load `.env` automatically if it is present in the repository ro
 
 The currently supported workflows are:
 
+- ordinary EUR-Lex via `adapter = "eurlex"`; this is the primary and strongest retrieval surface today
+- EUR-Lex NIM via `adapter = "eurlex-nim"`
 - UK via `adapter = "non-eu"` with `countries = ["UK"]`
 - Canada via `adapter = "non-eu"` with `countries = ["CA"]`
 - Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
 - US via `adapter = "non-eu"` with `countries = ["US"]`
 - New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
-- ordinary EUR-Lex via `adapter = "eurlex"`
-- EUR-Lex NIM via `adapter = "eurlex-nim"`
+
+The non-EU workflows above are supported, but they are generally more contingent on each jurisdiction's current public website or API behavior. Changes to government service availability, response formats, search endpoints, page markup, scraping rules, access restrictions, or anti-bot controls may affect them before this package has been updated.
 
 The main public API worth treating as stable is:
 
@@ -467,6 +471,14 @@ The main public API worth treating as stable is:
 The lower-level adapter/config workflow remains supported for advanced integrations, but it is no longer the first workflow users should reach for.
 
 For a stable summary of supported versus provisional code paths, see [docs/supported-surface.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/supported-surface.md).
+
+## Stability And External Dependencies
+
+The ordinary EUR-Lex path is the main retrieval priority for this repository and currently has the strongest support expectations. EUR-Lex NIM retrieval is also supported, but it is seeded from EU legal acts and has its own eligibility and full-text limitations.
+
+Supported non-EU workflows are useful live retrieval paths, not placeholders. They should still be treated as more externally fragile because they rely on jurisdiction-specific government websites and APIs whose availability, search behavior, document markup, access rules, and anti-automation policies are controlled upstream.
+
+This limitation is not specific to one country adapter. It is an inherent constraint of live legal and policy retrieval: any supported live pipeline can need maintenance when governments or platform owners change the systems that this package queries.
 
 ## Lower-Level Config And Adapter Usage
 

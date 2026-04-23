@@ -2,15 +2,29 @@
 
 This page defines the currently supported workflows and the implementation surface that downstream users should treat as public.
 
+The repository is first and foremost built around EUR-Lex / EU retrieval. The ordinary EUR-Lex workflow is currently the primary, best-supported, and most robust live retrieval surface.
+
+All live retrieval workflows depend on external systems outside this package. Government websites, public APIs, search endpoints, page structures, robots policies, anti-bot controls, access restrictions, and other upstream behavior can change without notice. When that happens, retrieval may degrade or stop working until the relevant adapter is updated.
+
 ## Supported Workflows
 
+- ordinary EUR-Lex via `adapter = "eurlex"`; primary and strongest retrieval surface today
+- EUR-Lex NIM via `adapter = "eurlex-nim"`
 - UK via `adapter = "non-eu"` with `countries = ["UK"]`
 - Canada via `adapter = "non-eu"` with `countries = ["CA"]`
 - Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
 - US via `adapter = "non-eu"` with `countries = ["US"]`
 - New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
-- ordinary EUR-Lex via `adapter = "eurlex"`
-- EUR-Lex NIM via `adapter = "eurlex-nim"`
+
+The non-EU workflows listed here are supported live workflows. They are generally more contingent on each jurisdiction's current government website or API behavior, including service availability, response schemas, page markup, search endpoint behavior, scraping policies, and access controls.
+
+## Retrieval Stability Expectations
+
+Treat ordinary EUR-Lex retrieval as the strongest supported path today. It is the main workflow this repository is organized around.
+
+Treat EUR-Lex NIM retrieval as supported, but narrower: it is seeded from EU legal acts and depends on NIM eligibility and the current EUR-Lex/NIM upstream behavior.
+
+Treat non-EU retrieval as supported but more externally fragile. These workflows may require adapter updates when jurisdiction platforms change their APIs, websites, document structures, robots or scraping policies, or access restrictions.
 
 ## Supported Public Entry Points
 
