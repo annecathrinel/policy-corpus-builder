@@ -281,6 +281,8 @@ Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
 - `outputs/policy-corpus-demo/jurisdictions/nz/documents.jsonl` when selected
 - `outputs/policy-corpus-demo/jurisdictions/us/documents.jsonl` when selected
 - `outputs/policy-corpus-demo/final/documents.jsonl`
+- `outputs/policy-corpus-demo/audit/likely_duplicates.csv`
+- `outputs/policy-corpus-demo/audit/likely_duplicates.jsonl`
 - `outputs/policy-corpus-demo/nim/documents.jsonl` when `include_nim=True` and NIM results are produced
 - `outputs/policy-corpus-demo/run-manifest.json`
 
@@ -300,6 +302,25 @@ The cleanup pass standardizes:
 - obvious full-text boilerplate such as EUR-Lex consolidated-text documentation headers and schema placeholder text
 
 When a field is changed, the original value is preserved in `raw_metadata` using `_original_*` keys where practical. Year-only and month-only dates also include date precision metadata such as `_publication_date_precision`.
+
+## Duplicate Audit
+
+The top-level builder preserves the current exact deduplication behavior and also writes an observational duplicate audit for the final corpus:
+
+- `audit/likely_duplicates.csv`
+- `audit/likely_duplicates.jsonl`
+
+These files do not control retrieval, merging, or deduplication. They are inspection artifacts only.
+
+The audit uses conservative exact grouping signals:
+
+- normalized `document_id`
+- normalized `source_document_id`
+- extracted CELEX-like identifier from document IDs, URLs, and common raw EUR-Lex metadata fields
+- normalized URL with lowercased host, stripped fragment, sorted query parameters, and trimmed trailing slash
+- normalized title after whitespace folding and case normalization, only when the normalized title is at least 16 characters
+
+Each row represents one document in one likely duplicate group and includes `duplicate_group_id`, `signal`, `group_size`, `representative_value`, document identifiers, title, normalized title, URL, normalized URL, CELEX, jurisdiction, and publication date. A document may appear in more than one group if more than one transparent signal matches.
 
 ## How `include_translations` Works
 
@@ -344,6 +365,7 @@ NIM runtime can be controlled with two optional top-level arguments:
 - per-jurisdiction output paths and document counts
 - final corpus path
 - NIM corpus path when produced
+- duplicate-audit CSV and JSONL paths
 - merged document count before final deduplication
 - final document count
 - duplicates removed

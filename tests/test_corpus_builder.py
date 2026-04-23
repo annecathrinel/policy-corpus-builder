@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+import csv
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -211,6 +212,57 @@ class _FakeNonEUAdapter(_FakeAdapter):
         ]
 
 
+class _LikelyDuplicateNonEUAdapter(_FakeAdapter):
+    name = "non-eu"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        country = source.settings["countries"][0]
+        self._tracker["non_eu_queries"].append((country, query.text))
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": f"{source.name}:{country.lower()}-doc-1",
+                        "source_document_id": f"{country.lower()}-doc-1",
+                        "title": "Marine Spatial Planning Act",
+                        "document_type": "policy_document",
+                        "language": "en",
+                        "jurisdiction": country,
+                        "publication_date": "2024-01-01",
+                        "url": "https://www.example.org/policy/doc?b=2&a=1#section",
+                        "download_url": "https://example.org/policy/doc.txt",
+                        "full_text": "First text.",
+                        "raw_record": {"source": country},
+                    }
+                },
+            )(),
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": f"{source.name}:{country.lower()}-doc-2",
+                        "source_document_id": f"{country.lower()}-doc-2",
+                        "title": "  Marine   Spatial Planning Act  ",
+                        "document_type": "policy_document",
+                        "language": "en",
+                        "jurisdiction": country,
+                        "publication_date": "2024-01-01",
+                        "url": "https://example.org/policy/doc?a=1&b=2",
+                        "download_url": "https://example.org/policy/doc.txt",
+                        "full_text": "Second text.",
+                        "raw_record": {"source": country},
+                    }
+                },
+            )(),
+        ]
+
+
 class _FakeNIMAdapter(_FakeAdapter):
     name = "eurlex-nim"
 
@@ -269,12 +321,19 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
     def _build_fake_get_adapter(self, tracker):
         return self._build_custom_fake_get_adapter(tracker, eurlex_adapter_class=_FakeEurlexAdapter)
 
-    def _build_custom_fake_get_adapter(self, tracker, *, eurlex_adapter_class, nim_adapter_class=_FakeNIMAdapter):
+    def _build_custom_fake_get_adapter(
+        self,
+        tracker,
+        *,
+        eurlex_adapter_class,
+        non_eu_adapter_class=_FakeNonEUAdapter,
+        nim_adapter_class=_FakeNIMAdapter,
+    ):
         def _fake_get_adapter(adapter_name):
             if adapter_name == "eurlex":
                 return eurlex_adapter_class(tracker)
             if adapter_name == "non-eu":
-                return _FakeNonEUAdapter(tracker)
+                return non_eu_adapter_class(tracker)
             if adapter_name == "eurlex-nim":
                 return nim_adapter_class(tracker)
             raise KeyError(adapter_name)
@@ -303,10 +362,14 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             eu_intermediate = output_root / "jurisdictions" / "eu" / JSONL_FILENAME
             uk_intermediate = output_root / "jurisdictions" / "uk" / JSONL_FILENAME
             final_corpus = output_root / "final" / JSONL_FILENAME
+            duplicate_audit_csv = output_root / "audit" / "likely_duplicates.csv"
+            duplicate_audit_jsonl = output_root / "audit" / "likely_duplicates.jsonl"
             nim_corpus = output_root / "nim" / JSONL_FILENAME
             manifest_path = output_root / "run-manifest.json"
 
             self.assertEqual(result.final_corpus_path, final_corpus)
+            self.assertEqual(result.duplicate_audit_csv_path, duplicate_audit_csv)
+            self.assertEqual(result.duplicate_audit_jsonl_path, duplicate_audit_jsonl)
             self.assertEqual(result.nim_corpus_path, nim_corpus)
             self.assertEqual(result.manifest_path, manifest_path)
             self.assertEqual(result.schema_version, "1.0")
@@ -338,12 +401,15 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertTrue(eu_intermediate.exists())
             self.assertTrue(uk_intermediate.exists())
             self.assertTrue(final_corpus.exists())
+            self.assertTrue(duplicate_audit_csv.exists())
+            self.assertTrue(duplicate_audit_jsonl.exists())
             self.assertTrue(nim_corpus.exists())
             self.assertTrue(manifest_path.exists())
 
             self.assertEqual(len(eu_intermediate.read_text(encoding="utf-8").splitlines()), 2)
             self.assertEqual(len(uk_intermediate.read_text(encoding="utf-8").splitlines()), 1)
             self.assertEqual(len(final_corpus.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(len(duplicate_audit_jsonl.read_text(encoding="utf-8").splitlines()), 0)
             self.assertEqual(len(nim_corpus.read_text(encoding="utf-8").splitlines()), 1)
             final_records = [
                 json.loads(line)
@@ -380,6 +446,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(manifest["nim_eligible_seed_count"], 1)
             self.assertEqual(manifest["nim_document_count"], 1)
             self.assertEqual(manifest["per_jurisdiction_output_paths"]["EU"], str(eu_intermediate))
+            self.assertEqual(manifest["duplicate_audit_csv_path"], str(duplicate_audit_csv))
+            self.assertEqual(manifest["duplicate_audit_jsonl_path"], str(duplicate_audit_jsonl))
             self.assertEqual(manifest["jurisdictions"][0]["jurisdiction_code"], "EU")
             self.assertEqual(manifest["jurisdictions"][0]["raw_hit_count"], 2)
             self.assertEqual(manifest["jurisdictions"][0]["document_count"], 2)
@@ -397,6 +465,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertIn("Number of NIM eligible EU acts: 1.", progress)
             self.assertIn("Merging jurisdiction corpora and deduplicating final corpus.", progress)
             self.assertIn("Final corpus: 2 unique documents (1 duplicates removed).", progress)
+            self.assertIn("Duplicate audit written:", progress)
             self.assertIn("Completed build_policy_corpus: 2 final documents written.", progress)
             self.assertEqual(
                 tracker["eu_queries"],
@@ -404,6 +473,51 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             )
             self.assertEqual(tracker["non_eu_queries"], [("UK", "marine spatial planning")])
             self.assertEqual(tracker["nim_queries"], ["32014L0089"])
+
+    def test_build_policy_corpus_writes_duplicate_audit_without_dropping_likely_duplicates(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_LikelyDuplicateNonEUAdapter,
+                ),
+            ):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["UK"],
+                    outputs_path=output_root,
+                )
+
+            final_records = [
+                json.loads(line)
+                for line in result.final_corpus_path.read_text(encoding="utf-8").splitlines()
+            ]
+            with result.duplicate_audit_csv_path.open(encoding="utf-8", newline="") as fh:
+                audit_rows = list(csv.DictReader(fh))
+            jsonl_rows = [
+                json.loads(line)
+                for line in result.duplicate_audit_jsonl_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(result.merged_document_count, 2)
+        self.assertEqual(result.final_document_count, 2)
+        self.assertEqual(result.duplicates_removed, 0)
+        self.assertEqual(len(final_records), 2)
+        self.assertEqual(len(audit_rows), len(jsonl_rows))
+        self.assertEqual(
+            {row["signal"] for row in audit_rows},
+            {"normalized_title", "normalized_url"},
+        )
+        self.assertEqual({row["group_size"] for row in audit_rows}, {"2"})
+        self.assertIn(
+            "https://example.org/policy/doc?a=1&b=2",
+            {row["representative_value"] for row in audit_rows},
+        )
 
     def test_translated_terms_only_affect_eu_path(self):
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}

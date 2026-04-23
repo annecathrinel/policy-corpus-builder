@@ -12,7 +12,11 @@ from policy_corpus_builder.adapters import get_adapter
 from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (
     normalize_eligible_legal_act_celex,
 )
-from policy_corpus_builder.exporters import export_documents_jsonl, export_run_manifest
+from policy_corpus_builder.exporters import (
+    export_documents_jsonl,
+    export_duplicate_audit,
+    export_run_manifest,
+)
 from policy_corpus_builder.models import NormalizedDocument, Query
 from policy_corpus_builder.pipeline import normalize_adapter_results
 from policy_corpus_builder.postprocess import (
@@ -28,6 +32,7 @@ FINAL_CORPUS_SUBDIR = "final"
 INTERMEDIATE_SUBDIR = "jurisdictions"
 NIM_SUBDIR = "nim"
 CACHE_SUBDIR = "cache"
+AUDIT_SUBDIR = "audit"
 RUN_MANIFEST_FILENAME = "run-manifest.json"
 RESULT_SCHEMA_VERSION = "1.0"
 MANIFEST_SCHEMA_VERSION = "1.0"
@@ -99,6 +104,8 @@ class PolicyCorpusBuildResult:
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
     final_corpus_path: Path
+    duplicate_audit_csv_path: Path
+    duplicate_audit_jsonl_path: Path
     nim_corpus_path: Path | None
     manifest_path: Path
     merged_document_count: int
@@ -126,6 +133,8 @@ class PolicyCorpusBuildResult:
                 for jurisdiction, path in self.intermediate_paths.items()
             },
             "final_corpus_path": str(self.final_corpus_path),
+            "duplicate_audit_csv_path": str(self.duplicate_audit_csv_path),
+            "duplicate_audit_jsonl_path": str(self.duplicate_audit_jsonl_path),
             "nim_corpus_path": str(self.nim_corpus_path) if self.nim_corpus_path else None,
             "manifest_path": str(self.manifest_path),
             "merged_document_count": self.merged_document_count,
@@ -145,6 +154,7 @@ class PolicyCorpusBuildResult:
             "cache": str((self.outputs_path / CACHE_SUBDIR).resolve()),
             "jurisdictions": str((self.outputs_path / INTERMEDIATE_SUBDIR).resolve()),
             "final": str((self.outputs_path / FINAL_CORPUS_SUBDIR).resolve()),
+            "audit": str((self.outputs_path / AUDIT_SUBDIR).resolve()),
             "nim": str((self.outputs_path / NIM_SUBDIR).resolve()),
         }
         payload["tool_version"] = TOOL_VERSION
@@ -180,11 +190,13 @@ def build_policy_corpus(
     cache_root = output_root / CACHE_SUBDIR
     intermediate_root = output_root / INTERMEDIATE_SUBDIR
     final_root = output_root / FINAL_CORPUS_SUBDIR
+    audit_root = output_root / AUDIT_SUBDIR
     nim_root = output_root / NIM_SUBDIR
 
     cache_root.mkdir(parents=True, exist_ok=True)
     intermediate_root.mkdir(parents=True, exist_ok=True)
     final_root.mkdir(parents=True, exist_ok=True)
+    audit_root.mkdir(parents=True, exist_ok=True)
 
     jurisdiction_documents: dict[str, tuple[NormalizedDocument, ...]] = {}
     intermediate_paths: dict[str, Path] = {}
@@ -250,9 +262,17 @@ def build_policy_corpus(
         deduplication_result.documents,
         output_dir=final_root,
     )
+    duplicate_audit_csv_path, duplicate_audit_jsonl_path = export_duplicate_audit(
+        deduplication_result.documents,
+        output_dir=audit_root,
+    )
     _emit_progress(
         f"Final corpus: {len(deduplication_result.documents)} unique documents "
         f"({deduplication_result.duplicates_removed} duplicates removed)."
+    )
+    _emit_progress(
+        "Duplicate audit written: "
+        f"{duplicate_audit_csv_path} and {duplicate_audit_jsonl_path}."
     )
 
     nim_corpus_path: Path | None = None
@@ -318,6 +338,8 @@ def build_policy_corpus(
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
         final_corpus_path=final_corpus_path,
+        duplicate_audit_csv_path=duplicate_audit_csv_path,
+        duplicate_audit_jsonl_path=duplicate_audit_jsonl_path,
         nim_corpus_path=nim_corpus_path,
         manifest_path=output_root / RUN_MANIFEST_FILENAME,
         merged_document_count=len(merged_documents),
@@ -345,6 +367,8 @@ def build_policy_corpus(
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
         final_corpus_path=result.final_corpus_path,
+        duplicate_audit_csv_path=result.duplicate_audit_csv_path,
+        duplicate_audit_jsonl_path=result.duplicate_audit_jsonl_path,
         nim_corpus_path=result.nim_corpus_path,
         manifest_path=manifest_path,
         merged_document_count=result.merged_document_count,
