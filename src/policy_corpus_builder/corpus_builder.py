@@ -55,15 +55,29 @@ class JurisdictionBuildResult:
     jurisdiction_code: str
     jurisdiction_label: str
     intermediate_corpus_path: Path
+    raw_hit_count: int
     document_count: int
+    full_text_document_count: int
 
     def to_dict(self) -> dict[str, object]:
         return {
             "jurisdiction_code": self.jurisdiction_code,
             "jurisdiction_label": self.jurisdiction_label,
             "intermediate_corpus_path": str(self.intermediate_corpus_path),
+            "raw_hit_count": self.raw_hit_count,
             "document_count": self.document_count,
+            "full_text_document_count": self.full_text_document_count,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectionResult:
+    documents: tuple[NormalizedDocument, ...]
+    raw_result_count: int
+
+    @property
+    def full_text_document_count(self) -> int:
+        return sum(1 for document in self.documents if document.full_text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +91,8 @@ class PolicyCorpusBuildResult:
     include_translations: bool
     translated_terms: tuple[str, ...]
     include_nim: bool
+    include_nim_fulltext: bool
+    nim_max_rows: int | None
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
     final_corpus_path: Path
@@ -99,6 +115,8 @@ class PolicyCorpusBuildResult:
             "include_translations": self.include_translations,
             "translated_terms": list(self.translated_terms),
             "include_nim": self.include_nim,
+            "include_nim_fulltext": self.include_nim_fulltext,
+            "nim_max_rows": self.nim_max_rows,
             "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
             "per_jurisdiction_output_paths": {
                 jurisdiction: str(path)
@@ -138,10 +156,14 @@ def build_policy_corpus(
     include_translations: bool = False,
     translated_terms: list[str] | None = None,
     include_nim: bool = False,
+    include_nim_fulltext: bool = True,
+    nim_max_rows: int | None = None,
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions."""
 
     _emit_progress("Starting build_policy_corpus: validating inputs.")
+    if not isinstance(include_nim_fulltext, bool):
+        raise CorpusBuildValidationError("include_nim_fulltext must be a boolean.")
     cleaned_query_terms = _clean_terms(query_terms, field_name="query_terms", required=True)
     cleaned_jurisdictions = _clean_jurisdictions(jurisdictions)
     cleaned_translated_terms = _clean_terms(
@@ -149,6 +171,7 @@ def build_policy_corpus(
         field_name="translated_terms",
         required=False,
     )
+    cleaned_nim_max_rows = _clean_optional_positive_int(nim_max_rows, field_name="nim_max_rows")
 
     output_root = Path(outputs_path).expanduser().resolve()
     cache_root = output_root / CACHE_SUBDIR
@@ -170,7 +193,7 @@ def build_policy_corpus(
 
     for jurisdiction in cleaned_jurisdictions:
         _emit_progress(f"Starting jurisdiction {jurisdiction}.")
-        documents = _run_jurisdiction(
+        jurisdiction_result = _run_jurisdiction(
             jurisdiction,
             query_terms=cleaned_query_terms,
             translated_terms=cleaned_translated_terms,
@@ -178,7 +201,11 @@ def build_policy_corpus(
             output_root=output_root,
             cache_root=cache_root,
         )
+        documents = jurisdiction_result.documents
         jurisdiction_documents[jurisdiction] = documents
+        _emit_progress(
+            f"Running jurisdiction {jurisdiction}. Total hits: {jurisdiction_result.raw_result_count}."
+        )
 
         jurisdiction_output_dir = intermediate_root / jurisdiction.lower()
         path = export_documents_jsonl(documents, output_dir=jurisdiction_output_dir)
@@ -188,11 +215,16 @@ def build_policy_corpus(
                 jurisdiction_code=jurisdiction,
                 jurisdiction_label=JURISDICTION_LABELS[jurisdiction],
                 intermediate_corpus_path=path,
+                raw_hit_count=jurisdiction_result.raw_result_count,
                 document_count=len(documents),
+                full_text_document_count=jurisdiction_result.full_text_document_count,
             )
         )
         _emit_progress(
-            f"Finished jurisdiction {jurisdiction}: {len(documents)} documents."
+            "Finished jurisdiction "
+            f"{jurisdiction}. Unique full-text documents retrieved: "
+            f"{jurisdiction_result.full_text_document_count}. "
+            f"Normalized documents: {len(documents)}."
         )
 
     merged_documents: tuple[NormalizedDocument, ...] = tuple(
@@ -212,6 +244,10 @@ def build_policy_corpus(
         deduplication_result.documents,
         output_dir=final_root,
     )
+    _emit_progress(
+        f"Final corpus: {len(deduplication_result.documents)} unique documents "
+        f"({deduplication_result.duplicates_removed} duplicates removed)."
+    )
 
     nim_corpus_path: Path | None = None
     nim_status = "not_requested"
@@ -229,12 +265,16 @@ def build_policy_corpus(
         eu_celex_seeds = _filter_eligible_nim_celex_seeds(nim_seed_candidates)
         eu_celex_seeds = _defensively_filter_nim_runtime_celex_seeds(eu_celex_seeds)
         nim_eligible_seed_count = len(eu_celex_seeds)
+        _emit_progress(f"NIM seed candidates from EU results: {nim_seed_count}.")
+        _emit_progress(f"Number of NIM eligible EU acts: {nim_eligible_seed_count}.")
         if eu_celex_seeds:
             nim_status = "ran"
             nim_documents = _run_eu_nim(
                 eu_celex_seeds,
                 output_root=output_root,
                 cache_root=cache_root,
+                include_nim_fulltext=include_nim_fulltext,
+                nim_max_rows=cleaned_nim_max_rows,
             )
             nim_deduplication_result = deduplicate_documents(
                 nim_documents,
@@ -266,6 +306,8 @@ def build_policy_corpus(
         include_translations=include_translations,
         translated_terms=cleaned_translated_terms,
         include_nim=include_nim,
+        include_nim_fulltext=include_nim_fulltext,
+        nim_max_rows=cleaned_nim_max_rows,
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
         final_corpus_path=final_corpus_path,
@@ -291,6 +333,8 @@ def build_policy_corpus(
         include_translations=result.include_translations,
         translated_terms=result.translated_terms,
         include_nim=result.include_nim,
+        include_nim_fulltext=result.include_nim_fulltext,
+        nim_max_rows=result.nim_max_rows,
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
         final_corpus_path=result.final_corpus_path,
@@ -318,7 +362,7 @@ def _run_jurisdiction(
     include_translations: bool,
     output_root: Path,
     cache_root: Path,
-) -> tuple[NormalizedDocument, ...]:
+) -> _CollectionResult:
     if jurisdiction == "EU":
         source = SourceConfig(
             name="eu-eurlex",
@@ -346,6 +390,8 @@ def _run_eu_nim(
     *,
     output_root: Path,
     cache_root: Path,
+    include_nim_fulltext: bool,
+    nim_max_rows: int | None,
 ) -> tuple[NormalizedDocument, ...]:
     runtime_safe_celex_seeds = _defensively_filter_nim_runtime_celex_seeds(celex_seeds)
     if not runtime_safe_celex_seeds:
@@ -356,10 +402,14 @@ def _run_eu_nim(
         adapter="eurlex-nim",
         settings={
             "cache_dir": str((cache_root / "nim").resolve()),
+            "fetch_full_text": include_nim_fulltext,
+            "nim_max_rows": nim_max_rows,
+            "progress": True,
+            "progress_every": 10,
         },
     )
     queries = _build_inline_queries(runtime_safe_celex_seeds, origin="eu-celex-seed")
-    return _collect_normalized_documents(source, queries=queries, base_path=output_root)
+    return _collect_normalized_documents(source, queries=queries, base_path=output_root).documents
 
 
 def _collect_normalized_documents(
@@ -367,11 +417,12 @@ def _collect_normalized_documents(
     *,
     queries: tuple[Query, ...],
     base_path: Path,
-) -> tuple[NormalizedDocument, ...]:
+) -> _CollectionResult:
     adapter = get_adapter(source.adapter)
     adapter.validate_source_config(source, base_path=base_path)
 
     documents: list[NormalizedDocument] = []
+    raw_result_count = 0
     loaded_source = None
     if getattr(adapter, "execution_mode", "query-aware") == "query-agnostic":
         loaded_source = adapter.load_source(source, base_path=base_path)
@@ -383,11 +434,15 @@ def _collect_normalized_documents(
             base_path=base_path,
             loaded_source=loaded_source,
         )
+        raw_result_count += len(raw_results)
         documents.extend(
             normalize_adapter_results(raw_results, source=source, query=query)
         )
 
-    return tuple(documents)
+    return _CollectionResult(
+        documents=tuple(documents),
+        raw_result_count=raw_result_count,
+    )
 
 
 def _build_inline_queries(terms: tuple[str, ...], *, origin: str) -> tuple[Query, ...]:
@@ -485,6 +540,14 @@ def _clean_jurisdictions(raw_jurisdictions: list[str]) -> tuple[str, ...]:
             seen.add(jurisdiction)
             cleaned.append(jurisdiction)
     return tuple(cleaned)
+
+
+def _clean_optional_positive_int(value: int | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise CorpusBuildValidationError(f"{field_name} must be a positive integer when set.")
+    return value
 
 
 def _emit_progress(message: str) -> None:

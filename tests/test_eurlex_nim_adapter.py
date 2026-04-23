@@ -364,6 +364,71 @@ class EurlexNIMAdapterTests(unittest.TestCase):
         )
         self.assertNotIn("full_text", payload)
 
+    def test_collect_can_skip_fulltext_and_limit_nim_rows(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
+
+        original_retrieve = nim_workflow_module._retrieve_nim_rows
+        original_batch = nim_workflow_module.batch_fetch_nim_fulltext
+        original_user = os.environ.get("EURLEX_WS_USER")
+        original_pass = os.environ.get("EURLEX_WS_PASS")
+
+        def fake_retrieve(acts_df, settings):
+            return pd.DataFrame(
+                [
+                    {
+                        "celex": "32014L0089",
+                        "nim_celex": f"72014L0089DNK_{idx}",
+                        "national_measure_id": str(idx),
+                        "nim_date": "2016-06-01",
+                        "nim_title": f"Measure {idx}",
+                        "member_state_iso3": "DNK",
+                        "member_state_name": "Denmark",
+                        "eurlex_url": f"https://example.org/nim/{idx}",
+                    }
+                    for idx in (1, 2, 3)
+                ]
+            )
+
+        def fake_batch(df, **kwargs):
+            raise AssertionError("full-text batch should not run when fetch_full_text is false")
+
+        nim_workflow_module._retrieve_nim_rows = fake_retrieve
+        nim_workflow_module.batch_fetch_nim_fulltext = fake_batch
+        os.environ["EURLEX_WS_USER"] = "demo-user"
+        os.environ["EURLEX_WS_PASS"] = "demo-pass"
+        try:
+            adapter = EurlexNIMAdapter()
+            source = SourceConfig(
+                name="eurlex-nim-source",
+                adapter="eurlex-nim",
+                settings={
+                    "fetch_full_text": False,
+                    "nim_max_rows": 2,
+                    "progress": True,
+                },
+            )
+            result = adapter.collect(
+                source,
+                query=Query(text="32014L0089", query_id="inline-001", origin="inline"),
+                base_path=Path("."),
+            )
+        finally:
+            nim_workflow_module._retrieve_nim_rows = original_retrieve
+            nim_workflow_module.batch_fetch_nim_fulltext = original_batch
+            if original_user is None:
+                os.environ.pop("EURLEX_WS_USER", None)
+            else:
+                os.environ["EURLEX_WS_USER"] = original_user
+            if original_pass is None:
+                os.environ.pop("EURLEX_WS_PASS", None)
+            else:
+                os.environ["EURLEX_WS_PASS"] = original_pass
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual([item.payload["source_document_id"] for item in result], ["1", "2"])
+        self.assertEqual(result[0].payload["title"], "Measure 1")
+        self.assertNotIn("full_text", result[0].payload)
+
     def test_public_adapter_no_longer_imports_legacy_eurlex_nim_module(self) -> None:
         adapter_source = (
             Path(__file__).resolve().parents[1]

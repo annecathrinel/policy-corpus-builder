@@ -40,16 +40,36 @@ def run_eurlex_nim_query_pipeline(
     base_path: Path,
 ) -> list[dict[str, object]]:
     settings = source.settings
+    progress = _require_bool(settings, "progress", default=False)
     acts_df = _resolve_seed_acts(query_text, settings)
     if acts_df.empty:
+        _emit_nim_progress(progress, f"No eligible EU legal acts found for NIM seed: {query_text}.")
         return []
+    _emit_nim_progress(progress, f"NIM seed {query_text}: {len(acts_df)} eligible EU act(s).")
 
     nim_df = _retrieve_nim_rows(acts_df, settings)
     if nim_df.empty:
+        _emit_nim_progress(progress, f"NIM seed {query_text}: no national measures found.")
         return []
+    _emit_nim_progress(
+        progress,
+        f"NIM seed {query_text}: {len(nim_df)} national measure(s) found before full-text retrieval.",
+    )
+
+    nim_max_rows = resolve_optional_positive_int(settings, "nim_max_rows")
+    if nim_max_rows is not None and len(nim_df) > nim_max_rows:
+        nim_df = nim_df.head(nim_max_rows).copy()
+        _emit_nim_progress(
+            progress,
+            f"NIM seed {query_text}: limiting processing to first {nim_max_rows} national measure(s).",
+        )
 
     merged_df = nim_df.copy()
     if _require_bool(settings, "fetch_full_text", default=True):
+        _emit_nim_progress(
+            progress,
+            f"NIM seed {query_text}: starting full-text retrieval for {len(nim_df)} national measure(s).",
+        )
         fulltext_df = batch_fetch_nim_fulltext(
             nim_df,
             cache_dir=resolve_cache_dir(source, base_path=base_path),
@@ -57,12 +77,16 @@ def run_eurlex_nim_query_pipeline(
             timeout=resolve_timeout_tuple(settings),
             retries=_require_non_negative_int(settings, "fulltext_retries", default=3),
             min_interval_s=_require_non_negative_number(settings, "fulltext_min_interval_s", default=0.5),
-            verbose=False,
+            verbose=progress,
             resume=False,
             retry_failures=True,
             progress_every=_require_non_negative_int(settings, "progress_every", default=0),
             cache_every=_require_positive_int(settings, "cache_every", default=50),
             success_min_chars=_require_non_negative_int(settings, "success_min_chars", default=500),
+        )
+        _emit_nim_progress(
+            progress,
+            f"NIM seed {query_text}: full-text retrieval completed for {len(nim_df)} national measure(s).",
         )
         normalized_nim_df = _normalize_nim_merge_frame(nim_df)
         normalized_fulltext_df = _normalize_nim_merge_frame(fulltext_df)
@@ -110,6 +134,11 @@ def run_eurlex_nim_query_pipeline(
             )
         else:
             merged_df = normalized_nim_df
+    else:
+        _emit_nim_progress(
+            progress,
+            f"NIM seed {query_text}: full-text retrieval skipped by include_nim_fulltext=False.",
+        )
 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     documents: list[dict[str, object]] = []
@@ -141,6 +170,7 @@ def run_eurlex_nim_query_pipeline(
         row["query_text"] = query_text
         documents.append(_sanitize_row(row))
 
+    _emit_nim_progress(progress, f"NIM seed {query_text}: normalized {len(documents)} NIM document(s).")
     return documents
 
 
@@ -351,6 +381,11 @@ def _sanitize_value(value: object) -> object:
         stripped = value.strip()
         return stripped or None
     return value
+
+
+def _emit_nim_progress(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[policy-corpus-builder] {message}", flush=True)
 
 
 __all__ = [

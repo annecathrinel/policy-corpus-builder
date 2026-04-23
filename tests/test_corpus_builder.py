@@ -219,6 +219,7 @@ class _FakeNIMAdapter(_FakeAdapter):
 
     def collect(self, source, query, *, base_path, loaded_source=None):
         self._tracker["nim_queries"].append(query.text)
+        self._tracker.setdefault("nim_settings", []).append(dict(source.settings))
         return [
             type(
                 "Result",
@@ -314,6 +315,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result.include_translations, True)
             self.assertEqual(result.translated_terms, ("planification marine",))
             self.assertEqual(result.include_nim, True)
+            self.assertEqual(result.include_nim_fulltext, True)
+            self.assertIsNone(result.nim_max_rows)
             self.assertEqual(result.merged_document_count, 3)
             self.assertEqual(result.final_document_count, 2)
             self.assertEqual(result.duplicates_removed, 1)
@@ -323,9 +326,13 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result.nim_document_count, 1)
             self.assertEqual(len(result.jurisdiction_results), 2)
             self.assertEqual(result.jurisdiction_results[0].jurisdiction_code, "EU")
+            self.assertEqual(result.jurisdiction_results[0].raw_hit_count, 2)
             self.assertEqual(result.jurisdiction_results[0].document_count, 2)
+            self.assertEqual(result.jurisdiction_results[0].full_text_document_count, 2)
             self.assertEqual(result.jurisdiction_results[1].jurisdiction_code, "UK")
+            self.assertEqual(result.jurisdiction_results[1].raw_hit_count, 1)
             self.assertEqual(result.jurisdiction_results[1].document_count, 1)
+            self.assertEqual(result.jurisdiction_results[1].full_text_document_count, 1)
 
             self.assertTrue((output_root / "cache").exists())
             self.assertTrue(eu_intermediate.exists())
@@ -346,6 +353,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result_payload["selected_jurisdictions"], ["EU", "UK"])
             self.assertEqual(result_payload["include_translations"], True)
             self.assertEqual(result_payload["include_nim"], True)
+            self.assertEqual(result_payload["include_nim_fulltext"], True)
+            self.assertIsNone(result_payload["nim_max_rows"])
             self.assertEqual(manifest["selected_jurisdictions"], ["EU", "UK"])
             self.assertEqual(manifest["query_terms"], ["marine spatial planning"])
             self.assertEqual(manifest["translated_terms"], ["planification marine"])
@@ -358,15 +367,22 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(manifest["nim_document_count"], 1)
             self.assertEqual(manifest["per_jurisdiction_output_paths"]["EU"], str(eu_intermediate))
             self.assertEqual(manifest["jurisdictions"][0]["jurisdiction_code"], "EU")
+            self.assertEqual(manifest["jurisdictions"][0]["raw_hit_count"], 2)
             self.assertEqual(manifest["jurisdictions"][0]["document_count"], 2)
+            self.assertEqual(manifest["jurisdictions"][0]["full_text_document_count"], 2)
             self.assertEqual(manifest["jurisdictions"][1]["jurisdiction_code"], "UK")
+            self.assertEqual(manifest["jurisdictions"][1]["raw_hit_count"], 1)
             self.assertEqual(manifest["jurisdictions"][1]["document_count"], 1)
+            self.assertEqual(manifest["jurisdictions"][1]["full_text_document_count"], 1)
             progress = stdout.getvalue()
             self.assertIn("Starting build_policy_corpus: validating inputs.", progress)
             self.assertIn("Starting jurisdiction EU.", progress)
-            self.assertIn("Finished jurisdiction UK: 1 documents.", progress)
+            self.assertIn("Running jurisdiction EU. Total hits: 2.", progress)
+            self.assertIn("Finished jurisdiction UK. Unique full-text documents retrieved: 1.", progress)
             self.assertIn("Running NIM from EU CELEX results.", progress)
+            self.assertIn("Number of NIM eligible EU acts: 1.", progress)
             self.assertIn("Merging jurisdiction corpora and deduplicating final corpus.", progress)
+            self.assertIn("Final corpus: 2 unique documents (1 duplicates removed).", progress)
             self.assertIn("Completed build_policy_corpus: 2 final documents written.", progress)
             self.assertEqual(
                 tracker["eu_queries"],
@@ -418,6 +434,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         self.assertEqual(payload["include_translations"], False)
         self.assertEqual(payload["translated_terms"], [])
         self.assertEqual(payload["include_nim"], False)
+        self.assertEqual(payload["include_nim_fulltext"], True)
+        self.assertEqual(payload["nim_max_rows"], None)
         self.assertEqual(payload["nim_corpus_path"], None)
         self.assertEqual(payload["merged_document_count"], 1)
         self.assertEqual(payload["final_document_count"], 1)
@@ -427,6 +445,30 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         self.assertEqual(payload["nim_eligible_seed_count"], 0)
         self.assertEqual(payload["jurisdictions"][0]["jurisdiction_code"], "US")
         self.assertEqual(payload["jurisdictions"][0]["document_count"], 1)
+
+    def test_nim_runtime_controls_are_passed_to_top_level_nim_source(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(tracker),
+            ):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                    include_nim_fulltext=False,
+                    nim_max_rows=5,
+                )
+
+        self.assertEqual(result.include_nim_fulltext, False)
+        self.assertEqual(result.nim_max_rows, 5)
+        self.assertEqual(tracker["nim_settings"][0]["fetch_full_text"], False)
+        self.assertEqual(tracker["nim_settings"][0]["nim_max_rows"], 5)
+        self.assertEqual(tracker["nim_settings"][0]["progress"], True)
 
     def test_nim_seeding_filters_ineligible_eu_celexs_from_mixed_result_set(self):
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}

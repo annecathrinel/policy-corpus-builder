@@ -76,6 +76,8 @@ class EurlexNIMAdapter:
         _require_non_negative_int(settings, "progress_every", default=0)
         _require_positive_int(settings, "cache_every", default=50)
         _require_non_negative_int(settings, "success_min_chars", default=500)
+        _require_bool(settings, "progress", default=False)
+        resolve_optional_positive_int(settings, "nim_max_rows")
         resolve_cache_dir(source, base_path=base_path)
         resolve_timeout_tuple(settings)
 

@@ -20,6 +20,8 @@ build_policy_corpus(
     include_translations: bool = False,
     translated_terms: list[str] | None = None,
     include_nim: bool = False,
+    include_nim_fulltext: bool = True,
+    nim_max_rows: int | None = None,
 ) -> PolicyCorpusBuildResult
 ```
 
@@ -49,6 +51,8 @@ result = build_policy_corpus(
         "energie renouvelable en mer",
     ],
     include_nim=True,
+    include_nim_fulltext=True,
+    nim_max_rows=None,
 )
 
 print(result.final_corpus_path)
@@ -100,6 +104,13 @@ NIM is not merged into the main final corpus. The main final corpus remains the 
 
 If the EU result set contains no eligible legal-act CELEXs, NIM is skipped cleanly. In that case the top-level builder still succeeds, reports the skip in progress output and the run manifest, and does not write a NIM corpus file.
 
+NIM runtime can be controlled with two optional top-level arguments:
+
+- `include_nim_fulltext=True` preserves the default behavior and retrieves NIM full text.
+- `include_nim_fulltext=False` still retrieves and writes normalized NIM measure records, but skips the slower NIM full-text retrieval stage.
+- `nim_max_rows=None` preserves the default behavior and processes all NIM measure rows returned by the supported workflow.
+- `nim_max_rows=100` limits NIM processing to the first 100 national measure rows per NIM seed, which is useful for quick inspection runs.
+
 ## Public Result Object
 
 `build_policy_corpus(...)` returns a stable `PolicyCorpusBuildResult` object. It includes:
@@ -126,10 +137,14 @@ At minimum it reports:
 
 - pipeline start and input validation
 - each selected jurisdiction starting
-- each selected jurisdiction finishing with a document count
+- each selected jurisdiction raw hit count
+- each selected jurisdiction finishing with normalized and full-text document counts
 - whether NIM is running or skipped
+- NIM seed candidate and eligible seed counts
+- NIM national measure counts before full-text retrieval
+- NIM full-text retrieval progress when enabled
 - final merge and deduplication
-- final output write and completion
+- duplicates removed, final document count, final output write, and completion
 
 The goal is readable build-stage visibility, not verbose logging.
 
