@@ -283,6 +283,8 @@ Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
 - `outputs/policy-corpus-demo/final/documents.jsonl`
 - `outputs/policy-corpus-demo/audit/likely_duplicates.csv`
 - `outputs/policy-corpus-demo/audit/likely_duplicates.jsonl`
+- `outputs/policy-corpus-demo/audit/duplicate_groups_summary.csv`
+- `outputs/policy-corpus-demo/audit/duplicate_groups_summary.json`
 - `outputs/policy-corpus-demo/nim/documents.jsonl` when `include_nim=True` and NIM results are produced
 - `outputs/policy-corpus-demo/run-manifest.json`
 
@@ -309,6 +311,8 @@ The top-level builder preserves the current exact deduplication behavior and als
 
 - `audit/likely_duplicates.csv`
 - `audit/likely_duplicates.jsonl`
+- `audit/duplicate_groups_summary.csv`
+- `audit/duplicate_groups_summary.json`
 
 These files do not control retrieval, merging, or deduplication. They are inspection artifacts only.
 
@@ -321,6 +325,8 @@ The audit uses conservative exact grouping signals:
 - normalized title after whitespace folding and case normalization, only when the normalized title is at least 16 characters
 
 Each row represents one document in one likely duplicate group and includes `duplicate_group_id`, `signal`, `group_size`, `representative_value`, document identifiers, title, normalized title, URL, normalized URL, CELEX, jurisdiction, and publication date. A document may appear in more than one group if more than one transparent signal matches.
+
+The grouped summary files are intended for faster manual review. `duplicate_groups_summary.csv` has one row per likely duplicate group, sorted by a review-interest rank. It includes the triggering signal, group size, representative value, jurisdictions, source names, publication date range, cross-jurisdiction/source flags, document IDs, and a simple review-interest reason string. `duplicate_groups_summary.json` adds aggregate counts for total groups and involved documents, groups by signal, individual jurisdiction/source involvement, jurisdiction/source combinations, the largest groups, and the top review candidates.
 
 ## How `include_translations` Works
 

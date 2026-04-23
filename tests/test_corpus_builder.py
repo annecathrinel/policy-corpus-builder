@@ -364,12 +364,16 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             final_corpus = output_root / "final" / JSONL_FILENAME
             duplicate_audit_csv = output_root / "audit" / "likely_duplicates.csv"
             duplicate_audit_jsonl = output_root / "audit" / "likely_duplicates.jsonl"
+            duplicate_groups_summary_csv = output_root / "audit" / "duplicate_groups_summary.csv"
+            duplicate_groups_summary_json = output_root / "audit" / "duplicate_groups_summary.json"
             nim_corpus = output_root / "nim" / JSONL_FILENAME
             manifest_path = output_root / "run-manifest.json"
 
             self.assertEqual(result.final_corpus_path, final_corpus)
             self.assertEqual(result.duplicate_audit_csv_path, duplicate_audit_csv)
             self.assertEqual(result.duplicate_audit_jsonl_path, duplicate_audit_jsonl)
+            self.assertEqual(result.duplicate_groups_summary_csv_path, duplicate_groups_summary_csv)
+            self.assertEqual(result.duplicate_groups_summary_json_path, duplicate_groups_summary_json)
             self.assertEqual(result.nim_corpus_path, nim_corpus)
             self.assertEqual(result.manifest_path, manifest_path)
             self.assertEqual(result.schema_version, "1.0")
@@ -403,6 +407,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertTrue(final_corpus.exists())
             self.assertTrue(duplicate_audit_csv.exists())
             self.assertTrue(duplicate_audit_jsonl.exists())
+            self.assertTrue(duplicate_groups_summary_csv.exists())
+            self.assertTrue(duplicate_groups_summary_json.exists())
             self.assertTrue(nim_corpus.exists())
             self.assertTrue(manifest_path.exists())
 
@@ -448,6 +454,14 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(manifest["per_jurisdiction_output_paths"]["EU"], str(eu_intermediate))
             self.assertEqual(manifest["duplicate_audit_csv_path"], str(duplicate_audit_csv))
             self.assertEqual(manifest["duplicate_audit_jsonl_path"], str(duplicate_audit_jsonl))
+            self.assertEqual(
+                manifest["duplicate_groups_summary_csv_path"],
+                str(duplicate_groups_summary_csv),
+            )
+            self.assertEqual(
+                manifest["duplicate_groups_summary_json_path"],
+                str(duplicate_groups_summary_json),
+            )
             self.assertEqual(manifest["jurisdictions"][0]["jurisdiction_code"], "EU")
             self.assertEqual(manifest["jurisdictions"][0]["raw_hit_count"], 2)
             self.assertEqual(manifest["jurisdictions"][0]["document_count"], 2)
@@ -499,10 +513,18 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             ]
             with result.duplicate_audit_csv_path.open(encoding="utf-8", newline="") as fh:
                 audit_rows = list(csv.DictReader(fh))
+            with result.duplicate_groups_summary_csv_path.open(
+                encoding="utf-8",
+                newline="",
+            ) as fh:
+                group_summary_rows = list(csv.DictReader(fh))
             jsonl_rows = [
                 json.loads(line)
                 for line in result.duplicate_audit_jsonl_path.read_text(encoding="utf-8").splitlines()
             ]
+            aggregate_summary = json.loads(
+                result.duplicate_groups_summary_json_path.read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result.merged_document_count, 2)
         self.assertEqual(result.final_document_count, 2)
@@ -514,6 +536,20 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             {"normalized_title", "normalized_url"},
         )
         self.assertEqual({row["group_size"] for row in audit_rows}, {"2"})
+        self.assertEqual(len(group_summary_rows), 2)
+        self.assertEqual(
+            {row["signal"] for row in group_summary_rows},
+            {"normalized_title", "normalized_url"},
+        )
+        self.assertEqual(aggregate_summary["duplicate_group_count"], 2)
+        self.assertEqual(aggregate_summary["document_count"], 2)
+        self.assertEqual(
+            aggregate_summary["groups_by_signal"],
+            [
+                {"signal": "normalized_title", "group_count": 1},
+                {"signal": "normalized_url", "group_count": 1},
+            ],
+        )
         self.assertIn(
             "https://example.org/policy/doc?a=1&b=2",
             {row["representative_value"] for row in audit_rows},

@@ -13,6 +13,8 @@ from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (
     normalize_eligible_legal_act_celex,
 )
 from policy_corpus_builder.exporters import (
+    DUPLICATE_GROUPS_SUMMARY_CSV_FILENAME,
+    DUPLICATE_GROUPS_SUMMARY_JSON_FILENAME,
     export_documents_jsonl,
     export_duplicate_audit,
     export_run_manifest,
@@ -106,6 +108,8 @@ class PolicyCorpusBuildResult:
     final_corpus_path: Path
     duplicate_audit_csv_path: Path
     duplicate_audit_jsonl_path: Path
+    duplicate_groups_summary_csv_path: Path
+    duplicate_groups_summary_json_path: Path
     nim_corpus_path: Path | None
     manifest_path: Path
     merged_document_count: int
@@ -135,6 +139,8 @@ class PolicyCorpusBuildResult:
             "final_corpus_path": str(self.final_corpus_path),
             "duplicate_audit_csv_path": str(self.duplicate_audit_csv_path),
             "duplicate_audit_jsonl_path": str(self.duplicate_audit_jsonl_path),
+            "duplicate_groups_summary_csv_path": str(self.duplicate_groups_summary_csv_path),
+            "duplicate_groups_summary_json_path": str(self.duplicate_groups_summary_json_path),
             "nim_corpus_path": str(self.nim_corpus_path) if self.nim_corpus_path else None,
             "manifest_path": str(self.manifest_path),
             "merged_document_count": self.merged_document_count,
@@ -266,6 +272,8 @@ def build_policy_corpus(
         deduplication_result.documents,
         output_dir=audit_root,
     )
+    duplicate_groups_summary_csv_path = audit_root / DUPLICATE_GROUPS_SUMMARY_CSV_FILENAME
+    duplicate_groups_summary_json_path = audit_root / DUPLICATE_GROUPS_SUMMARY_JSON_FILENAME
     _emit_progress(
         f"Final corpus: {len(deduplication_result.documents)} unique documents "
         f"({deduplication_result.duplicates_removed} duplicates removed)."
@@ -340,6 +348,8 @@ def build_policy_corpus(
         final_corpus_path=final_corpus_path,
         duplicate_audit_csv_path=duplicate_audit_csv_path,
         duplicate_audit_jsonl_path=duplicate_audit_jsonl_path,
+        duplicate_groups_summary_csv_path=duplicate_groups_summary_csv_path,
+        duplicate_groups_summary_json_path=duplicate_groups_summary_json_path,
         nim_corpus_path=nim_corpus_path,
         manifest_path=output_root / RUN_MANIFEST_FILENAME,
         merged_document_count=len(merged_documents),
@@ -369,6 +379,8 @@ def build_policy_corpus(
         final_corpus_path=result.final_corpus_path,
         duplicate_audit_csv_path=result.duplicate_audit_csv_path,
         duplicate_audit_jsonl_path=result.duplicate_audit_jsonl_path,
+        duplicate_groups_summary_csv_path=result.duplicate_groups_summary_csv_path,
+        duplicate_groups_summary_json_path=result.duplicate_groups_summary_json_path,
         nim_corpus_path=result.nim_corpus_path,
         manifest_path=manifest_path,
         merged_document_count=result.merged_document_count,
