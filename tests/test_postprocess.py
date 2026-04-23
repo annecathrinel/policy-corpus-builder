@@ -8,7 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_corpus_builder.models import NormalizedDocument  # noqa: E402
 from policy_corpus_builder.orchestration import run_in_memory  # noqa: E402
-from policy_corpus_builder.postprocess import build_deduplication_key, deduplicate_documents  # noqa: E402
+from policy_corpus_builder.postprocess import (  # noqa: E402
+    build_deduplication_key,
+    clean_document_for_downstream_analysis,
+    deduplicate_documents,
+)
 from policy_corpus_builder.schemas import (  # noqa: E402
     BuilderConfig,
     ExportConfig,
@@ -20,6 +24,60 @@ from policy_corpus_builder.schemas import (  # noqa: E402
 
 
 class DeduplicationTests(unittest.TestCase):
+    def test_downstream_cleaning_standardizes_core_fields(self) -> None:
+        document = NormalizedDocument(
+            document_id="doc-1",
+            source_name="eu-eurlex",
+            title="  Proposal\n\nfor a   Regulation\xa0 ",
+            document_type="Regulation",
+            language="EN",
+            jurisdiction="eu",
+            publication_date="2024",
+            effective_date="23.07.2014",
+            full_text=(
+                "Consolidated TEXT: 32024R1991 — EN — 01.01.2025\n\n"
+                "02024R1991 — EN — 01.01.2025 — 001.001\n\n"
+                "This text is meant purely as a documentation tool and has no legal effect. "
+                "The Union's institutions do not assume any liability for its contents.\n\n"
+                "Article 1\n\nPolicy text."
+            ),
+        )
+
+        cleaned = clean_document_for_downstream_analysis(
+            document,
+            expected_jurisdiction_code="EU",
+        )
+
+        self.assertEqual(cleaned.title, "Proposal for a Regulation")
+        self.assertEqual(cleaned.document_type, "eu_regulation")
+        self.assertEqual(cleaned.language, "en")
+        self.assertEqual(cleaned.jurisdiction, "European Union")
+        self.assertEqual(cleaned.publication_date, "2024-01-01")
+        self.assertEqual(cleaned.effective_date, "2014-07-23")
+        self.assertEqual(cleaned.full_text, "Article 1\n\nPolicy text.")
+        self.assertEqual(cleaned.raw_metadata["_original_title"], document.title)
+        self.assertEqual(cleaned.raw_metadata["_publication_date_precision"], "year")
+        self.assertEqual(cleaned.raw_metadata["_effective_date_precision"], "day")
+
+    def test_downstream_cleaning_removes_obvious_schema_boilerplate_text(self) -> None:
+        document = NormalizedDocument(
+            document_id="doc-1",
+            source_name="eurlex-nim-supported",
+            document_type="national_implementation_measure",
+            full_text=(
+                "XML Schema XML Schema 15 October 2014 Table of contents "
+                "Introduction Resources Introduction This document describes the XML Schema"
+            ),
+        )
+
+        cleaned = clean_document_for_downstream_analysis(document)
+
+        self.assertIsNone(cleaned.full_text)
+        self.assertEqual(
+            cleaned.raw_metadata["_full_text_removed_reason"],
+            "source_boilerplate_or_empty_after_cleaning",
+        )
+
     def test_exact_duplicates_are_removed(self) -> None:
         documents = (
             NormalizedDocument(document_id="doc-1", source_name="source-a", title="Same"),

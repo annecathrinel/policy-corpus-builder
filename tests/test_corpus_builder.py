@@ -345,6 +345,20 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(len(uk_intermediate.read_text(encoding="utf-8").splitlines()), 1)
             self.assertEqual(len(final_corpus.read_text(encoding="utf-8").splitlines()), 2)
             self.assertEqual(len(nim_corpus.read_text(encoding="utf-8").splitlines()), 1)
+            final_records = [
+                json.loads(line)
+                for line in final_corpus.read_text(encoding="utf-8").splitlines()
+            ]
+            eu_record = next(
+                record for record in final_records if record["source_name"] == "eu-eurlex"
+            )
+            uk_record = next(
+                record for record in final_records if record["source_name"] == "uk-policy-source"
+            )
+            self.assertEqual(eu_record["document_type"], "eu_directive")
+            self.assertEqual(uk_record["publication_date"], "2024-01-01")
+            self.assertEqual(uk_record["jurisdiction"], "United Kingdom")
+            self.assertEqual(uk_record["raw_metadata"]["_publication_date_precision"], "year")
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             result_payload = result.to_dict()

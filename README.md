@@ -286,6 +286,21 @@ Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
 
 The final merged corpus is always written to `final/documents.jsonl`.
 
+## Final Corpus Cleaning
+
+Before jurisdiction-level outputs and the final merged corpus are written, the top-level builder applies a conservative shared cleanup pass to normalized records. Retrieval behavior and adapter internals are unchanged.
+
+The cleanup pass standardizes:
+
+- title and summary whitespace
+- language casing
+- selected jurisdiction labels for top-level builds
+- publication and effective dates to `YYYY-MM-DD` when the input is an obvious year, month, day, slash date, or dotted date
+- common document type labels into stable analysis-friendly values such as `eu_directive`, `eu_regulation`, `eu_decision`, `eu_proposal`, `eu_staff_working_document`, `eu_communication`, `national_implementation_measure`, and `policy_document`
+- obvious full-text boilerplate such as EUR-Lex consolidated-text documentation headers and schema placeholder text
+
+When a field is changed, the original value is preserved in `raw_metadata` using `_original_*` keys where practical. Year-only and month-only dates also include date precision metadata such as `_publication_date_precision`.
+
 ## How `include_translations` Works
 
 `include_translations` only affects the EU path.

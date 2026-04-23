@@ -15,7 +15,10 @@ from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (
 from policy_corpus_builder.exporters import export_documents_jsonl, export_run_manifest
 from policy_corpus_builder.models import NormalizedDocument, Query
 from policy_corpus_builder.pipeline import normalize_adapter_results
-from policy_corpus_builder.postprocess import deduplicate_documents
+from policy_corpus_builder.postprocess import (
+    clean_documents_for_downstream_analysis,
+    deduplicate_documents,
+)
 from policy_corpus_builder.schemas import NormalizationConfig, SourceConfig
 
 SUPPORTED_JURISDICTIONS = ("EU", "UK", "CA", "AUS", "NZ", "US")
@@ -201,7 +204,10 @@ def build_policy_corpus(
             output_root=output_root,
             cache_root=cache_root,
         )
-        documents = jurisdiction_result.documents
+        documents = clean_documents_for_downstream_analysis(
+            jurisdiction_result.documents,
+            expected_jurisdiction_code=jurisdiction,
+        )
         jurisdiction_documents[jurisdiction] = documents
         _emit_progress(
             f"Running jurisdiction {jurisdiction}. Total hits: {jurisdiction_result.raw_result_count}."
@@ -217,13 +223,13 @@ def build_policy_corpus(
                 intermediate_corpus_path=path,
                 raw_hit_count=jurisdiction_result.raw_result_count,
                 document_count=len(documents),
-                full_text_document_count=jurisdiction_result.full_text_document_count,
+                full_text_document_count=sum(1 for document in documents if document.full_text),
             )
         )
         _emit_progress(
             "Finished jurisdiction "
             f"{jurisdiction}. Unique full-text documents retrieved: "
-            f"{jurisdiction_result.full_text_document_count}. "
+            f"{sum(1 for document in documents if document.full_text)}. "
             f"Normalized documents: {len(documents)}."
         )
 
@@ -276,6 +282,7 @@ def build_policy_corpus(
                 include_nim_fulltext=include_nim_fulltext,
                 nim_max_rows=cleaned_nim_max_rows,
             )
+            nim_documents = clean_documents_for_downstream_analysis(nim_documents)
             nim_deduplication_result = deduplicate_documents(
                 nim_documents,
                 config=NormalizationConfig(
