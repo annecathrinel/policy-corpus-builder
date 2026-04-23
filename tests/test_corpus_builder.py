@@ -7,8 +7,15 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (  # noqa: E402
+    build_eligible_act_table,
+    normalize_eligible_legal_act_celex,
+    select_eligible_celex_acts,
+)
 from policy_corpus_builder.corpus_builder import (  # noqa: E402
     CorpusBuildValidationError,
     build_policy_corpus,
@@ -135,6 +142,43 @@ class _IneligibleOnlyFakeEurlexAdapter(_FakeAdapter):
         ]
 
 
+class _ReferenceEligibilityFakeEurlexAdapter(_FakeAdapter):
+    name = "eurlex"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        self._tracker["eu_queries"].append(query.text)
+        rows = [
+            ("52022AR4206", "Committee of the Regions opinion"),
+            ("52023PC0304", "Commission proposal"),
+            ("32024R1991", "Nature Restoration Regulation"),
+        ]
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "document_id": f"eu-eurlex:EU:{celex}",
+                        "source_document_id": celex,
+                        "title": title,
+                        "document_type": "eu_document",
+                        "language": "en",
+                        "jurisdiction": "European Union",
+                        "publication_date": "2024-01-01",
+                        "url": f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}",
+                        "download_url": f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}",
+                        "full_text": title,
+                        "raw_record": {"celex": celex, "celex_full": celex},
+                    }
+                },
+            )()
+            for celex, title in rows
+        ]
+
+
 class _FakeNonEUAdapter(_FakeAdapter):
     name = "non-eu"
 
@@ -203,18 +247,35 @@ class _FakeNIMAdapter(_FakeAdapter):
         ]
 
 
+class _StrictFakeNIMAdapter(_FakeAdapter):
+    name = "eurlex-nim"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        if query.text not in {"32014L0089", "32024R1991"}:
+            raise AssertionError(f"ineligible CELEX leaked into NIM runtime path: {query.text}")
+        return _FakeNIMAdapter(self._tracker).collect(
+            source,
+            query,
+            base_path=base_path,
+            loaded_source=loaded_source,
+        )
+
+
 class PolicyCorpusBuilderTests(unittest.TestCase):
     def _build_fake_get_adapter(self, tracker):
         return self._build_custom_fake_get_adapter(tracker, eurlex_adapter_class=_FakeEurlexAdapter)
 
-    def _build_custom_fake_get_adapter(self, tracker, *, eurlex_adapter_class):
+    def _build_custom_fake_get_adapter(self, tracker, *, eurlex_adapter_class, nim_adapter_class=_FakeNIMAdapter):
         def _fake_get_adapter(adapter_name):
             if adapter_name == "eurlex":
                 return eurlex_adapter_class(tracker)
             if adapter_name == "non-eu":
                 return _FakeNonEUAdapter(tracker)
             if adapter_name == "eurlex-nim":
-                return _FakeNIMAdapter(tracker)
+                return nim_adapter_class(tracker)
             raise KeyError(adapter_name)
 
         return _fake_get_adapter
@@ -428,6 +489,94 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["nim_seed_count"], 1)
         self.assertEqual(manifest["nim_eligible_seed_count"], 0)
         self.assertEqual(manifest["nim_document_count"], 0)
+        self.assertIn(
+            "Skipping NIM: EU results contained no eligible legal-act CELEX seeds.",
+            stdout.getvalue(),
+        )
+
+    def test_nim_eligibility_matches_reference_examples(self):
+        self.assertEqual(normalize_eligible_legal_act_celex("52022AR4206"), "")
+        self.assertEqual(normalize_eligible_legal_act_celex("52023PC0304"), "")
+        self.assertEqual(normalize_eligible_legal_act_celex("32024R1991"), "32024R1991")
+
+    def test_supported_eligible_act_tables_filter_to_l_r_d_descriptors(self):
+        docs = pd.DataFrame(
+            [
+                {"celex": "52022AR4206", "title": "Opinion"},
+                {"celex": "52023PC0304", "title": "Proposal"},
+                {"celex": "32024R1991", "title": "Regulation"},
+                {"celex": "32014L0089", "title": "Directive"},
+                {"celex": "32022D0591", "title": "Decision"},
+            ]
+        )
+
+        built = build_eligible_act_table(docs)
+        selected = select_eligible_celex_acts(docs)
+
+        self.assertEqual(set(built["celex"]), {"32024R1991", "32014L0089", "32022D0591"})
+        self.assertEqual(set(selected["celex"]), {"32024R1991", "32014L0089", "32022D0591"})
+        self.assertNotIn("52022AR4206", set(selected["celex"]))
+        self.assertNotIn("52023PC0304", set(selected["celex"]))
+
+    def test_top_level_nim_seeding_uses_reference_eligibility_for_mixed_eu_results(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_ReferenceEligibilityFakeEurlexAdapter,
+                    nim_adapter_class=_StrictFakeNIMAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["nature restoration"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.nim_status, "ran")
+        self.assertEqual(result.nim_seed_count, 3)
+        self.assertEqual(result.nim_eligible_seed_count, 1)
+        self.assertEqual(tracker["nim_queries"], ["32024R1991"])
+        self.assertEqual(manifest["nim_eligible_seed_count"], 1)
+        self.assertIn("Running NIM from EU CELEX results.", stdout.getvalue())
+
+    def test_runtime_nim_path_defensively_blocks_bad_seeds_even_if_earlier_filter_regresses(self):
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_IneligibleOnlyFakeEurlexAdapter,
+                    nim_adapter_class=_StrictFakeNIMAdapter,
+                ),
+            ), patch(
+                "policy_corpus_builder.corpus_builder._filter_eligible_nim_celex_seeds",
+                return_value=("52022AR4206",),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["nature restoration"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.nim_status, "skipped_no_eligible_eu_legal_acts")
+        self.assertEqual(result.nim_document_count, 0)
+        self.assertIsNone(result.nim_corpus_path)
+        self.assertEqual(tracker["nim_queries"], [])
+        self.assertEqual(manifest["nim_status"], "skipped_no_eligible_eu_legal_acts")
         self.assertIn(
             "Skipping NIM: EU results contained no eligible legal-act CELEX seeds.",
             stdout.getvalue(),

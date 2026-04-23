@@ -8,8 +8,10 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from policy_corpus_builder.adapters.eurlex_nim_supported.surface import normalize_legal_act_celex
 from policy_corpus_builder.adapters import get_adapter
+from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (
+    normalize_eligible_legal_act_celex,
+)
 from policy_corpus_builder.exporters import export_documents_jsonl, export_run_manifest
 from policy_corpus_builder.models import NormalizedDocument, Query
 from policy_corpus_builder.pipeline import normalize_adapter_results
@@ -225,6 +227,7 @@ def build_policy_corpus(
         )
         nim_seed_count = len(nim_seed_candidates)
         eu_celex_seeds = _filter_eligible_nim_celex_seeds(nim_seed_candidates)
+        eu_celex_seeds = _defensively_filter_nim_runtime_celex_seeds(eu_celex_seeds)
         nim_eligible_seed_count = len(eu_celex_seeds)
         if eu_celex_seeds:
             nim_status = "ran"
@@ -344,6 +347,10 @@ def _run_eu_nim(
     output_root: Path,
     cache_root: Path,
 ) -> tuple[NormalizedDocument, ...]:
+    runtime_safe_celex_seeds = _defensively_filter_nim_runtime_celex_seeds(celex_seeds)
+    if not runtime_safe_celex_seeds:
+        return tuple()
+
     source = SourceConfig(
         name="eu-nim",
         adapter="eurlex-nim",
@@ -351,7 +358,7 @@ def _run_eu_nim(
             "cache_dir": str((cache_root / "nim").resolve()),
         },
     )
-    queries = _build_inline_queries(celex_seeds, origin="eu-celex-seed")
+    queries = _build_inline_queries(runtime_safe_celex_seeds, origin="eu-celex-seed")
     return _collect_normalized_documents(source, queries=queries, base_path=output_root)
 
 
@@ -417,11 +424,22 @@ def _filter_eligible_nim_celex_seeds(candidates: tuple[str, ...]) -> tuple[str, 
     seen: set[str] = set()
     eligible: list[str] = []
     for candidate in candidates:
-        normalized = normalize_legal_act_celex(candidate)
+        normalized = normalize_eligible_legal_act_celex(candidate)
         if normalized and normalized not in seen:
             seen.add(normalized)
             eligible.append(normalized)
     return tuple(eligible)
+
+
+def _defensively_filter_nim_runtime_celex_seeds(candidates: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    runtime_safe: list[str] = []
+    for candidate in candidates:
+        normalized = normalize_eligible_legal_act_celex(candidate)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            runtime_safe.append(normalized)
+    return tuple(runtime_safe)
 
 
 def _clean_terms(

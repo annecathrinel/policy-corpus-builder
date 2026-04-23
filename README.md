@@ -93,6 +93,7 @@ This keeps the top-level API simple while preserving the current supported workf
 - CELEX identifiers are extracted from the EU results.
 - Those CELEX identifiers are filtered to eligible EU legal acts only.
 - Only eligible legal-act CELEXs compatible with the supported NIM path are used to seed the existing EUR-Lex NIM workflow.
+- In practice, NIM seeds must normalize to sector-3 legal acts with descriptor `L`, `R`, or `D`.
 - NIM results are written to a separate corpus under `nim/documents.jsonl`.
 
 NIM is not merged into the main final corpus. The main final corpus remains the merged, deduplicated jurisdiction corpus only.

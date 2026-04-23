@@ -1,6 +1,16 @@
-"""Supported EUR-Lex NIM retrieval/full-text helper subset."""
-
 from __future__ import annotations
+
+"""Standalone EUR-Lex NIM retrieval helpers for the rebuilt pipeline.
+
+Ported and adapted from:
+- NID_Retrieval_Pipeline_EURLEX_NIM.ipynb
+- utils/eurlex_nim.py
+
+Differences:
+- credentials now come from environment variables only
+- no runtime notebook parsing remains
+- cached fallback is explicit at the NIM-table level
+"""
 
 import hashlib
 import os
@@ -15,11 +25,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from policy_corpus_builder.utils.celex import (
-    extract_celex_token,
-    parse_celex,
-    parse_celex_to_dict,
-)
+from celex_lookup import extract_celex_token, parse_celex, parse_celex_to_dict
 
 try:
     from lxml import etree as ET
@@ -27,6 +33,10 @@ except Exception:  # pragma: no cover
     import xml.etree.ElementTree as ET  # type: ignore[no-redef]
 
 EURLEX_WS_ENDPOINT = "https://eur-lex.europa.eu/EURLexWebService"
+EURLEX_WS_NS_SEARCH = "http://eur-lex.europa.eu/search"
+SOAPENV_NS = "http://www.w3.org/2003/05/soap-envelope"
+WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+WSU_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 
 EU_ISO3_TO_NAME = {
     "AUT": "Austria", "BEL": "Belgium", "BGR": "Bulgaria", "HRV": "Croatia", "CYP": "Cyprus", "CZE": "Czechia",
@@ -97,7 +107,7 @@ NIM_TEXT_ROUTE_ORDER = [
     "fallback_generic/legal-content-html-en",
     "fallback_generic/lexuriserv",
 ]
-ALLOWED_NIM_LEGAL_ACT_DESCRIPTORS = {"L", "R", "D"}
+
 
 def _localname(tag: str | None) -> str:
     if not tag:
@@ -136,23 +146,15 @@ def normalize_legal_act_celex(value: object) -> str:
     return info.normalized
 
 
-def normalize_eligible_legal_act_celex(value: object) -> str:
-    celex = normalize_legal_act_celex(value)
-    if not celex:
-        return ""
-    info = parse_celex(celex)
-    if info.descriptor not in ALLOWED_NIM_LEGAL_ACT_DESCRIPTORS:
-        return ""
-    return celex
-
-
 def build_eligible_act_table(doc_scores: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for rec in doc_scores.itertuples(index=False):
-        celex = normalize_eligible_legal_act_celex(getattr(rec, "celex", ""))
+        celex = normalize_legal_act_celex(getattr(rec, "celex", ""))
         if not celex:
             continue
         info = parse_celex(celex)
+        if info.descriptor not in {"L", "R", "D"}:
+            continue
         rows.append(
             {
                 "celex": celex,
@@ -166,11 +168,9 @@ def build_eligible_act_table(doc_scores: pd.DataFrame) -> pd.DataFrame:
                 "renewables_alignment_score": getattr(rec, "renewables_alignment_score", None),
             }
         )
-
     acts = pd.DataFrame(rows)
     if acts.empty:
         return acts
-
     acts["title_len"] = acts["eu_act_title"].astype(str).str.len()
     return (
         acts.sort_values(["celex", "title_len", "governance_gap_score"], ascending=[True, True, False])
@@ -183,12 +183,18 @@ def build_eligible_act_table(doc_scores: pd.DataFrame) -> pd.DataFrame:
 
 def select_eligible_celex_acts(eu_docs: pd.DataFrame) -> pd.DataFrame:
     docs = eu_docs.copy()
-    docs["celex"] = docs["celex"].astype(str).apply(normalize_eligible_legal_act_celex)
+    docs["celex"] = docs["celex"].astype(str).apply(normalize_legal_act_celex)
     celex_parts = docs["celex"].apply(parse_celex_to_dict).apply(pd.Series)
     for src, tgt in {"sector": "celex_sector", "descriptor_label": "celex_doc_type_label", "year": "celex_year"}.items():
         if src in celex_parts.columns:
             docs[tgt] = celex_parts[src]
-    return build_eligible_act_table(docs)
+    eligible = (
+        docs[docs["celex"].astype(str).str.startswith("3") & docs["celex"].astype(str).str.len().ge(8)][["celex", "title", "celex_doc_type_label", "celex_year"]]
+        .drop_duplicates(subset=["celex"])
+        .rename(columns={"title": "eu_act_title", "celex_year": "year", "celex_doc_type_label": "eu_act_type"})
+        .reset_index(drop=True)
+    )
+    return eligible
 
 
 def get_ws_credentials() -> tuple[str, str]:
@@ -422,6 +428,10 @@ def parse_ws_nim_results(xml_bytes: bytes, act_celex: str = "") -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates(subset=[key, "nim_celex"])
 
 
+def enrich_nim_notice_fields(nim_df: pd.DataFrame) -> pd.DataFrame:
+    return enrich_nim_metadata(nim_df)
+
+
 def enrich_nim_metadata(
     nim_df: pd.DataFrame,
     *,
@@ -634,6 +644,124 @@ def get_national_transpositions_by_celex_ws(act_celex: str, *, page_size: int = 
     return out
 
 
+def retrieve_nim_for_acts(
+    acts: pd.DataFrame,
+    *,
+    page_size: int = 100,
+    max_pages: int | None = None,
+    search_language: str = "en",
+    sleep_s: float = 0.2,
+    metadata_cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for rec in acts.itertuples(index=False):
+        celex = normalize_legal_act_celex(getattr(rec, "celex"))
+        if not celex:
+            continue
+        df = get_national_transpositions_by_celex_ws(celex, page_size=page_size, max_pages=max_pages, search_language=search_language, sleep_s=sleep_s)
+        df["eu_act_title"] = getattr(rec, "eu_act_title", getattr(rec, "title", ""))
+        df["eu_act_type"] = getattr(rec, "eu_act_type", getattr(rec, "celex_doc_type_label", ""))
+        df["year"] = getattr(rec, "year", None)
+        df["governance_gap_score"] = getattr(rec, "governance_gap_score", None)
+        df["ecological_ambition_score"] = getattr(rec, "ecological_ambition_score", None)
+        df["design_specificity_score"] = getattr(rec, "design_specificity_score", None)
+        frames.append(df)
+        if sleep_s:
+            time.sleep(sleep_s)
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    out = out.rename(columns={"act_celex": "celex"})
+    out["number_of_national_measures"] = 1
+    return enrich_nim_metadata(out, cache_dir=metadata_cache_dir)
+
+
+def load_or_fetch_nim(
+    eligible: pd.DataFrame,
+    cache_path: Path,
+    run_live: bool = False,
+    *,
+    metadata_cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    if run_live:
+        return retrieve_nim_for_acts(eligible, metadata_cache_dir=metadata_cache_dir)
+    nim_long = pd.read_csv(cache_path, low_memory=False)
+    nim_long["celex"] = nim_long["celex"].astype(str).apply(normalize_legal_act_celex)
+    nim_long = nim_long[nim_long["celex"].isin(eligible["celex"])].reset_index(drop=True)
+    return enrich_nim_metadata(nim_long, cache_dir=metadata_cache_dir)
+
+
+def summarize_nim(nim_df: pd.DataFrame, acts: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if nim_df.empty:
+        empty = pd.DataFrame()
+        return {"nim_long": empty, "celex_summary": empty, "country_summary": empty, "country_act_matrix": empty}
+
+    celex_summary = (
+        nim_df.groupby(["celex", "eu_act_title", "eu_act_type", "year"], dropna=False)
+        .agg(
+            member_states_with_measures=("member_state_name", lambda s: s.replace("", pd.NA).dropna().nunique()),
+            total_national_measures=("national_measure_id", "nunique"),
+            mean_gap_score=("governance_gap_score", "mean"),
+            mean_ambition_score=("ecological_ambition_score", "mean"),
+            mean_design_score=("design_specificity_score", "mean"),
+        )
+        .reset_index()
+        .sort_values(["total_national_measures", "member_states_with_measures", "celex"], ascending=[False, False, True])
+    )
+
+    all_countries = sorted(set(EU_ISO3_TO_NAME.values()))
+    country_summary = (
+        nim_df.groupby(["member_state_name"], dropna=False)
+        .agg(acts_with_measures=("celex", "nunique"), total_national_measures=("national_measure_id", "nunique"))
+        .reset_index()
+    )
+    country_summary["average_measures_per_act"] = country_summary["total_national_measures"] / country_summary["acts_with_measures"].clip(lower=1)
+    country_summary = country_summary.rename(columns={"member_state_name": "member_state"})
+    country_summary = (
+        pd.DataFrame({"member_state": all_countries})
+        .merge(country_summary, on="member_state", how="left")
+        .fillna({"acts_with_measures": 0, "total_national_measures": 0, "average_measures_per_act": 0.0})
+    )
+    country_summary["acts_with_measures"] = country_summary["acts_with_measures"].astype(int)
+    country_summary["total_national_measures"] = country_summary["total_national_measures"].astype(int)
+    country_summary = country_summary.sort_values(["total_national_measures", "acts_with_measures", "member_state"], ascending=[False, False, True])
+
+    top_acts = celex_summary.head(10)["celex"].tolist()
+    country_act = (
+        nim_df[nim_df["celex"].isin(top_acts)]
+        .groupby(["member_state_name", "celex"], dropna=False)
+        .agg(number_of_national_measures=("national_measure_id", "nunique"))
+        .reset_index()
+        .rename(columns={"member_state_name": "member_state"})
+    )
+    country_act = country_act.merge(celex_summary[["celex", "eu_act_title"]], on="celex", how="left")
+    country_act["act_display"] = country_act["eu_act_title"].fillna(country_act["celex"])
+    matrix = country_act.pivot(index="member_state", columns="act_display", values="number_of_national_measures").fillna(0)
+    matrix = matrix.reindex(index=all_countries, fill_value=0)
+    matrix = matrix.loc[(matrix.sum(axis=1) > 0)]
+    matrix = matrix.loc[:, matrix.sum(axis=0).sort_values(ascending=False).index]
+    return {
+        "nim_long": nim_df,
+        "celex_summary": celex_summary.reset_index(drop=True),
+        "country_summary": country_summary.reset_index(drop=True),
+        "country_act_matrix": matrix.reset_index(),
+    }
+
+
+def summarize_nim_country(nim_long: pd.DataFrame) -> pd.DataFrame:
+    if "member_state_name" in nim_long.columns:
+        member_state_col = "member_state_name"
+    elif "member_state" in nim_long.columns:
+        member_state_col = "member_state"
+    elif "country" in nim_long.columns:
+        member_state_col = "country"
+    elif "member_state_iso3" in nim_long.columns:
+        member_state_col = "member_state_iso3"
+    else:
+        raise KeyError("No member-state column found in nim_long")
+    return nim_long.groupby(["celex", member_state_col], dropna=False).size().reset_index(name="number_of_national_measures").rename(columns={member_state_col: "member_state"})
+
+
 def _uniq_keep_order(xs: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -749,6 +877,11 @@ def _nim_cache_key(row: pd.Series | dict[str, Any]) -> str:
     return hashlib.sha1(repr(dict(row)).encode("utf-8")).hexdigest()[:24]
 
 
+def nim_cache_key_for_row(row: pd.Series | dict[str, Any]) -> str:
+    """Public wrapper used by the workbook to build stable per-record cache keys."""
+    return _nim_cache_key(row)
+
+
 def _nim_text_path(row: pd.Series | dict[str, Any], cache_dir: Path) -> Path:
     text_cache_dir, _ = _nim_cache_dirs(cache_dir)
     return text_cache_dir / f"{_nim_cache_key(row)}.txt"
@@ -779,6 +912,7 @@ _NOT_AVAILABLE_PATTERNS = [
     r"could not be found",
     r"no html content",
 ]
+
 
 def _looks_like_not_available(html_text: str) -> bool:
     lowered = (html_text or "").lower()
@@ -1270,7 +1404,7 @@ def fetch_nim_document_text(
         }
     )
 
-    file_cache_dir = _ensure_dir(Path("outputs/nim_fulltext_cache/file_cache"))
+    file_cache_dir = _ensure_dir(Path("analysis_pipeline/outputs/nim_fulltext_cache/file_cache"))
     route_candidates = _build_nim_route_candidates(page_meta)
     seen_urls: set[str] = set()
     while route_candidates:
@@ -1646,6 +1780,13 @@ def summarize_nim_fulltext_cache_state(
     return merged, cache_df
 
 
+def load_failed_nim_fulltext_attempts(cache_dir: Path, *, success_min_chars: int = 500) -> pd.DataFrame:
+    cache_df = load_nim_fulltext_cache_table(cache_dir)
+    if cache_df.empty:
+        return cache_df
+    return cache_df[cache_df["text_len"].lt(success_min_chars)].copy()
+
+
 def batch_fetch_nim_fulltext(
     nim_df: pd.DataFrame,
     *,
@@ -1772,14 +1913,3 @@ def batch_fetch_nim_fulltext(
         for reason, count in sorted(failure_counts.items(), key=lambda x: (-x[1], x[0])):
             print(f"{reason}: {count}", flush=True)
     return out
-
-
-__all__ = [
-    "batch_fetch_nim_fulltext",
-    "build_eligible_act_table",
-    "enrich_nim_metadata",
-    "get_national_transpositions_by_celex_ws",
-    "normalize_eligible_legal_act_celex",
-    "normalize_legal_act_celex",
-    "select_eligible_celex_acts",
-]
