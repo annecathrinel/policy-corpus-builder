@@ -62,6 +62,46 @@ print(result.final_document_count)
 
 `build_policy_corpus(...)` prints a lightweight progress stream while it runs, writes intermediate and final corpus artifacts to disk, and returns a stable `PolicyCorpusBuildResult` object for programmatic use.
 
+## CLI Happy Path
+
+The same top-level workflow is available from the terminal:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" "offshore renewable energy" \
+  --jurisdictions EU UK CA \
+  --outputs-path outputs/policy-corpus-demo \
+  --include-translations \
+  --translated-terms "planification de l'espace maritime" "energie renouvelable en mer" \
+  --include-nim \
+  --include-nim-fulltext
+```
+
+This command calls `build_policy_corpus(...)` directly. It prints the same progress output, writes the same cache, jurisdiction corpora, final corpus, optional NIM corpus, and run manifest, then prints the final corpus and manifest paths.
+
+For faster NIM inspection runs, skip NIM full-text retrieval or cap the number of NIM rows processed per eligible EU legal-act seed:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU \
+  --outputs-path outputs/policy-corpus-demo \
+  --include-nim \
+  --no-nim-fulltext \
+  --nim-max-rows 100
+```
+
+CLI options map directly to the public Python function:
+
+- `--query-terms` maps to `query_terms`
+- `--jurisdictions` maps to `jurisdictions`
+- `--outputs-path` maps to `outputs_path`
+- `--include-translations` maps to `include_translations`
+- `--translated-terms` maps to `translated_terms`
+- `--include-nim` maps to `include_nim`
+- `--include-nim-fulltext` and `--no-nim-fulltext` map to `include_nim_fulltext`
+- `--nim-max-rows` maps to `nim_max_rows`
+
 ## What It Writes To Disk
 
 Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
@@ -274,12 +314,23 @@ print(output_path)
 
 ### CLI Usage
 
+The recommended CLI workflow is the top-level happy path:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU UK \
+  --outputs-path outputs/policy-corpus-demo
+```
+
+The older config-driven CLI remains available for lower-level workflows:
+
 ```bash
 policy-corpus-builder validate-config --config examples/local_file.toml
 policy-corpus-builder run --config examples/local_file.toml
 ```
 
-The CLI remains config-oriented and runs the lower-level config pipeline rather than the new top-level builder.
+`validate-config` and `run` continue to use the lower-level config pipeline. They are useful when you need direct TOML-driven source configuration, but new users should usually start with `build-corpus`.
 
 ## Provisional And Internal Surface
 
