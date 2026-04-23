@@ -102,6 +102,173 @@ CLI options map directly to the public Python function:
 - `--include-nim-fulltext` and `--no-nim-fulltext` map to `include_nim_fulltext`
 - `--nim-max-rows` maps to `nim_max_rows`
 
+## Cookbook
+
+Short copy-pasteable examples for common runs.
+
+### EU Only
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/eu-only",
+)
+print(result.final_corpus_path)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU \
+  --outputs-path outputs/eu-only
+```
+
+### EU + NIM Metadata Only
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/eu-nim-metadata",
+    include_nim=True,
+    include_nim_fulltext=False,
+)
+print(result.nim_corpus_path)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU \
+  --outputs-path outputs/eu-nim-metadata \
+  --include-nim \
+  --no-nim-fulltext
+```
+
+### EU + NIM Full Text
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/eu-nim-fulltext",
+    include_nim=True,
+    include_nim_fulltext=True,
+)
+print(result.nim_corpus_path)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU \
+  --outputs-path outputs/eu-nim-fulltext \
+  --include-nim \
+  --include-nim-fulltext
+```
+
+### Multi-Jurisdiction Without NIM
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["offshore renewable energy", "marine spatial planning"],
+    jurisdictions=["EU", "UK", "CA", "AUS", "NZ", "US"],
+    outputs_path="outputs/multi-jurisdiction",
+)
+print(result.final_document_count)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "offshore renewable energy" "marine spatial planning" \
+  --jurisdictions EU UK CA AUS NZ US \
+  --outputs-path outputs/multi-jurisdiction
+```
+
+### Multi-Jurisdiction With Limited NIM Rows
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU", "UK", "CA"],
+    outputs_path="outputs/multi-jurisdiction-nim-limited",
+    include_nim=True,
+    nim_max_rows=100,
+)
+print(result.nim_document_count)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU UK CA \
+  --outputs-path outputs/multi-jurisdiction-nim-limited \
+  --include-nim \
+  --nim-max-rows 100
+```
+
+### Translated EU Query Usage
+
+Python:
+
+```python
+from policy_corpus_builder import build_policy_corpus
+
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/eu-translated",
+    include_translations=True,
+    translated_terms=[
+        "planification de l'espace maritime",
+        "maritime Raumordnung",
+    ],
+)
+print(result.final_corpus_path)
+```
+
+CLI:
+
+```bash
+policy-corpus-builder build-corpus \
+  --query-terms "marine spatial planning" \
+  --jurisdictions EU \
+  --outputs-path outputs/eu-translated \
+  --include-translations \
+  --translated-terms "planification de l'espace maritime" "maritime Raumordnung"
+```
+
 ## What It Writes To Disk
 
 Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
