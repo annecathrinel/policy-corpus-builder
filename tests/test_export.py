@@ -57,6 +57,36 @@ class JsonlExportTests(unittest.TestCase):
             self.assertIn("full_text", first_record)
             self.assertIn("raw_metadata", first_record)
 
+    def test_export_documents_jsonl_sanitizes_lone_utf16_surrogates(self) -> None:
+        # Regression test for a real crash hit during an HPC production run
+        # (UnicodeEncodeError: 'utf-8' codec can't encode character '\ud835'):
+        # scraped/retrieved US-jurisdiction text sometimes contains lone UTF-16
+        # surrogate code points that json.dumps cannot serialize with
+        # ensure_ascii=False. export_documents_jsonl must sanitize these rather
+        # than raising or silently losing the whole export.
+        documents = (
+            NormalizedDocument(
+                document_id="doc-surrogate",
+                source_name="source-a",
+                title="Contains a lone surrogate: \ud835 in the title",
+                full_text="Body text with an embedded surrogate \ud835 mid-sentence.",
+                raw_metadata={"note": "nested \ud835 surrogate in raw metadata"},
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = export_documents_jsonl(documents, output_dir=Path(tmpdir))
+            lines = output_path.read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(len(lines), 1)
+            # json.loads succeeding at all confirms no lone surrogate reached
+            # the serialized output.
+            record = json.loads(lines[0])
+            self.assertNotIn("\ud835", record["title"])
+            self.assertNotIn("\ud835", record["full_text"])
+            self.assertNotIn("\ud835", record["raw_metadata"]["note"])
+            self.assertIn("�", record["title"])
+
     def test_export_documents_jsonl_supports_empty_streams(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = export_documents_jsonl((), output_dir=Path(tmpdir))
