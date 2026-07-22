@@ -2,4 +2,5 @@ beautifulsoup4
 certifi
 numpy
 pandas
+pypdf
 requests

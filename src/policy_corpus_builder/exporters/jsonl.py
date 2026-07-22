@@ -10,6 +10,20 @@ from policy_corpus_builder.models import NormalizedDocument
 
 JSONL_FILENAME = "documents.jsonl"
 
+def _sanitize_json_value(value):
+    if isinstance(value, str):
+        return "".join(
+            ch if not (0xD800 <= ord(ch) <= 0xDFFF) else "\uFFFD"
+            for ch in value
+        )
+    if isinstance(value, dict):
+        return {k: _sanitize_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json_value(v) for v in value]
+    return value
+
 
 def export_documents_jsonl(
     documents: Iterable[NormalizedDocument],
@@ -23,7 +37,8 @@ def export_documents_jsonl(
 
     with output_path.open("w", encoding="utf-8", newline="\n") as fh:
         for document in documents:
-            fh.write(json.dumps(document.to_dict(), ensure_ascii=False, sort_keys=True))
+            payload = _sanitize_json_value(document.to_dict())
+            fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             fh.write("\n")
 
     return output_path
