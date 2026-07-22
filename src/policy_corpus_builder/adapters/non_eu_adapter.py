@@ -59,10 +59,10 @@ class NonEUAdapter:
         self._require_non_negative_int(settings, "progress_every", default=0)
         self._require_bool(settings, "obey_robots", default=True)
         self._resolve_user_agent(settings)
-        #nz_mode = self._resolve_nz_mode(settings)
+        nz_mode = self._resolve_nz_mode(settings)
         self._validate_supported_workflow_boundary(
             countries,
-            #nz_mode=nz_mode,
+            nz_mode=nz_mode,
             allow_internal=allow_internal,
         )
 
@@ -75,15 +75,15 @@ class NonEUAdapter:
                     "(countries = ['US']). "
                     f"Set environment variable {env_name} before validating or running this config."
                 )
-        # if "NZ" in countries and nz_mode == "api":
-        #     api_key = self._resolve_nz_api_key(settings)
-        #     if not api_key:
-        #         env_name = self._resolve_nz_api_key_env(settings)
-        #         raise AdapterConfigError(
-        #             "non-eu adapter requires a New Zealand legislation API key for the supported "
-        #             "New Zealand workflow (countries = ['NZ'], nz_mode = 'api'). "
-        #             f"Set environment variable {env_name} before validating or running this config."
-        #         )
+        if "NZ" in countries and nz_mode == "api":
+            api_key = self._resolve_nz_api_key(settings)
+            if not api_key:
+                env_name = self._resolve_nz_api_key_env(settings)
+                raise AdapterConfigError(
+                    "non-eu adapter requires a New Zealand legislation API key for the supported "
+                    "New Zealand workflow (countries = ['NZ'], nz_mode = 'api'). "
+                    f"Set environment variable {env_name} before validating or running this config."
+                )
 
     def collect(
         self,
@@ -99,8 +99,8 @@ class NonEUAdapter:
         workflow_result = run_non_eu_query_pipeline(
             query.text,
             countries=self._resolve_countries(settings),
-            #nz_api_key=self._resolve_nz_api_key(settings),
-            #nz_mode=self._resolve_nz_mode(settings),
+            nz_api_key=self._resolve_nz_api_key(settings),
+            nz_mode=self._resolve_nz_mode(settings),
             us_api_key=self._resolve_us_api_key(settings),
             max_per_term=self._require_positive_int(settings, "max_per_term", default=100),
             max_workers=self._require_positive_int(settings, "max_workers", default=4),
@@ -192,30 +192,30 @@ class NonEUAdapter:
         env_name = self._resolve_us_api_key_env(settings)
         return os.getenv(env_name) or None
 
-    # def _resolve_nz_api_key_env(self, settings: dict[str, Any]) -> str:
-    #     raw_value = settings.get("nz_api_key_env", "NZ_LEGISLATION_API_KEY")
-    #     if not isinstance(raw_value, str) or not raw_value.strip():
-    #         raise AdapterConfigError(
-    #             "non-eu adapter source.settings.nz_api_key_env must be a non-empty string."
-    #         )
-    #     return raw_value.strip()
+    def _resolve_nz_api_key_env(self, settings: dict[str, Any]) -> str:
+        raw_value = settings.get("nz_api_key_env", "NZ_LEGISLATION_API_KEY")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_api_key_env must be a non-empty string."
+            )
+        return raw_value.strip()
 
-    # def _resolve_nz_api_key(self, settings: dict[str, Any]) -> str | None:
-    #     env_name = self._resolve_nz_api_key_env(settings)
-    #     return os.getenv(env_name) or None
+    def _resolve_nz_api_key(self, settings: dict[str, Any]) -> str | None:
+        env_name = self._resolve_nz_api_key_env(settings)
+        return os.getenv(env_name) or None
 
-    # def _resolve_nz_mode(self, settings: dict[str, Any]) -> str:
-    #     raw_value = settings.get("nz_mode", "auto")
-    #     if not isinstance(raw_value, str) or not raw_value.strip():
-    #         raise AdapterConfigError(
-    #             "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
-    #         )
-    #     cleaned = raw_value.strip().lower()
-    #     if cleaned not in {"auto", "api", "scrape"}:
-    #         raise AdapterConfigError(
-    #             "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
-    #         )
-    #     return cleaned
+    def _resolve_nz_mode(self, settings: dict[str, Any]) -> str:
+        raw_value = settings.get("nz_mode", "auto")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
+            )
+        cleaned = raw_value.strip().lower()
+        if cleaned not in {"auto", "api", "scrape"}:
+            raise AdapterConfigError(
+                "non-eu adapter source.settings.nz_mode must be one of: auto, api, scrape."
+            )
+        return cleaned
 
     def _resolve_allow_internal(self, settings: dict[str, Any]) -> bool:
         raw_value = settings.get(ALLOW_INTERNAL_SETTINGS_KEY, False)
@@ -229,17 +229,17 @@ class NonEUAdapter:
         self,
         countries: tuple[str, ...],
         *,
-        #nz_mode: str,
+        nz_mode: str,
         allow_internal: bool,
     ) -> None:
         if countries in SUPPORTED_NON_EU_SINGLE_COUNTRY_WORKFLOWS:
-            # if countries == ("NZ",) and nz_mode != "api" and not allow_internal:
-            #     raise AdapterConfigError(
-            #         "non-eu adapter supports New Zealand only in API mode by default: "
-            #         "use countries = ['NZ'] with source.settings.nz_mode = 'api'. "
-            #         "The 'auto' and 'scrape' modes are provisional/internal. "
-            #         f"Set source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} = true only for explicit internal developer use."
-            #     )
+            if countries == ("NZ",) and nz_mode != "api" and not allow_internal:
+                raise AdapterConfigError(
+                    "non-eu adapter supports New Zealand only in API mode by default: "
+                    "use countries = ['NZ'] with source.settings.nz_mode = 'api'. "
+                    "The 'auto' and 'scrape' modes are provisional/internal. "
+                    f"Set source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} = true only for explicit internal developer use."
+                )
             return
 
         if allow_internal:
@@ -247,7 +247,7 @@ class NonEUAdapter:
 
         raise AdapterConfigError(
             "non-eu adapter supports only these documented workflows by default: "
-            "countries = ['UK'], ['CA'], ['AUS'], ['US'], or ['NZ']" #with nz_mode = 'api'. "
+            "countries = ['UK'], ['CA'], ['AUS'], ['US'], or ['NZ'] with nz_mode = 'api'. "
             "Multi-country configs and provisional/internal workflow modes require "
             f"source.settings.{ALLOW_INTERNAL_SETTINGS_KEY} = true."
         )

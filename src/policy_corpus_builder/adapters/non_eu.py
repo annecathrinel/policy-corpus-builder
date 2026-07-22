@@ -89,7 +89,7 @@ AUS_BASE = "https://www.legislation.gov.au"
 CA_BASE = "https://www.publications.gc.ca"
 CA_LAWS_BASE = "https://laws-lois.justice.gc.ca"
 NZ_HOSTS = ["www.legislation.govt.nz", "legislation.govt.nz"]
-#NZ_API_BASE = "https://api.legislation.govt.nz/v0"
+NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 
 _CA_LAWS_RESULT_RE = re.compile(r"^/(eng|fra)/", re.IGNORECASE)
@@ -2136,26 +2136,26 @@ def enrich_one_record_fulltext(
                     return out
                 last_err = "uk_xml_empty"
                 continue
-            # if mode == "nz_xml":
-            #     response = session.get(
-            #         candidate_url,
-            #         timeout=timeout,
-            #         verify=certifi.where(),
-            #         headers=_headers_for(user_agent),
-            #     )
-            #     if _is_waf_challenge_response(response):
-            #         last_err = "waf_challenge"
-            #         continue
-            #     response.raise_for_status()
-            #     text = uk_xml_to_text(response.text)
-            #     if text:
-            #         out["full_text"] = text
-            #         out["full_text_url"] = candidate_url
-            #         out["full_text_format"] = "nz_xml"
-            #         out["full_text_error"] = ""
-            #         return out
-            #     last_err = "nz_xml_empty"
-            #     continue
+            if mode == "nz_xml":
+                response = session.get(
+                    candidate_url,
+                    timeout=timeout,
+                    verify=certifi.where(),
+                    headers=_headers_for(user_agent),
+                )
+                if _is_waf_challenge_response(response):
+                    last_err = "waf_challenge"
+                    continue
+                response.raise_for_status()
+                text = uk_xml_to_text(response.text)
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "nz_xml"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "nz_xml_empty"
+                continue
             response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
             if _is_waf_challenge_response(response):
                 last_err = "waf_challenge"
@@ -2386,8 +2386,8 @@ def run_non_eu_query_pipeline(
     raw_hits_df, source_log_df = fetch_non_eu_all(
         [query_text],
         sources=countries,
-        #nz_api_key=nz_api_key,
-        #nz_mode=nz_mode,
+        nz_api_key=nz_api_key,
+        nz_mode=nz_mode,
         us_api_key=resolved_us_api_key,
         max_per_term=max_per_term,
         user_agent=user_agent,
