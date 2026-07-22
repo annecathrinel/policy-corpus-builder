@@ -2,8 +2,10 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -12,6 +14,101 @@ from policy_corpus_builder.adapters.eurlex_nim_adapter import EurlexNIMAdapter  
 from policy_corpus_builder.models import Query  # noqa: E402
 from policy_corpus_builder.pipeline import normalize_adapter_results  # noqa: E402
 from policy_corpus_builder.schemas import SourceConfig  # noqa: E402
+
+
+class _FakeSoapResponse:
+    def __init__(self, status_code: int, content: bytes = b""):
+        self.status_code = status_code
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+
+
+class EurlexWsDoQueryRetryTests(unittest.TestCase):
+    def test_eurlex_ws_doquery_retries_transient_server_error_then_succeeds(self) -> None:
+        # Regression test: a real HPC run (2026-05-26) lost a multi-hour job to a
+        # single transient 500 from the EUR-Lex SOAP endpoint because the original
+        # implementation made exactly one POST attempt with no retry.
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+
+        responses_queue = [
+            _FakeSoapResponse(500),
+            _FakeSoapResponse(200, b"<soap:Envelope>ok</soap:Envelope>"),
+        ]
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.trust_env = True
+                self.calls = 0
+
+            def post(self, *args, **kwargs):
+                response = responses_queue[self.calls]
+                self.calls += 1
+                return response
+
+        fake_session = _FakeSession()
+
+        with (
+            patch.object(nim_surface_module, "get_ws_credentials", return_value=("user", "pass")),
+            patch.object(nim_surface_module.requests, "Session", return_value=fake_session),
+            patch.object(nim_surface_module.time, "sleep"),
+        ):
+            content = nim_surface_module.eurlex_ws_doquery(
+                "some query", max_retries=2, backoff_factor=0.01
+            )
+
+        self.assertEqual(content, b"<soap:Envelope>ok</soap:Envelope>")
+        self.assertEqual(fake_session.calls, 2)
+
+    def test_eurlex_ws_doquery_gives_up_after_exhausting_retries(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+
+        class _AlwaysFailingSession:
+            def __init__(self) -> None:
+                self.trust_env = True
+                self.calls = 0
+
+            def post(self, *args, **kwargs):
+                self.calls += 1
+                return _FakeSoapResponse(503)
+
+        fake_session = _AlwaysFailingSession()
+
+        with (
+            patch.object(nim_surface_module, "get_ws_credentials", return_value=("user", "pass")),
+            patch.object(nim_surface_module.requests, "Session", return_value=fake_session),
+            patch.object(nim_surface_module.time, "sleep"),
+        ):
+            with self.assertRaises(requests.exceptions.HTTPError):
+                nim_surface_module.eurlex_ws_doquery("some query", max_retries=2, backoff_factor=0.01)
+
+        self.assertEqual(fake_session.calls, 3)
+
+    def test_eurlex_ws_doquery_does_not_retry_non_retryable_client_errors(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+
+        class _AuthFailureSession:
+            def __init__(self) -> None:
+                self.trust_env = True
+                self.calls = 0
+
+            def post(self, *args, **kwargs):
+                self.calls += 1
+                return _FakeSoapResponse(401)
+
+        fake_session = _AuthFailureSession()
+
+        with (
+            patch.object(nim_surface_module, "get_ws_credentials", return_value=("user", "pass")),
+            patch.object(nim_surface_module.requests, "Session", return_value=fake_session),
+            patch.object(nim_surface_module.time, "sleep"),
+        ):
+            with self.assertRaises(requests.exceptions.HTTPError):
+                nim_surface_module.eurlex_ws_doquery("some query", max_retries=3, backoff_factor=0.01)
+
+        self.assertEqual(fake_session.calls, 1)
 
 
 class EurlexNIMAdapterTests(unittest.TestCase):

@@ -243,7 +243,28 @@ def _soap_envelope(
             </soap:Envelope>'''
 
 
-def eurlex_ws_doquery(expert_query: str, *, page: int = 1, page_size: int = 100, search_language: str = "en", timeout_s: int = 90) -> bytes:
+EURLEX_WS_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+
+def eurlex_ws_doquery(
+    expert_query: str,
+    *,
+    page: int = 1,
+    page_size: int = 100,
+    search_language: str = "en",
+    timeout_s: int = 90,
+    max_retries: int = 4,
+    backoff_factor: float = 2.0,
+) -> bytes:
+    """Call the EUR-Lex NIM SOAP web service, with retry/backoff.
+
+    A production HPC run (2026-05-26) lost a multi-hour job to a single
+    transient ``500 Server Error`` from this endpoint, because the original
+    implementation made one POST attempt with no retry at all. Transient
+    network errors and 429/5xx responses are now retried with exponential
+    backoff before giving up; non-retryable errors (e.g. 4xx auth failures)
+    still raise immediately.
+    """
     user, password = get_ws_credentials()
     if not user or not password:
         raise RuntimeError("Missing EUR-Lex WebService credentials.")
@@ -255,9 +276,25 @@ def eurlex_ws_doquery(expert_query: str, *, page: int = 1, page_size: int = 100,
     }
     session = requests.Session()
     session.trust_env = False
-    response = session.post(EURLEX_WS_ENDPOINT, data=xml_body, headers=headers, timeout=timeout_s)
-    response.raise_for_status()
-    return response.content
+
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = session.post(EURLEX_WS_ENDPOINT, data=xml_body, headers=headers, timeout=timeout_s)
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+        else:
+            if response.status_code not in EURLEX_WS_RETRYABLE_STATUSES:
+                response.raise_for_status()
+                return response.content
+            last_exc = requests.exceptions.HTTPError(
+                f"{response.status_code} Server Error from EUR-Lex WebService (attempt {attempt + 1}/{max_retries + 1})",
+                response=response,
+            )
+        if attempt < max_retries:
+            time.sleep(backoff_factor * (2**attempt))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _lang_uri_to_iso3(uri: str) -> str:
