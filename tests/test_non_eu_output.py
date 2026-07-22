@@ -37,12 +37,25 @@ class NonEUOutputContractTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "New Zealand legislation API key"):
             adapter.validate_source_config(source, base_path=Path("."))
 
-    def test_non_eu_adapter_allows_nz_auto_mode_without_api_key(self) -> None:
+    def test_non_eu_adapter_rejects_nz_auto_mode_without_allow_internal(self) -> None:
+        # Per docs/supported-surface.md, NZ is only a documented/supported workflow in
+        # nz_mode="api"; "auto"/"scrape" are provisional and require an explicit opt-in.
         adapter = NonEUAdapter()
         source = SourceConfig(
             name="nz-legislation",
             adapter="non-eu",
             settings={"countries": ["NZ"], "nz_mode": "auto"},
+        )
+
+        with self.assertRaisesRegex(Exception, "New Zealand only in API mode"):
+            adapter.validate_source_config(source, base_path=Path("."))
+
+    def test_non_eu_adapter_allows_nz_auto_mode_with_allow_internal(self) -> None:
+        adapter = NonEUAdapter()
+        source = SourceConfig(
+            name="nz-legislation",
+            adapter="non-eu",
+            settings={"countries": ["NZ"], "nz_mode": "auto", "allow_internal": True},
         )
 
         adapter.validate_source_config(source, base_path=Path("."))
