@@ -5,36 +5,14 @@ from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
 
-DUCKDUCKGO_HTML = """
+UK_SEARCH_HTML = """
 <html>
   <body>
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.legislation.gov.uk%2Fuksi%2F2023%2F91%2Fcontents%2Fmade&rut=abc">
-      The Environmental Targets (Biodiversity) (England) Regulations 2023
-    </a>
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.legislation.gov.uk%2Fukpga%2F2021%2F30%2Fpart%2F6&rut=def">
-      Environment Act 2021
-    </a>
-    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.legislation.gov.uk%2Fuksi%3Ftitle%3Dbiodiversity&rut=ghi">
-      Search Results
-    </a>
+    <a href="/uksi/2023/91/contents/made">The Environmental Targets (Biodiversity) (England) Regulations 2023</a>
+    <a href="/ukpga/2021/30/part/6">Environment Act 2021</a>
+    <a href="/uksi?title=biodiversity">Search Results (non-document link)</a>
   </body>
 </html>
-"""
-
-UK_ATOM_FEED = """
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>Search results</title>
-  <entry>
-    <title>The Environmental Targets (Biodiversity) (England) Regulations 2023</title>
-    <id>https://www.legislation.gov.uk/uksi/2023/91/contents/made</id>
-    <link rel="alternate" href="https://www.legislation.gov.uk/uksi/2023/91/contents/made" />
-  </entry>
-  <entry>
-    <title>Environment Act 2021</title>
-    <id>https://www.legislation.gov.uk/ukpga/2021/30/part/6</id>
-    <link rel="alternate" href="https://www.legislation.gov.uk/ukpga/2021/30/part/6" />
-  </entry>
-</feed>
 """
 
 UK_XML = """
@@ -69,51 +47,15 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             "Environment Act 2021",
         )
 
-    def test_extract_uk_feed_links_decodes_atom_entries(self) -> None:
-        results = non_eu._extract_uk_feed_links(UK_ATOM_FEED)
-
-        self.assertEqual(
-            results,
-            [
-                (
-                    "https://www.legislation.gov.uk/uksi/2023/91",
-                    "The Environmental Targets (Biodiversity) (England) Regulations 2023",
-                ),
-                (
-                    "https://www.legislation.gov.uk/ukpga/2021/30",
-                    "Environment Act 2021",
-                ),
-            ],
-        )
-
-    def test_extract_uk_duckduckgo_links_decodes_redirect_targets(self) -> None:
-        results = non_eu._extract_uk_duckduckgo_links(DUCKDUCKGO_HTML)
-
-        self.assertEqual(
-            results,
-            [
-                (
-                    "https://www.legislation.gov.uk/uksi/2023/91",
-                    "The Environmental Targets (Biodiversity) (England) Regulations 2023",
-                ),
-                (
-                    "https://www.legislation.gov.uk/ukpga/2021/30",
-                    "Environment Act 2021",
-                ),
-            ],
-        )
-
     def test_uk_contents_url_preserves_contents_view_separately(self) -> None:
         self.assertEqual(
             non_eu.uk_contents_url("https://www.legislation.gov.uk/uksi/2023/91/contents/made"),
             "https://www.legislation.gov.uk/uksi/2023/91/contents",
         )
 
-    def test_fetch_uk_documents_uses_atom_feed_when_available(self) -> None:
-        feed_response = _FakeResponse(200, UK_ATOM_FEED)
-
+    def test_fetch_uk_documents_extracts_and_canonicalizes_search_hits(self) -> None:
         with (
-            patch.object(non_eu, "safe_get", return_value=feed_response),
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, UK_SEARCH_HTML)),
             patch.object(non_eu.time, "sleep"),
         ):
             df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10)
@@ -126,41 +68,17 @@ class NonEUUkRetrievalTests(unittest.TestCase):
                 "https://www.legislation.gov.uk/uksi/2023/91",
             ],
         )
+        self.assertTrue((df["jurisdiction"] == "United Kingdom").all())
+        self.assertTrue((df["source"] == "UK").all())
 
-    def test_fetch_uk_documents_uses_search_fallback_when_feed_is_challenged(self) -> None:
-        challenged_response = _FakeResponse(
-            202,
-            "",
-            headers={"x-amzn-waf-action": "challenge"},
-        )
-
+    def test_fetch_uk_documents_stops_when_max_per_term_reached(self) -> None:
         with (
-            patch.object(non_eu, "safe_get", return_value=challenged_response),
-            patch.object(
-                non_eu,
-                "urlopen",
-                return_value=type(
-                    "_FakeUrlOpenResponse",
-                    (),
-                    {
-                        "read": lambda self: DUCKDUCKGO_HTML.encode("utf-8"),
-                        "__enter__": lambda self: self,
-                        "__exit__": lambda self, exc_type, exc, tb: None,
-                    },
-                )(),
-            ),
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, UK_SEARCH_HTML)),
             patch.object(non_eu.time, "sleep"),
         ):
-            df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10)
+            df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=1)
 
-        self.assertEqual(len(df), 2)
-        self.assertEqual(
-            sorted(df["url"].tolist()),
-            [
-                "https://www.legislation.gov.uk/ukpga/2021/30",
-                "https://www.legislation.gov.uk/uksi/2023/91",
-            ],
-        )
+        self.assertEqual(len(df), 1)
 
     def test_get_url_candidates_for_uk_tries_multiple_content_variants(self) -> None:
         candidates = non_eu.get_url_candidates(

@@ -10,13 +10,13 @@ from policy_corpus_builder.adapters.non_eu_adapter import NonEUAdapter
 from policy_corpus_builder.schemas import SourceConfig
 
 
-CANADA_SEARCH_HTML = """
+CANADA_LAWS_SEARCH_HTML = """
 <html>
   <body>
-    <a href="/collections/collection_2024/environment-act-eng.pdf">Environment Act 2024</a>
-    <a href="/collections/collection_2023/biodiversity-plan-eng.pdf">Biodiversity Plan 2023</a>
-    <a href="/site/eng/search/search.html?ast=biodiversity">Search</a>
-    <a href="/collections/collection_2024/table.csv">CSV table</a>
+    <a href="/eng/acts/O-2.4/section-2.html">Oceans Act</a>
+    <a href="/eng/regulations/SOR-96-118/section-35.html">Fishery (General) Regulations</a>
+    <a href="/fra/lois/O-2.4/section-2.html">Loi sur les oceans</a>
+    <a href="/eng/News/2024.html">News (non-legislation result)</a>
   </body>
 </html>
 """
@@ -58,43 +58,69 @@ class _FakeSession:
 
 
 class NonEUCanadaTests(unittest.TestCase):
-    def test_extract_canada_ckan_rows_prefers_document_resources_from_package_metadata(self) -> None:
-        packages = [
-            {
-                "id": "pkg-1",
-                "name": "pkg-1",
-                "title": "Biodiversity in Canada: Commitments and Trends",
-                "resources": [
-                    {
-                        "id": "res-csv",
-                        "format": "CSV",
-                        "language": ["en"],
-                        "url": "https://open.canada.ca/data/dataset/pkg-1/resource/res-csv/download/data.csv",
-                    },
-                    {
-                        "id": "res-pdf",
-                        "format": "PDF",
-                        "language": ["en"],
-                        "url": "/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
-                    },
-                ],
-            }
-        ]
+    def test_extract_canada_laws_result_links_collapses_sections_to_root_act(self) -> None:
+        results = non_eu._extract_canada_laws_result_links(CANADA_LAWS_SEARCH_HTML)
 
-        rows = non_eu._extract_canada_ckan_rows("biodiversity", packages, max_per_term=10)
+        self.assertIn(
+            (
+                "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/section-2.html",
+                "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/",
+                "Oceans Act",
+            ),
+            results,
+        )
+        self.assertIn(
+            (
+                "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/section-35.html",
+                "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/",
+                "Fishery (General) Regulations",
+            ),
+            results,
+        )
 
-        self.assertEqual(len(rows), 1)
+    def test_fetch_canada_documents_justice_dep_paginates_and_dedupes_by_canonical_url(self) -> None:
+        empty_page_html = "<html><body></body></html>"
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            if "h1dd3nPag3Num=1" in url:
+                return _FakeResponse(200, CANADA_LAWS_SEARCH_HTML)
+            if "h1dd3nPag3Num=2" in url:
+                return _FakeResponse(200, empty_page_html)
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with (
+            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
+            patch.object(non_eu.time, "sleep"),
+        ):
+            df = non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=10)
+
+        self.assertEqual(len(df), 4)
+        self.assertTrue((df["jurisdiction"] == "Canada").all())
+        self.assertTrue((df["source"] == "CA").all())
+        self.assertIn(
+            "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/",
+            df["doc_url"].tolist(),
+        )
+
+    def test_fetch_canada_documents_justice_dep_stops_when_max_per_term_reached(self) -> None:
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_LAWS_SEARCH_HTML)),
+            patch.object(non_eu.time, "sleep"),
+        ):
+            df = non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=1)
+
+        self.assertEqual(len(df), 1)
+
+    def test_clean_canada_laws_doc_id_extracts_act_and_regulation_keys(self) -> None:
         self.assertEqual(
-            rows[0]["url"],
-            "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
+            non_eu.clean_canada_laws_doc_id("https://laws-lois.justice.gc.ca/eng/acts/O-2.4/"),
+            "acts_o_2_4",
         )
         self.assertEqual(
-            rows[0]["doc_url"],
-            "https://open.canada.ca/data/en/dataset/pkg-1",
-        )
-        self.assertEqual(
-            rows[0]["title"],
-            "Biodiversity in Canada: Commitments and Trends",
+            non_eu.clean_canada_laws_doc_id(
+                "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/"
+            ),
+            "regulations_sor_96_118",
         )
 
     def test_clean_canada_title_removes_trailing_catalogue_identifier(self) -> None:
@@ -129,169 +155,65 @@ class NonEUCanadaTests(unittest.TestCase):
         self.assertNotIn("Passer au contenu principal", cleaned)
         self.assertNotIn("Government of Canada Publications - Canada.ca", cleaned)
 
-    def test_fetch_canada_documents_extracts_publications_hits(self) -> None:
-        with (
-            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_SEARCH_HTML)),
-            patch.object(non_eu.time, "sleep"),
-        ):
-            df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=10)
-
-        self.assertEqual(len(df), 2)
-        self.assertEqual(
-            sorted(df["url"].tolist()),
-            [
-                "https://www.publications.gc.ca/collections/collection_2023/biodiversity-plan-eng.pdf",
-                "https://www.publications.gc.ca/collections/collection_2024/environment-act-eng.pdf",
-            ],
-        )
-        self.assertTrue((df["jurisdiction"] == "Canada").all())
-        self.assertTrue((df["source"] == "CA").all())
-
-    def test_fetch_canada_documents_uses_ckan_api_first(self) -> None:
-        ckan_payload = {
-            "success": True,
-            "result": {
-                "results": [
-                    {
-                        "id": "pkg-1",
-                        "name": "pkg-1",
-                        "title": "Biodiversity in Canada: Commitments and Trends",
-                        "resources": [
-                            {
-                                "id": "res-pdf",
-                                "format": "PDF",
-                                "language": "eng",
-                                "url": "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
-                            }
-                        ],
-                    }
-                ]
-            },
-        }
-
-        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
-            if url == non_eu.CANADA_CKAN_PACKAGE_SEARCH:
-                return _FakeResponse(200, json.dumps(ckan_payload))
-            raise AssertionError(f"unexpected fallback URL: {url}")
-
-        with patch.object(non_eu, "safe_get", side_effect=fake_safe_get):
-            df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=1)
-
-        self.assertEqual(len(df), 1)
-        self.assertEqual(
-            df["url"].iloc[0],
-            "https://open.canada.ca/data/dataset/pkg-1/resource/res-pdf/download/report.pdf",
-        )
-        self.assertEqual(
-            df["doc_url"].iloc[0],
-            "https://open.canada.ca/data/en/dataset/pkg-1",
-        )
-
-    def test_fetch_canada_documents_falls_back_to_publications_search_when_ckan_yields_no_documents(self) -> None:
-        ckan_payload = {"success": True, "result": {"results": []}}
-
-        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
-            if url == non_eu.CANADA_CKAN_PACKAGE_SEARCH:
-                return _FakeResponse(200, json.dumps(ckan_payload))
-            if "search/search.html" in url:
-                return _FakeResponse(200, CANADA_SEARCH_HTML)
-            raise AssertionError(f"unexpected URL: {url}")
-
-        with (
-            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
-            patch.object(non_eu.time, "sleep"),
-        ):
-            df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=2)
-
-        self.assertEqual(len(df), 2)
-        self.assertTrue(df["url"].iloc[0].startswith("https://www.publications.gc.ca/"))
-
     def test_should_skip_canada_url_flags_data_files(self) -> None:
         self.assertTrue(non_eu.should_skip_canada_url("https://www.publications.gc.ca/tbl/csv/example.csv"))
         self.assertTrue(non_eu.should_skip_canada_url("https://www.publications.gc.ca/download/example.zip"))
         self.assertFalse(non_eu.should_skip_canada_url("https://www.publications.gc.ca/collections/example-eng.pdf"))
 
-    def test_extract_canada_asset_links_prefers_real_assets(self) -> None:
-        landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
-        html = """
-        <html><body>
-          <a href="/site/eng/9.123456/publication.html">Landing page</a>
-          <a href="/collections/collection_2024/example-report-eng.pdf">PDF</a>
-          <a href="https://www.canada.ca/en/environment/example-report.html">HTML</a>
-          <a href="https://example.com/offsite.pdf">Offsite</a>
-        </body></html>
-        """
+    def test_get_url_candidates_for_canada_laws_url_tries_fulltext_then_root(self) -> None:
+        candidates = non_eu.get_url_candidates(
+            {"url": "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/section-2.html"},
+            "CA",
+            None,
+        )
 
         self.assertEqual(
-            non_eu._extract_canada_asset_links(landing_url, html),
+            candidates,
             [
-                ("https://www.publications.gc.ca/collections/collection_2024/example-report-eng.pdf", "pdf"),
-                ("https://www.canada.ca/en/environment/example-report.html", "html"),
+                ("https://laws-lois.justice.gc.ca/eng/acts/O-2.4/FullText.html", "ca_laws_html"),
+                ("https://laws-lois.justice.gc.ca/eng/acts/O-2.4/", "ca_laws_root"),
             ],
         )
 
-    def test_enrich_canada_publication_prefers_pdf_asset_over_landing_page_text(self) -> None:
-        landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
-        pdf_url = "https://www.publications.gc.ca/collections/collection_2024/example-report-eng.pdf"
+    def test_enrich_canada_laws_record_uses_fulltext_html_page(self) -> None:
+        fulltext_url = "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/FullText.html"
         session = _FakeSession(
             {
-                landing_url: _FakeResponse(
+                fulltext_url: _FakeResponse(
                     200,
-                    """
-                    <html><body>
-                      <a href="/collections/collection_2024/example-report-eng.pdf">Download PDF</a>
-                      Landing page shell text only.
-                    </body></html>
-                    """,
+                    "<html><body>Oceans Act full text content about conservation.</body></html>",
                 ),
-                pdf_url: _FakeResponse(200, content=b"%PDF-1.4 fake pdf bytes"),
             }
         )
 
         with (
             patch.object(non_eu, "_get_thread_session", return_value=session),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
-            patch.object(non_eu, "_extract_pdf_text", return_value="Real publication content from PDF."),
         ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
                     "source": "CA",
                     "jurisdiction": "Canada",
-                    "url": landing_url,
+                    "url": "https://laws-lois.justice.gc.ca/eng/acts/O-2.4/section-2.html",
                 },
                 us_api_key=None,
                 obey_robots=True,
             )
 
-        self.assertEqual(enriched["full_text"], "Real publication content from PDF.")
-        self.assertEqual(enriched["full_text_url"], pdf_url)
-        self.assertEqual(enriched["full_text_format"], "pdf")
+        self.assertIn("Oceans Act full text content", enriched["full_text"])
+        self.assertEqual(enriched["full_text_url"], fulltext_url)
+        self.assertEqual(enriched["full_text_format"], "html")
         self.assertEqual(enriched["full_text_error"], "")
 
-    def test_enrich_canada_publication_uses_html_asset_when_pdf_candidate_is_unavailable(self) -> None:
-        landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
-        pdf_url = "https://www.publications.gc.ca/collections/collection_2024/example-report-eng.pdf"
-        html_asset_url = "https://www.canada.ca/en/environment/example-report.html"
+    def test_enrich_canada_laws_record_falls_back_to_root_page_when_fulltext_is_missing(self) -> None:
+        fulltext_url = "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/FullText.html"
+        root_url = "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/"
         session = _FakeSession(
             {
-                landing_url: _FakeResponse(
+                fulltext_url: _FakeResponse(404, ""),
+                root_url: _FakeResponse(
                     200,
-                    """
-                    <html><body>
-                      <a href="/collections/collection_2024/example-report-eng.pdf">Download PDF</a>
-                      <a href="https://www.canada.ca/en/environment/example-report.html">HTML</a>
-                    </body></html>
-                    """,
-                ),
-                pdf_url: _FakeResponse(
-                    200,
-                    "<!DOCTYPE html><html><body>Archive wrapper</body></html>",
-                    headers={"content-type": "text/html; charset=utf-8"},
-                ),
-                html_asset_url: _FakeResponse(
-                    200,
-                    "<html><body>Real publication content from HTML asset.</body></html>",
-                    headers={"content-type": "text/html; charset=utf-8"},
+                    "<html><body>Fishery (General) Regulations root page text.</body></html>",
                 ),
             }
         )
@@ -304,14 +226,14 @@ class NonEUCanadaTests(unittest.TestCase):
                 {
                     "source": "CA",
                     "jurisdiction": "Canada",
-                    "url": landing_url,
+                    "url": "https://laws-lois.justice.gc.ca/eng/regulations/SOR-96-118/section-35.html",
                 },
                 us_api_key=None,
                 obey_robots=True,
             )
 
-        self.assertEqual(enriched["full_text"], "Real publication content from HTML asset.")
-        self.assertEqual(enriched["full_text_url"], html_asset_url)
+        self.assertIn("Fishery (General) Regulations root page text.", enriched["full_text"])
+        self.assertEqual(enriched["full_text_url"], root_url)
         self.assertEqual(enriched["full_text_format"], "html")
         self.assertEqual(enriched["full_text_error"], "")
 
