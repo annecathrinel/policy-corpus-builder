@@ -78,8 +78,10 @@ class BuildCorpusCliTests(unittest.TestCase):
             nim_max_rows=25,
         )
         self.assertIn("Corpus build completed successfully.", stdout.getvalue())
-        self.assertIn("Final corpus: outputs\\demo\\final\\documents.jsonl", stdout.getvalue())
-        self.assertIn("NIM corpus: outputs\\demo\\nim\\documents.jsonl", stdout.getvalue())
+        # Use str(Path(...)) rather than a hardcoded separator so this assertion
+        # passes on both Windows (dev machine) and POSIX (Linux HPC/CI).
+        self.assertIn(f"Final corpus: {fake_result.final_corpus_path}", stdout.getvalue())
+        self.assertIn(f"NIM corpus: {fake_result.nim_corpus_path}", stdout.getvalue())
 
     def test_build_corpus_cli_preserves_default_nim_fulltext(self) -> None:
         stdout = StringIO()
