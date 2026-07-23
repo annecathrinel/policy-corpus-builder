@@ -10,7 +10,26 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Anne Cathrine Linder" }
+  { name = "Anne Cathrine Linder", email = "c.linder04@gmail.com" }
+]
+keywords = [
+  "policy analysis",
+  "legal informatics",
+  "text corpus",
+  "EUR-Lex",
+  "research software",
+  "corpus building",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Text Processing :: Linguistic",
 ]
 dependencies = [
   "beautifulsoup4",
@@ -20,6 +39,18 @@ dependencies = [
   "pypdf",
   "requests",
 ]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/annecathrinel/policy-corpus-builder"
+Repository = "https://github.com/annecathrinel/policy-corpus-builder"
+Issues = "https://github.com/annecathrinel/policy-corpus-builder/issues"
+Documentation = "https://github.com/annecathrinel/policy-corpus-builder#readme"
 
 [project.scripts]
 policy-corpus-builder = "policy_corpus_builder.cli:main"

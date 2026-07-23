@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "policy-corpus-builder"
+abstract: >-
+  Reusable tooling for policy document retrieval, normalization, and corpus
+  export. Provides a config-driven CLI and Python API with an adapter system
+  covering EUR-Lex, EUR-Lex NIM (national implementing measures), non-EU
+  jurisdictions (UK, Canada, Australia, US, New Zealand), and local-file
+  sources, for building reproducible policy-document corpora for research.
+authors:
+  - family-names: Linder
+    given-names: "Anne Cathrine"
+    affiliation: "Technical University of Denmark (DTU)"
+license: MIT
+repository-code: "https://github.com/annecathrinel/policy-corpus-builder"
+url: "https://github.com/annecathrinel/policy-corpus-builder"
+version: 0.1.0
+date-released: "2026-07-23"
+keywords:
+  - policy analysis
+  - legal informatics
+  - text corpus
+  - EUR-Lex
+  - research software
+  - nature-inclusive design
+  - offshore renewable energy
