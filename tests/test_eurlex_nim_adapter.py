@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -109,6 +110,86 @@ class EurlexWsDoQueryRetryTests(unittest.TestCase):
                 nim_surface_module.eurlex_ws_doquery("some query", max_retries=3, backoff_factor=0.01)
 
         self.assertEqual(fake_session.calls, 1)
+
+
+class _FakeNimTextResponse:
+    def __init__(self, status_code: int, text: str = "", url: str = "https://example.test/doc"):
+        self.status_code = status_code
+        self.text = text
+        self.content = text.encode("utf-8")
+        self.url = url
+        self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+
+class FetchTextFromCandidateRetryTests(unittest.TestCase):
+    # Regression tests for a real smoke test finding: EUR-Lex's legacy
+    # LexUriServ route returned HTTP 202 ("accepted, still generating") for
+    # 23/25 NIM documents, and the code treated 202 as an immediate terminal
+    # failure instead of retrying it like every other non-2xx status.
+
+    def test_fetch_text_from_candidate_retries_202_then_succeeds(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+
+        responses_queue = [
+            _FakeNimTextResponse(202),
+            _FakeNimTextResponse(202),
+            _FakeNimTextResponse(200, text="<html><body>Real NIM document text.</body></html>"),
+        ]
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                response = responses_queue[self.calls]
+                self.calls += 1
+                return response
+
+        fake_session = _FakeSession()
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(nim_surface_module.time, "sleep"):
+            result = nim_surface_module._fetch_text_from_candidate(
+                {"url": "https://eur-lex.europa.eu/LexUriServ/LexUriServ.do?uri=CELEX:1", "link_type": "lexuriserv"},
+                session=fake_session,
+                timeout=(15, 90),
+                retries=3,
+                min_interval_s=0,
+                file_cache_dir=Path(tmpdir),
+                verbose=False,
+            )
+
+        self.assertEqual(fake_session.calls, 3)
+        self.assertIn("Real NIM document text.", result["text"])
+        self.assertEqual(result["error"], "")
+
+    def test_fetch_text_from_candidate_reports_last_error_after_exhausting_202_retries(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
+
+        class _AlwaysPendingSession:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return _FakeNimTextResponse(202)
+
+        fake_session = _AlwaysPendingSession()
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(nim_surface_module.time, "sleep"):
+            result = nim_surface_module._fetch_text_from_candidate(
+                {"url": "https://eur-lex.europa.eu/LexUriServ/LexUriServ.do?uri=CELEX:1", "link_type": "lexuriserv"},
+                session=fake_session,
+                timeout=(15, 90),
+                retries=2,
+                min_interval_s=0,
+                file_cache_dir=Path(tmpdir),
+                verbose=False,
+            )
+
+        # retries=2 means 3 total attempts (range(retries + 1)).
+        self.assertEqual(fake_session.calls, 3)
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["error"], "HTTP 202")
 
 
 class EurlexNIMAdapterTests(unittest.TestCase):

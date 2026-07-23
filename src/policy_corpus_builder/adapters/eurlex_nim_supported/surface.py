@@ -1103,13 +1103,16 @@ def _fetch_text_from_candidate(
                 time.sleep(min_interval_s)
             response = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, allow_redirects=True)
             status = int(response.status_code)
-            if status in (429, 500, 502, 503, 504):
+            if status in (202, 429, 500, 502, 503, 504):
+                # 202 from EUR-Lex's legacy LexUriServ means "accepted, document
+                # still being generated" rather than a hard failure - a real
+                # smoke test showed a 92% terminal-failure rate here before this
+                # fix, almost all of it 202s that a short retry likely clears.
+                last_error = f"HTTP {status}"
                 if verbose:
                     print(f"[NIM TEXT] retry {attempt + 1} route={route_name} after HTTP {status}", flush=True)
                 time.sleep(1.7 ** attempt)
                 continue
-            if status == 202:
-                return {"status": status, "error": "HTTP 202", "url": str(response.url), "route": route_name, "text": "", "content_type": response.headers.get("Content-Type", ""), "source_format": _infer_source_format(str(response.url), response.headers.get('Content-Type',''))}
             if status != 200:
                 return {"status": status, "error": f"HTTP {status}", "url": str(response.url), "route": route_name, "text": "", "content_type": response.headers.get("Content-Type", ""), "source_format": _infer_source_format(str(response.url), response.headers.get('Content-Type',''))}
 
