@@ -46,3 +46,5 @@ docs_df_cleaned/
 !data/README.md
 !datasets/README.md
 
+/examples/outputs.stale.10151
+/examples/outputs.stale.28058
