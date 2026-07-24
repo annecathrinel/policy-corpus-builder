@@ -236,6 +236,64 @@ class EurlexNIMAdapterTests(unittest.TestCase):
         self.assertIn("celex", result.columns)
         self.assertEqual(result.iloc[0]["celex"], "32014L0089")
 
+    def test_retrieve_nim_rows_skips_act_whose_lookup_raises_and_continues(self) -> None:
+        # Regression test: a real production run (2026-07) lost its entire NIM
+        # stage - including 5865 already-cached full-text results - because one
+        # EU act's SOAP lookup exhausted all retries on a persistent (non-
+        # transient) 500 and the exception propagated out of _retrieve_nim_rows,
+        # crashing the whole multi-hour job. A single bad seed must be skipped,
+        # not fatal.
+        import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
+
+        original_fetch = nim_workflow_module.get_national_transpositions_by_celex_ws
+
+        def fake_fetch(celex, *args, **kwargs):
+            if celex == "32014L0089":
+                raise requests.exceptions.HTTPError("500 error")
+            return pd.DataFrame(
+                [
+                    {
+                        "act_celex": celex,
+                        "nim_celex": "72016L2284DNK_270999",
+                        "national_measure_id": "270999",
+                        "nim_date": "2018-06-01",
+                        "nim_title": "Bekendtgorelse om luftkvalitet",
+                        "member_state_iso3": "DNK",
+                        "member_state_name": "Denmark",
+                        "eurlex_url": "https://eur-lex.europa.eu/legal-content/DA/TXT/?uri=CELEX:72016L2284DNK_270999",
+                    }
+                ]
+            )
+
+        nim_workflow_module.get_national_transpositions_by_celex_ws = fake_fetch
+        try:
+            result = nim_workflow_module._retrieve_nim_rows(
+                pd.DataFrame(
+                    [
+                        {
+                            "celex": "32014L0089",
+                            "eu_act_title": "Bad Directive",
+                            "eu_act_type": "Directive",
+                            "year": 2014,
+                        },
+                        {
+                            "celex": "32016L2284",
+                            "eu_act_title": "Good Directive",
+                            "eu_act_type": "Directive",
+                            "year": 2016,
+                        },
+                    ]
+                ),
+                {},
+            )
+        finally:
+            nim_workflow_module.get_national_transpositions_by_celex_ws = original_fetch
+
+        # The failing act must not appear, but the exception must not have
+        # stopped processing of the remaining act either.
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["celex"], "32016L2284")
+
     def test_validate_source_config_requires_credentials(self) -> None:
         adapter = EurlexNIMAdapter()
         source = SourceConfig(name="eurlex-nim-source", adapter="eurlex-nim")

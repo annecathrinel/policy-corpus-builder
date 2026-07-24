@@ -246,17 +246,32 @@ def _resolve_seed_acts(query_text: str, settings: dict[str, Any]) -> pd.DataFram
 
 def _retrieve_nim_rows(acts_df: pd.DataFrame, settings: dict[str, Any]) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
+    progress = _require_bool(settings, "progress", default=False)
     for row in acts_df.to_dict(orient="records"):
         celex = normalize_legal_act_celex(row.get("celex"))
         if not celex:
             continue
-        page_df = get_national_transpositions_by_celex_ws(
-            celex,
-            page_size=_require_positive_int(settings, "nim_page_size", default=100),
-            max_pages=resolve_optional_positive_int(settings, "nim_max_pages"),
-            search_language=_resolve_search_language(settings),
-            sleep_s=_require_non_negative_number(settings, "nim_sleep_s", default=0.2),
-        )
+        try:
+            page_df = get_national_transpositions_by_celex_ws(
+                celex,
+                page_size=_require_positive_int(settings, "nim_page_size", default=100),
+                max_pages=resolve_optional_positive_int(settings, "nim_max_pages"),
+                search_language=_resolve_search_language(settings),
+                sleep_s=_require_non_negative_number(settings, "nim_sleep_s", default=0.2),
+            )
+        except Exception as exc:
+            # A single EU act whose NIM lookup hits a persistent (not just
+            # transient) upstream failure should not take down the whole
+            # multi-hour run - a real production run lost its entire NIM
+            # stage, including thousands of already-cached full-text
+            # results, to exactly this: one act's SOAP call exhausted all
+            # retries on a non-transient 500 and the exception propagated
+            # all the way out of build_policy_corpus.
+            _emit_nim_progress(
+                True,
+                f"NIM seed {celex}: skipping after retrieval error ({type(exc).__name__}: {exc}).",
+            )
+            continue
         if page_df.empty:
             continue
         page_df = _normalize_nim_merge_frame(page_df)

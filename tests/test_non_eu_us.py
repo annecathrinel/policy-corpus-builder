@@ -52,6 +52,44 @@ class USNonEUWorkflowTests(unittest.TestCase):
         self.assertEqual(df.iloc[0]["title"], "Biodiversity review notice")
         self.assertEqual(df.iloc[0]["source"], "US")
 
+    def test_fetch_us_documents_falls_back_to_id_based_url_when_links_self_missing(self) -> None:
+        # Regression test: a real production run found regulations.gov's search
+        # response omitting "links.self" for every single result (0/2023 full
+        # text retrieved), even though "id" was always populated. Without a
+        # fallback, every one of those records fails full-text enrichment with
+        # "no_url_candidate".
+        class _FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {
+                    "data": [
+                        {
+                            "id": "EPA-HQ-OAR-2022-0606-0019",
+                            "attributes": {"title": "Technical Support Document"},
+                            "links": {},
+                        }
+                    ]
+                }
+
+        def _fake_safe_get(url: str, **kwargs):
+            return _FakeResponse()
+
+        with patch.object(non_eu, "safe_get", side_effect=_fake_safe_get):
+            df = non_eu.fetch_us_documents(
+                ["biodiversity"],
+                api_key="test-key",
+                max_per_term=1,
+                sleep_s=0,
+            )
+
+        self.assertEqual(len(df), 1)
+        expected_url = f"{non_eu.US_BASE}/documents/EPA-HQ-OAR-2022-0606-0019"
+        self.assertEqual(df.iloc[0]["api_self"], expected_url)
+        self.assertEqual(df.iloc[0]["url"], expected_url)
+        self.assertEqual(df.iloc[0]["doc_url"], expected_url)
+
     def test_us_json_to_text_builds_usable_text(self) -> None:
         text = non_eu.us_json_to_text(
             {

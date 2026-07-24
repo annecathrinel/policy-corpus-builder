@@ -1370,14 +1370,24 @@ def fetch_us_documents(
                 if kept >= max_per_term:
                     break
                 attrs = item.get("attributes", {}) or {}
+                doc_id = item.get("id", "") or ""
                 api_self = ((item.get("links") or {}).get("self", "") or "").strip()
+                if not api_self and doc_id:
+                    # A production run found regulations.gov's search response
+                    # omitting links.self for every single result (0/2023 full
+                    # text retrieved), even though the same response's "id"
+                    # field was always populated. The v4 documents-detail
+                    # endpoint URL is deterministic from that id, so fall back
+                    # to constructing it directly rather than depending
+                    # entirely on an upstream-controlled links field.
+                    api_self = f"{US_BASE}/documents/{doc_id}"
                 rows.append(
                     {
                         "jurisdiction": "United States",
                         "source": "US",
                         "matched_term": term,
                         "term": term,
-                        "api_id": item.get("id", "") or "",
+                        "api_id": doc_id,
                         "api_self": api_self,
                         "doc_url": api_self,
                         "url": api_self,
