@@ -17,7 +17,7 @@ outputs/
 .cache/
 emb_cache/
 docs_df_cleaned/
-
+examples/outputs/
 # OS/editor noise
 .DS_Store
 Thumbs.db
