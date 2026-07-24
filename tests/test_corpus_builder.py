@@ -806,6 +806,92 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     outputs_path=Path(tmpdir) / "corpus-output",
                 )
 
+    def test_invalid_max_jurisdiction_workers_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(
+                CorpusBuildValidationError, "max_jurisdiction_workers"
+            ):
+                build_policy_corpus(
+                    query_terms=["energy security"],
+                    jurisdictions=["EU"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                    max_jurisdiction_workers=0,
+                )
+
+    def test_max_jurisdiction_workers_defaults_to_one_worker_per_jurisdiction(self):
+        # Regression test: jurisdictions each hit a fully separate external
+        # API and share no mutable state, so they are collected concurrently
+        # instead of one at a time. By default there should be no artificial
+        # throttling below the number of jurisdictions requested.
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(tracker),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["EU", "UK"],
+                    outputs_path=output_root,
+                )
+
+        self.assertEqual(result.max_jurisdiction_workers, 2)
+        self.assertEqual(result.to_dict()["max_jurisdiction_workers"], 2)
+
+    def test_build_policy_corpus_lets_other_jurisdictions_finish_when_one_fails(self):
+        # Regression test: a real production run lost an entire multi-hour
+        # job to one upstream failure. Jurisdictions are now collected
+        # concurrently, and a single jurisdiction's adapter raising should
+        # not prevent the other, already in-flight jurisdictions from
+        # finishing and writing their intermediate corpora - only the
+        # overall build should still fail, surfacing the original error.
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        class _PartialFailureNonEUAdapter(_FakeAdapter):
+            name = "non-eu"
+
+            def __init__(self, tracker):
+                self._tracker = tracker
+
+            def collect(self, source, query, *, base_path, loaded_source=None):
+                country = source.settings["countries"][0]
+                if country == "CA":
+                    raise RuntimeError("simulated persistent CA failure")
+                return _FakeNonEUAdapter(self._tracker).collect(
+                    source, query, base_path=base_path, loaded_source=loaded_source
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_PartialFailureNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                with self.assertRaisesRegex(RuntimeError, "simulated persistent CA failure"):
+                    build_policy_corpus(
+                        query_terms=["offshore wind"],
+                        jurisdictions=["UK", "CA", "AUS"],
+                        outputs_path=output_root,
+                    )
+
+            # The other two jurisdictions were still running concurrently
+            # when CA failed - they must have been allowed to finish and
+            # write their intermediate output rather than being abandoned.
+            uk_intermediate = output_root / "jurisdictions" / "uk" / JSONL_FILENAME
+            aus_intermediate = output_root / "jurisdictions" / "aus" / JSONL_FILENAME
+            self.assertTrue(uk_intermediate.exists())
+            self.assertTrue(aus_intermediate.exists())
+            self.assertIn(("UK", "offshore wind"), tracker["non_eu_queries"])
+            self.assertIn(("AUS", "offshore wind"), tracker["non_eu_queries"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -93,6 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Limit the number of NIM rows processed per eligible EU legal-act seed.",
     )
+    build_corpus_parser.add_argument(
+        "--max-jurisdiction-workers",
+        type=int,
+        help=(
+            "Maximum number of jurisdictions to collect concurrently. Each "
+            "jurisdiction hits a fully separate external API, so this "
+            "defaults to one worker per requested jurisdiction. Lower this "
+            "if you want to throttle how many external services are hit at "
+            "once."
+        ),
+    )
 
     return parser
 
@@ -151,6 +162,7 @@ def main() -> int:
                 include_nim=args.include_nim,
                 include_nim_fulltext=args.include_nim_fulltext,
                 nim_max_rows=args.nim_max_rows,
+                max_jurisdiction_workers=args.max_jurisdiction_workers,
             )
         except (
             AdapterError,

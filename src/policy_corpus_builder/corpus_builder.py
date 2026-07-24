@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -103,6 +104,7 @@ class PolicyCorpusBuildResult:
     include_nim: bool
     include_nim_fulltext: bool
     nim_max_rows: int | None
+    max_jurisdiction_workers: int
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
     final_corpus_path: Path
@@ -131,6 +133,7 @@ class PolicyCorpusBuildResult:
             "include_nim": self.include_nim,
             "include_nim_fulltext": self.include_nim_fulltext,
             "nim_max_rows": self.nim_max_rows,
+            "max_jurisdiction_workers": self.max_jurisdiction_workers,
             "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
             "per_jurisdiction_output_paths": {
                 jurisdiction: str(path)
@@ -177,8 +180,17 @@ def build_policy_corpus(
     include_nim: bool = False,
     include_nim_fulltext: bool = True,
     nim_max_rows: int | None = None,
+    max_jurisdiction_workers: int | None = None,
 ) -> PolicyCorpusBuildResult:
-    """Build one normalized policy corpus across supported jurisdictions."""
+    """Build one normalized policy corpus across supported jurisdictions.
+
+    Jurisdictions are collected concurrently (one worker thread per
+    jurisdiction, by default) since each targets a fully independent
+    external API (EUR-Lex, legislation.gov.uk, CanLII, AustLII,
+    regulations.gov, ...) with its own rate limiting and no shared mutable
+    state. NIM still runs after the jurisdiction loop, since it depends on
+    the EU jurisdiction's results.
+    """
 
     _emit_progress("Starting build_policy_corpus: validating inputs.")
     if not isinstance(include_nim_fulltext, bool):
@@ -191,6 +203,9 @@ def build_policy_corpus(
         required=False,
     )
     cleaned_nim_max_rows = _clean_optional_positive_int(nim_max_rows, field_name="nim_max_rows")
+    cleaned_max_jurisdiction_workers = _clean_optional_positive_int(
+        max_jurisdiction_workers, field_name="max_jurisdiction_workers"
+    )
 
     output_root = Path(outputs_path).expanduser().resolve()
     cache_root = output_root / CACHE_SUBDIR
@@ -208,11 +223,19 @@ def build_policy_corpus(
     intermediate_paths: dict[str, Path] = {}
     jurisdiction_results: list[JurisdictionBuildResult] = []
 
+    resolved_max_workers = _resolve_jurisdiction_worker_count(
+        cleaned_max_jurisdiction_workers,
+        jurisdiction_count=len(cleaned_jurisdictions),
+    )
     _emit_progress(
-        "Running jurisdictions: " + ", ".join(cleaned_jurisdictions) + "."
+        "Running jurisdictions concurrently: "
+        + ", ".join(cleaned_jurisdictions)
+        + f" (max_workers={resolved_max_workers})."
     )
 
-    for jurisdiction in cleaned_jurisdictions:
+    def _collect_and_export_jurisdiction(
+        jurisdiction: str,
+    ) -> tuple[str, tuple[NormalizedDocument, ...], Path, int]:
         _emit_progress(f"Starting jurisdiction {jurisdiction}.")
         jurisdiction_result = _run_jurisdiction(
             jurisdiction,
@@ -226,29 +249,63 @@ def build_policy_corpus(
             jurisdiction_result.documents,
             expected_jurisdiction_code=jurisdiction,
         )
-        jurisdiction_documents[jurisdiction] = documents
         _emit_progress(
             f"Running jurisdiction {jurisdiction}. Total hits: {jurisdiction_result.raw_result_count}."
         )
-
         jurisdiction_output_dir = intermediate_root / jurisdiction.lower()
         path = export_documents_jsonl(documents, output_dir=jurisdiction_output_dir)
+        _emit_progress(
+            "Finished jurisdiction "
+            f"{jurisdiction}. Unique full-text documents retrieved: "
+            f"{sum(1 for document in documents if document.full_text)}. "
+            f"Normalized documents: {len(documents)}."
+        )
+        return jurisdiction, documents, path, jurisdiction_result.raw_result_count
+
+    # Jurisdictions hit fully independent external APIs and share no mutable
+    # state (each adapter call gets a fresh adapter instance and, where
+    # relevant, its own cache directory), so they are safe to run
+    # concurrently. This is where most of a multi-jurisdiction run's
+    # wall-clock time goes, since each jurisdiction's own query-term loop is
+    # still sequential. All jurisdictions are launched up front; if any of
+    # them raises, the others are still allowed to finish (so a single bad
+    # jurisdiction doesn't waste work already in flight for the others), and
+    # the first exception encountered is re-raised once every jurisdiction
+    # has completed - matching the previous fail-on-first-error contract
+    # without discarding concurrent progress.
+    per_jurisdiction_output: dict[str, tuple[tuple[NormalizedDocument, ...], Path, int]] = {}
+    first_exception: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=resolved_max_workers) as executor:
+        futures = {
+            executor.submit(_collect_and_export_jurisdiction, jurisdiction): jurisdiction
+            for jurisdiction in cleaned_jurisdictions
+        }
+        for future in as_completed(futures):
+            jurisdiction = futures[future]
+            try:
+                _, documents, path, raw_result_count = future.result()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                if first_exception is None:
+                    first_exception = exc
+                continue
+            per_jurisdiction_output[jurisdiction] = (documents, path, raw_result_count)
+
+    if first_exception is not None:
+        raise first_exception
+
+    for jurisdiction in cleaned_jurisdictions:
+        documents, path, raw_result_count = per_jurisdiction_output[jurisdiction]
+        jurisdiction_documents[jurisdiction] = documents
         intermediate_paths[jurisdiction] = path
         jurisdiction_results.append(
             JurisdictionBuildResult(
                 jurisdiction_code=jurisdiction,
                 jurisdiction_label=JURISDICTION_LABELS[jurisdiction],
                 intermediate_corpus_path=path,
-                raw_hit_count=jurisdiction_result.raw_result_count,
+                raw_hit_count=raw_result_count,
                 document_count=len(documents),
                 full_text_document_count=sum(1 for document in documents if document.full_text),
             )
-        )
-        _emit_progress(
-            "Finished jurisdiction "
-            f"{jurisdiction}. Unique full-text documents retrieved: "
-            f"{sum(1 for document in documents if document.full_text)}. "
-            f"Normalized documents: {len(documents)}."
         )
 
     merged_documents: tuple[NormalizedDocument, ...] = tuple(
@@ -343,6 +400,7 @@ def build_policy_corpus(
         include_nim=include_nim,
         include_nim_fulltext=include_nim_fulltext,
         nim_max_rows=cleaned_nim_max_rows,
+        max_jurisdiction_workers=resolved_max_workers,
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
         final_corpus_path=final_corpus_path,
@@ -374,6 +432,7 @@ def build_policy_corpus(
         include_nim=result.include_nim,
         include_nim_fulltext=result.include_nim_fulltext,
         nim_max_rows=result.nim_max_rows,
+        max_jurisdiction_workers=result.max_jurisdiction_workers,
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
         final_corpus_path=result.final_corpus_path,
@@ -591,6 +650,21 @@ def _clean_optional_positive_int(value: int | None, *, field_name: str) -> int |
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise CorpusBuildValidationError(f"{field_name} must be a positive integer when set.")
     return value
+
+
+def _resolve_jurisdiction_worker_count(
+    max_jurisdiction_workers: int | None,
+    *,
+    jurisdiction_count: int,
+) -> int:
+    if jurisdiction_count <= 0:
+        return 1
+    if max_jurisdiction_workers is None:
+        # One worker per jurisdiction by default: each jurisdiction targets a
+        # fully separate external API, so there is no benefit to throttling
+        # below the number of jurisdictions actually requested.
+        return jurisdiction_count
+    return min(max_jurisdiction_workers, jurisdiction_count)
 
 
 def _emit_progress(message: str) -> None:
