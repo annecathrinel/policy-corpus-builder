@@ -64,7 +64,7 @@ class ConfigValidationTests(unittest.TestCase):
 
         self.assertEqual(config.project.name, "non-eu-new-zealand-example")
         self.assertEqual(config.sources[0].adapter, "non-eu")
-        self.assertEqual(config.sources[0].settings["nz_mode"], "api")
+        self.assertEqual(config.sources[0].settings["countries"], ["NZ"])
 
     def test_config_summary_is_useful(self) -> None:
         config = load_and_validate_config(Path("examples/minimal.toml"))
@@ -211,56 +211,6 @@ class ConfigValidationTests(unittest.TestCase):
                     "export": {"formats": ["jsonl"]},
                 }
             )
-
-    def test_non_eu_nz_requires_supported_api_mode_by_default(self) -> None:
-        with self.assertRaisesRegex(
-            ConfigValidationError,
-            "supports New Zealand only in API mode by default",
-        ):
-            validate_config_dict(
-                {
-                    "project": {"name": "demo", "output_dir": "outputs/demo"},
-                    "queries": {"items": ["policy"]},
-                    "sources": [
-                        {
-                            "name": "nz-source",
-                            "adapter": "non-eu",
-                            "settings": {"countries": ["NZ"], "nz_mode": "auto"},
-                        }
-                    ],
-                    "normalization": {
-                        "deduplicate": True,
-                        "deduplicate_fields": ["title"],
-                    },
-                    "export": {"formats": ["jsonl"]},
-                }
-            )
-
-    def test_non_eu_nz_auto_mode_can_be_explicitly_allowed_for_internal_use(self) -> None:
-        config = validate_config_dict(
-            {
-                "project": {"name": "demo", "output_dir": "outputs/demo"},
-                "queries": {"items": ["policy"]},
-                "sources": [
-                    {
-                        "name": "nz-source",
-                        "adapter": "non-eu",
-                        "settings": {
-                            "countries": ["NZ"],
-                            "nz_mode": "auto",
-                            "allow_internal": True,
-                        },
-                    }
-                ],
-                "normalization": {
-                    "deduplicate": True,
-                    "deduplicate_fields": ["title"],
-                },
-                "export": {"formats": ["jsonl"]},
-            }
-        )
-
-        self.assertTrue(config.sources[0].settings["allow_internal"])
 
     def test_non_eu_multi_country_config_requires_internal_escape_hatch(self) -> None:
         with self.assertRaisesRegex(

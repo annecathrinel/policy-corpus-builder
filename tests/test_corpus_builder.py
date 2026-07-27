@@ -892,14 +892,12 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertIn(("UK", "offshore wind"), tracker["non_eu_queries"])
             self.assertIn(("AUS", "offshore wind"), tracker["non_eu_queries"])
 
-    def test_run_jurisdiction_wires_nz_mode_api_only_for_new_zealand(self):
-        # Regression test: the non-eu adapter only accepts countries ==
-        # ("NZ",) as a supported workflow when nz_mode == "api" (its
-        # default is "auto", which it explicitly rejects for NZ). Without
-        # corpus_builder.py injecting nz_mode = "api" itself,
-        # build-corpus --jurisdictions NZ failed validation regardless of
-        # whether an API key was configured. Other jurisdictions must not
-        # get an nz_mode key at all.
+    def test_run_jurisdiction_builds_uniform_settings_for_every_non_eu_jurisdiction(self):
+        # NZ retrieval was simplified to require an API key unconditionally
+        # (no more nz_mode setting/provisional modes), so corpus_builder.py
+        # no longer needs to special-case NZ's SourceConfig settings the
+        # way it briefly did - every non-EU jurisdiction, NZ included, now
+        # gets the exact same settings shape: just {"countries": [...]}.
         captured_settings: dict[str, dict] = {}
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
 
@@ -933,8 +931,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     outputs_path=output_root,
                 )
 
-        self.assertEqual(captured_settings["NZ"].get("nz_mode"), "api")
-        self.assertNotIn("nz_mode", captured_settings["UK"])
+        self.assertEqual(captured_settings["NZ"], {"countries": ["NZ"]})
+        self.assertEqual(captured_settings["UK"], {"countries": ["UK"]})
 
 
 if __name__ == "__main__":

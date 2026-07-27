@@ -454,7 +454,7 @@ The currently supported workflows are:
 - Canada via `adapter = "non-eu"` with `countries = ["CA"]`
 - Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
 - US via `adapter = "non-eu"` with `countries = ["US"]`
-- New Zealand API mode via `adapter = "non-eu"` with `countries = ["NZ"]` and `nz_mode = "api"`
+- New Zealand via `adapter = "non-eu"` with `countries = ["NZ"]` and an `NZ_LEGISLATION_API_KEY`
 
 The non-EU workflows above are supported, but they are generally more contingent on each jurisdiction's current public website or API behavior. Changes to government service availability, response formats, search endpoints, page markup, scraping rules, access restrictions, or anti-bot controls may affect them before this package has been updated.
 
@@ -562,8 +562,6 @@ The following modules and workflows are intentionally not part of the supported 
 - legacy migrated [src/policy_corpus_builder/adapters/eurlex_nim.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim.py)
 - [src/policy_corpus_builder/adapters/non_eu.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu.py)
 - notebook-era diagnostics, bulk loaders, cache summaries, and summary helpers inside those migrated modules
-- New Zealand `nz_mode = "auto"` as a supported contract
-- New Zealand `nz_mode = "scrape"` as a supported contract
 - placeholder and demo-only surfaces such as `placeholder` and [examples/minimal.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/minimal.toml)
 
 Examples and notebooks are documentation aids, not stable implementation entry points.
@@ -626,9 +624,9 @@ What it supports today:
 
 What it requires:
 
-- for fully supported API mode, an `NZ_LEGISLATION_API_KEY`
+- an `NZ_LEGISLATION_API_KEY` (`NZ_API_KEY` is accepted as a compatibility alias); there is no unauthenticated fallback
 
-The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml). Treat `nz_mode = "api"` as the supported contract.
+The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml).
 
 ## Supported US Workflow
 

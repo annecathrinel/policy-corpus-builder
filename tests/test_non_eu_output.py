@@ -27,12 +27,16 @@ class NonEUOutputContractTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "source.settings.user_agent"):
             adapter.validate_source_config(source, base_path=Path("."))
 
-    def test_non_eu_adapter_requires_nz_api_key_when_nz_mode_is_api(self) -> None:
+    def test_non_eu_adapter_requires_nz_api_key(self) -> None:
+        # NZ retrieval has no unauthenticated fallback (the legacy scraper
+        # was removed - it hit the same WAF that blocks full-text
+        # downloads), so a key is required unconditionally, mirroring the
+        # US workflow's requirement.
         adapter = NonEUAdapter()
         source = SourceConfig(
             name="nz-legislation",
             adapter="non-eu",
-            settings={"countries": ["NZ"], "nz_mode": "api"},
+            settings={"countries": ["NZ"]},
         )
 
         # This test asserts behavior for a *missing* key, so it must not
@@ -53,20 +57,7 @@ class NonEUOutputContractTests(unittest.TestCase):
             if original_alias is not None:
                 os.environ["NZ_API_KEY"] = original_alias
 
-    def test_non_eu_adapter_rejects_nz_auto_mode_without_allow_internal(self) -> None:
-        # Per docs/supported-surface.md, NZ is only a documented/supported workflow in
-        # nz_mode="api"; "auto"/"scrape" are provisional and require an explicit opt-in.
-        adapter = NonEUAdapter()
-        source = SourceConfig(
-            name="nz-legislation",
-            adapter="non-eu",
-            settings={"countries": ["NZ"], "nz_mode": "auto"},
-        )
-
-        with self.assertRaisesRegex(Exception, "New Zealand only in API mode"):
-            adapter.validate_source_config(source, base_path=Path("."))
-
-    def test_non_eu_adapter_accepts_nz_mode_api_with_key_configured(self) -> None:
+    def test_non_eu_adapter_accepts_nz_with_key_configured(self) -> None:
         # This is exactly the settings shape corpus_builder.py's
         # _run_jurisdiction constructs for jurisdiction == "NZ" - confirms
         # the top-level build-corpus NZ workflow validates successfully
@@ -76,7 +67,7 @@ class NonEUOutputContractTests(unittest.TestCase):
         source = SourceConfig(
             name="nz-legislation",
             adapter="non-eu",
-            settings={"countries": ["NZ"], "nz_mode": "api"},
+            settings={"countries": ["NZ"]},
         )
 
         with patch.dict("os.environ", {"NZ_LEGISLATION_API_KEY": "nz-demo-key"}, clear=False):
@@ -92,7 +83,7 @@ class NonEUOutputContractTests(unittest.TestCase):
         source = SourceConfig(
             name="nz-legislation",
             adapter="non-eu",
-            settings={"countries": ["NZ"], "nz_mode": "api"},
+            settings={"countries": ["NZ"]},
         )
 
         original_primary = os.environ.pop("NZ_LEGISLATION_API_KEY", None)
@@ -106,16 +97,6 @@ class NonEUOutputContractTests(unittest.TestCase):
         finally:
             if original_primary is not None:
                 os.environ["NZ_LEGISLATION_API_KEY"] = original_primary
-
-    def test_non_eu_adapter_allows_nz_auto_mode_with_allow_internal(self) -> None:
-        adapter = NonEUAdapter()
-        source = SourceConfig(
-            name="nz-legislation",
-            adapter="non-eu",
-            settings={"countries": ["NZ"], "nz_mode": "auto", "allow_internal": True},
-        )
-
-        adapter.validate_source_config(source, base_path=Path("."))
 
     def test_non_eu_adapter_promotes_cleaned_full_text_and_trims_legacy_fields(self) -> None:
         adapter = NonEUAdapter()

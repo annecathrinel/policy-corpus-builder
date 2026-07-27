@@ -138,7 +138,6 @@ class NonEUNewZealandTests(unittest.TestCase):
                 df = non_eu.fetch_nz_documents(
                     ["biodiversity"],
                     api_key="nz-test-key",
-                    mode="api",
                     max_per_term=5,
                     # verbose defaults to True - this is the path that used
                     # to crash.
@@ -147,44 +146,24 @@ class NonEUNewZealandTests(unittest.TestCase):
         self.assertEqual(len(df), 1)
         self.assertIn("candidates=1", stdout.getvalue())
 
-    def test_fetch_nz_documents_uses_legacy_scraper_fallback_when_no_api_key_in_auto_mode(self) -> None:
-        legacy_html = """
-        <html><body>
-          <a href="/act/public/2024/12/en/latest/">Biodiversity Restoration Act 2024</a>
-          <a href="/regulation/public/2023/45/en/latest/">Marine Biodiversity Regulations 2023</a>
-        </body></html>
-        """
-
-        with (
-            patch.object(non_eu, "dns_check", return_value=True),
-            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, legacy_html)),
-            patch.object(non_eu.time, "sleep"),
-        ):
-            df = non_eu.fetch_nz_documents(
-                ["biodiversity"],
-                api_key=None,
-                mode="auto",
-                max_per_term=10,
-                verbose=False,
-            )
-
-        self.assertEqual(len(df), 2)
-        self.assertEqual(df["source"].tolist(), ["NZ", "NZ"])
-        self.assertIn("https://www.legislation.govt.nz/act/public/2024/12/en/latest/", df["url"].tolist())
-
-    def test_fetch_nz_documents_in_api_mode_without_key_fails_cleanly(self) -> None:
-        df, diagnostics = non_eu.fetch_nz_documents(
-            ["biodiversity"],
-            api_key=None,
-            mode="api",
-            max_per_term=10,
-            verbose=False,
-            return_diagnostics=True,
-        )
-
-        self.assertEqual(len(df), 0)
-        self.assertEqual(diagnostics.iloc[0]["stop_reason"], "missing_api_key")
-        self.assertEqual(diagnostics.iloc[0]["mode"], "api")
+    def test_fetch_nz_documents_requires_an_api_key(self) -> None:
+        # Regression test: NZ retrieval used to fall back to an
+        # unauthenticated scrape of the public legislation.govt.nz website
+        # when no API key was configured, but that fallback doesn't work
+        # (the same WAF that blocks full-text downloads blocks it too) and
+        # isn't worth maintaining. NZ now requires a key unconditionally,
+        # mirroring fetch_us_documents's RuntimeError for a missing
+        # REGULATIONS_GOV_API_KEY.
+        original_primary = non_eu.os.environ.pop("NZ_LEGISLATION_API_KEY", None)
+        original_alias = non_eu.os.environ.pop("NZ_API_KEY", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "NZ_LEGISLATION_API_KEY"):
+                non_eu.fetch_nz_documents(["biodiversity"], api_key=None, max_per_term=10, verbose=False)
+        finally:
+            if original_primary is not None:
+                non_eu.os.environ["NZ_LEGISLATION_API_KEY"] = original_primary
+            if original_alias is not None:
+                non_eu.os.environ["NZ_API_KEY"] = original_alias
 
     def test_get_url_candidates_for_nz_prefers_xml_then_pdf_then_html(self) -> None:
         candidates = non_eu.get_url_candidates(

@@ -28,7 +28,7 @@ Notes:
 - `non_eu_uk.toml` is a live network example and may take time to run.
 - `non_eu_canada.toml` is a live network example and may take time to run.
 - `non_eu_australia.toml` is a live network example and may take time to run.
-- `non_eu_new_zealand.toml` should be treated as supported only in `nz_mode = "api"` with `NZ_LEGISLATION_API_KEY`. `auto` and `scrape` remain provisional because they can route into the legacy no-key fallback.
+- `non_eu_new_zealand.toml` is a live network example and requires `NZ_LEGISLATION_API_KEY` (`NZ_API_KEY` is accepted as a compatibility alias). There is no unauthenticated fallback.
 - `non_eu_us.toml` is a live network example and requires `REGULATIONS_GOV_API_KEY`.
 - `eu.toml` is a live network example and requires `EURLEX_WS_USER` and `EURLEX_WS_PASS`. `EURLEX_USER` and `EURLEX_WEB_PASS` are accepted as compatibility aliases.
 - `eu_nim.toml` is a live network example and requires `EURLEX_WS_USER` and `EURLEX_WS_PASS`. `EURLEX_USER` and `EURLEX_WEB_PASS` are accepted as compatibility aliases.
