@@ -46,6 +46,19 @@ dev = [
   "pytest",
   "pytest-cov",
 ]
+# Lets full-text retrieval solve an AWS WAF Challenge (e.g.
+# www.legislation.govt.nz) by actually running its JavaScript in a real
+# headless browser - see _solve_waf_challenge_via_browser in
+# adapters/non_eu.py. Optional (not a base dependency) because it needs a
+# second, separate setup step beyond `pip install`: the browser binary
+# itself isn't installed by pip and must be fetched with
+# `playwright install chromium` after installing this extra. Without it,
+# retrieval still runs, just with curl_cffi's TLS impersonation as the only
+# WAF mitigation, which live 2026-07-27 data showed is not sufficient on
+# its own for this specific host.
+browser = [
+  "playwright",
+]
 
 [project.urls]
 Homepage = "https://github.com/annecathrinel/policy-corpus-builder"

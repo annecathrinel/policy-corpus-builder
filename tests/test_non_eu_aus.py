@@ -179,6 +179,13 @@ class NonEUAustraliaTests(unittest.TestCase):
         stdout = StringIO()
         with (
             patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+            # Also disable the headless-browser challenge-solve fallback
+            # (see test_non_eu_waf_retry.py's BrowserChallengeSolverRoutingTests
+            # for dedicated coverage of that path) - without this, whether
+            # this test's call count assertion holds would depend on
+            # whether playwright happens to be installed in the environment
+            # running the suite, rather than being deterministic.
+            patch.object(non_eu, "_get_thread_browser_waf_cookies", return_value=None),
             patch.object(non_eu.time, "sleep"),
             redirect_stdout(stdout),
         ):

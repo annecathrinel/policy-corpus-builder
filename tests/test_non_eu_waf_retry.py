@@ -77,6 +77,7 @@ class GetWithWafRetryTests(unittest.TestCase):
             timeout=10,
             max_retries=2,
             use_browser_impersonation=False,
+            use_browser_challenge_solver=False,
         )
 
         # max_retries=2 means 3 total attempts (the initial try plus 2 retries).
@@ -135,6 +136,7 @@ class GetWithWafRetryTests(unittest.TestCase):
             timeout=10,
             max_retries=2,
             use_browser_impersonation=False,
+            use_browser_challenge_solver=False,
         )
 
         self.assertEqual(session.calls, 3)
@@ -324,7 +326,9 @@ class PdfModeWafDetectionTests(unittest.TestCase):
 
         with patch.object(non_eu, "_get_thread_session", return_value=session), patch.object(
             non_eu, "_get_thread_robots", return_value=type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
-        ), patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+        ), patch.object(non_eu, "_get_thread_impersonated_session", return_value=None), patch.object(
+            non_eu, "_get_thread_browser_waf_cookies", return_value=None
+        ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
                     "source": "NZ",
@@ -407,6 +411,352 @@ class AddFullTextsParallelCurlCffiDiagnosticTests(unittest.TestCase):
 
         self.assertEqual(result, [])
         self.assertEqual(stdout.getvalue(), "")
+
+
+class BrowserChallengeSolverFallbackTests(unittest.TestCase):
+    # Regression coverage for the follow-up fix after curl_cffi TLS
+    # impersonation alone turned out not to be enough: a 2026-07-27 live NZ
+    # run with it deployed still got waf_challenge on 16/17 full-text
+    # requests, statistically the same as the 92/97 (94.8%) rate *before*
+    # that fix - see _get_thread_impersonated_session's 2026-07-27 update.
+    # _get_with_waf_retry now falls back to actually solving the challenge
+    # in a real headless browser (_solve_waf_challenge_via_browser) after
+    # its plain/impersonated retries are exhausted. None of these tests
+    # launch a real browser - the solver itself is mocked out via
+    # _get_thread_browser_waf_cookies, so behavior here doesn't depend on
+    # whether playwright happens to be installed in the environment running
+    # the suite.
+
+    def test_falls_back_to_browser_solved_cookies_after_exhausting_retries(self) -> None:
+        session = _QueuedResponseSession(
+            [
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(200, "real document text"),
+            ]
+        )
+
+        with patch.object(
+            non_eu, "_get_thread_browser_waf_cookies", return_value={"aws-waf-token": "solved"}
+        ) as mock_solve:
+            response = non_eu._get_with_waf_retry(
+                session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+                max_retries=2,
+                use_browser_impersonation=False,
+            )
+
+        # 3 attempts to exhaust the normal retry budget, then 1 more with
+        # the browser-solved cookies attached.
+        self.assertEqual(session.calls, 4)
+        mock_solve.assert_called_once()
+        self.assertFalse(non_eu._is_waf_challenge_response(response))
+        self.assertEqual(response.text, "real document text")
+
+    def test_gives_up_when_browser_solve_returns_no_cookies(self) -> None:
+        session = _QueuedResponseSession(
+            [_FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"})] * 3
+        )
+
+        with patch.object(non_eu, "_get_thread_browser_waf_cookies", return_value=None) as mock_solve:
+            response = non_eu._get_with_waf_retry(
+                session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+                max_retries=2,
+                use_browser_impersonation=False,
+            )
+
+        # No extra request when the solver couldn't get cookies (playwright
+        # missing, browser launch failure, or a genuinely unsolved
+        # challenge) - 3, not 4.
+        self.assertEqual(session.calls, 3)
+        mock_solve.assert_called_once()
+        self.assertTrue(non_eu._is_waf_challenge_response(response))
+
+    def test_use_browser_challenge_solver_false_skips_the_fallback_entirely(self) -> None:
+        session = _QueuedResponseSession(
+            [_FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"})] * 3
+        )
+
+        with patch.object(non_eu, "_get_thread_browser_waf_cookies") as mock_solve:
+            response = non_eu._get_with_waf_retry(
+                session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+                max_retries=2,
+                use_browser_impersonation=False,
+                use_browser_challenge_solver=False,
+            )
+
+        self.assertEqual(session.calls, 3)
+        mock_solve.assert_not_called()
+        self.assertTrue(non_eu._is_waf_challenge_response(response))
+
+    def test_a_host_not_known_to_be_waf_prone_never_attempts_a_browser_solve(self) -> None:
+        session = _QueuedResponseSession([_FakeResponse(404, "")] * 3)
+
+        with patch.object(non_eu, "_get_thread_browser_waf_cookies") as mock_solve:
+            non_eu._get_with_waf_retry(
+                session,
+                "https://example.org/doc-1.xml",
+                headers={},
+                timeout=10,
+                max_retries=2,
+                use_browser_impersonation=False,
+            )
+
+        mock_solve.assert_not_called()
+
+    def test_browser_solved_cookies_are_passed_on_the_final_request(self) -> None:
+        captured_kwargs: list[dict] = []
+
+        class _CapturingSession:
+            def __init__(self, responses: list[_FakeResponse]):
+                self._responses = list(responses)
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                captured_kwargs.append(kwargs)
+                response = self._responses[self.calls]
+                self.calls += 1
+                return response
+
+        session = _CapturingSession(
+            [
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"}),
+                _FakeResponse(200, "real document text"),
+            ]
+        )
+
+        with patch.object(
+            non_eu, "_get_thread_browser_waf_cookies", return_value={"aws-waf-token": "solved"}
+        ):
+            non_eu._get_with_waf_retry(
+                session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+                max_retries=2,
+                use_browser_impersonation=False,
+            )
+
+        self.assertEqual(captured_kwargs[-1].get("cookies"), {"aws-waf-token": "solved"})
+
+
+class BrowserWafChallengeSolverTests(unittest.TestCase):
+    def test_returns_none_when_playwright_is_not_installed(self) -> None:
+        with patch.object(non_eu, "sync_playwright", None):
+            self.assertIsNone(
+                non_eu._solve_waf_challenge_via_browser("https://www.legislation.govt.nz/act/public/2024/12")
+            )
+
+    def test_returns_cookie_dict_from_a_mocked_browser_session(self) -> None:
+        class _FakePage:
+            def goto(self, url, timeout=None, wait_until=None):
+                pass
+
+            def wait_for_load_state(self, state, timeout=None):
+                pass
+
+        class _FakeContext:
+            def new_page(self):
+                return _FakePage()
+
+            def cookies(self):
+                return [{"name": "aws-waf-token", "value": "abc123"}]
+
+        class _FakeBrowser:
+            def new_context(self, user_agent=None):
+                return _FakeContext()
+
+            def close(self):
+                pass
+
+        class _FakeChromium:
+            def launch(self, headless=True, args=None):
+                return _FakeBrowser()
+
+        class _FakePlaywrightInstance:
+            chromium = _FakeChromium()
+
+        class _FakePlaywrightContextManager:
+            def __enter__(self):
+                return _FakePlaywrightInstance()
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(non_eu, "sync_playwright", lambda: _FakePlaywrightContextManager()):
+            cookies = non_eu._solve_waf_challenge_via_browser(
+                "https://www.legislation.govt.nz/act/public/2024/12"
+            )
+
+        self.assertEqual(cookies, {"aws-waf-token": "abc123"})
+
+    def test_returns_none_when_no_cookies_result_from_the_page_load(self) -> None:
+        class _FakePage:
+            def goto(self, url, timeout=None, wait_until=None):
+                pass
+
+            def wait_for_load_state(self, state, timeout=None):
+                pass
+
+        class _FakeContext:
+            def new_page(self):
+                return _FakePage()
+
+            def cookies(self):
+                return []
+
+        class _FakeBrowser:
+            def new_context(self, user_agent=None):
+                return _FakeContext()
+
+            def close(self):
+                pass
+
+        class _FakeChromium:
+            def launch(self, headless=True, args=None):
+                return _FakeBrowser()
+
+        class _FakePlaywrightInstance:
+            chromium = _FakeChromium()
+
+        class _FakePlaywrightContextManager:
+            def __enter__(self):
+                return _FakePlaywrightInstance()
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(non_eu, "sync_playwright", lambda: _FakePlaywrightContextManager()):
+            cookies = non_eu._solve_waf_challenge_via_browser(
+                "https://www.legislation.govt.nz/act/public/2024/12"
+            )
+
+        self.assertIsNone(cookies)
+
+    def test_returns_none_on_any_exception_during_browser_automation(self) -> None:
+        def _raising_sync_playwright():
+            raise RuntimeError("browser launch failed")
+
+        with patch.object(non_eu, "sync_playwright", _raising_sync_playwright):
+            cookies = non_eu._solve_waf_challenge_via_browser(
+                "https://www.legislation.govt.nz/act/public/2024/12"
+            )
+
+        self.assertIsNone(cookies)
+
+
+class BrowserWafCookieCacheTests(unittest.TestCase):
+    def _clear_cache(self) -> None:
+        if hasattr(non_eu._thread_local, "browser_waf_cookies"):
+            delattr(non_eu._thread_local, "browser_waf_cookies")
+
+    def test_caches_the_result_per_host_within_a_thread(self) -> None:
+        self._clear_cache()
+        try:
+            with patch.object(
+                non_eu, "_solve_waf_challenge_via_browser", return_value={"aws-waf-token": "solved"}
+            ) as mock_solve:
+                first = non_eu._get_thread_browser_waf_cookies(
+                    "https://www.legislation.govt.nz/act/public/2024/12"
+                )
+                second = non_eu._get_thread_browser_waf_cookies(
+                    "https://www.legislation.govt.nz/act/public/2024/13"
+                )
+
+            mock_solve.assert_called_once()
+            self.assertEqual(first, {"aws-waf-token": "solved"})
+            self.assertEqual(second, {"aws-waf-token": "solved"})
+        finally:
+            self._clear_cache()
+
+    def test_caches_a_failed_solve_too_rather_than_retrying(self) -> None:
+        self._clear_cache()
+        try:
+            with patch.object(non_eu, "_solve_waf_challenge_via_browser", return_value=None) as mock_solve:
+                first = non_eu._get_thread_browser_waf_cookies(
+                    "https://www.legislation.govt.nz/act/public/2024/12"
+                )
+                second = non_eu._get_thread_browser_waf_cookies(
+                    "https://www.legislation.govt.nz/act/public/2024/13"
+                )
+
+            mock_solve.assert_called_once()
+            self.assertIsNone(first)
+            self.assertIsNone(second)
+        finally:
+            self._clear_cache()
+
+    def test_does_not_share_the_cache_across_different_hosts(self) -> None:
+        self._clear_cache()
+        try:
+            with patch.object(
+                non_eu, "_solve_waf_challenge_via_browser", return_value={"aws-waf-token": "solved"}
+            ) as mock_solve:
+                non_eu._get_thread_browser_waf_cookies("https://www.legislation.govt.nz/act/public/2024/12")
+                non_eu._get_thread_browser_waf_cookies("https://www.legislation.gov.uk/ukpga/2024/1")
+
+            self.assertEqual(mock_solve.call_count, 2)
+        finally:
+            self._clear_cache()
+
+
+class PlaywrightDiagnosticPrintTests(unittest.TestCase):
+    # Mirrors AddFullTextsParallelCurlCffiDiagnosticTests above for the new
+    # Playwright availability print.
+    def test_prints_available_when_playwright_is_importable(self) -> None:
+        stdout = StringIO()
+
+        with (
+            patch.object(non_eu, "sync_playwright", lambda: None),
+            patch.object(
+                non_eu,
+                "enrich_one_record_fulltext",
+                return_value={"full_text": "some text", "full_text_error": ""},
+            ),
+            redirect_stdout(stdout),
+        ):
+            non_eu.add_full_texts_parallel(
+                [{"source": "NZ", "url": "https://www.legislation.govt.nz/act/public/2024/1"}],
+                us_api_key=None,
+            )
+
+        self.assertIn(
+            "[FULLTEXT] Playwright headless-browser WAF-challenge solver: available",
+            stdout.getvalue(),
+        )
+
+    def test_prints_not_available_when_playwright_is_missing(self) -> None:
+        stdout = StringIO()
+
+        with (
+            patch.object(non_eu, "sync_playwright", None),
+            patch.object(
+                non_eu,
+                "enrich_one_record_fulltext",
+                return_value={"full_text": "some text", "full_text_error": ""},
+            ),
+            redirect_stdout(stdout),
+        ):
+            non_eu.add_full_texts_parallel(
+                [{"source": "NZ", "url": "https://www.legislation.govt.nz/act/public/2024/1"}],
+                us_api_key=None,
+            )
+
+        self.assertIn(
+            "[FULLTEXT] Playwright headless-browser WAF-challenge solver: NOT available",
+            stdout.getvalue(),
+        )
 
 
 if __name__ == "__main__":

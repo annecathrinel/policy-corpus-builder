@@ -174,7 +174,10 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             # real impersonated session (which _get_with_waf_retry now
             # prefers for legislation.gov.uk - see test_non_eu_waf_retry.py
             # for dedicated coverage of that routing).
-            with patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+            with (
+                patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+                patch.object(non_eu, "_get_thread_browser_waf_cookies", return_value=None),
+            ):
                 enriched = non_eu.enrich_one_record_fulltext(
                     {
                         "source": "UK",
@@ -238,8 +241,14 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             # See the same patch in
             # test_enrich_one_record_fulltext_uses_uk_xml_when_available:
             # keeps this test on the injected fake session rather than a
-            # real curl_cffi impersonated session.
-            with patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+            # real curl_cffi impersonated session. Also disables the
+            # headless-browser challenge-solve fallback so the retry count
+            # here is deterministic regardless of whether playwright
+            # happens to be installed in the environment running the suite.
+            with (
+                patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+                patch.object(non_eu, "_get_thread_browser_waf_cookies", return_value=None),
+            ):
                 enriched = non_eu.enrich_one_record_fulltext(
                     {
                         "source": "UK",

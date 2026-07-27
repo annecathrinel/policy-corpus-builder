@@ -48,6 +48,14 @@ except ImportError:  # pragma: no cover - exercised only when the optional
     # requests in that case. See _get_thread_impersonated_session.
     curl_cffi_requests = None
 
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover - exercised only when the optional
+    # playwright dependency isn't installed (or `playwright install
+    # chromium` hasn't been run). Callers skip the browser-solve fallback
+    # in that case - see _solve_waf_challenge_via_browser.
+    sync_playwright = None
+
 
 UA = os.getenv("POLICY_CORPUS_BUILDER_USER_AGENT", "policy-corpus-builder/0.1")
 UK_BROWSER_UA = (
@@ -1544,9 +1552,26 @@ def _get_thread_impersonated_session():
     which is the standard mitigation for this class of block.
 
     Returns None if curl_cffi isn't installed, so callers fall back to the
-    plain requests session. This is a well-evidenced hypothesis based on
-    the browser-vs-requests comparison above, not a confirmed fix - it
-    hasn't been run against the live site yet.
+    plain requests session.
+
+    Update (2026-07-27): this was a well-evidenced hypothesis, not a
+    confirmed fix, when written - and a live NZ run with it deployed came
+    back at 16/17 full-text requests still waf_challenged, statistically
+    indistinguishable from the 92/97 (94.8%) rate *before* this fix. TLS
+    fingerprint spoofing alone isn't resolving the block. The most likely
+    explanation: this is an AWS WAF *Challenge* action (status 202 +
+    x-amzn-waf-action: challenge, exactly what's observed), which serves an
+    interactive JavaScript challenge that must actually be executed to
+    obtain a valid session token/cookie - a capability no plain HTTP
+    client has, TLS impersonation or not, since curl_cffi still just sends
+    a static HTTP request. The earlier "a real Chrome browser succeeded
+    immediately" observation is consistent with this too: a real browser
+    executes that JS automatically and gets a valid cookie, which a
+    TLS-spoofed non-browser client never can. See
+    _solve_waf_challenge_via_browser for the follow-up fix this points to.
+    Kept in the retry chain regardless, since it's still a plausible
+    partial mitigation for the separate Bot Control non-browser-TLS
+    scoring signal and costs nothing when curl_cffi is available.
     """
     if curl_cffi_requests is None:
         return None
@@ -1555,6 +1580,67 @@ def _get_thread_impersonated_session():
         session = curl_cffi_requests.Session(impersonate="chrome124")
         _thread_local.impersonated_session = session
     return session
+
+
+def _solve_waf_challenge_via_browser(url: str, *, user_agent: str | None = None, timeout_ms: int = 45000) -> dict[str, str] | None:
+    """Loads url in a real headless Chromium browser (via Playwright) so its
+    JavaScript actually runs, letting it solve an AWS WAF Challenge the way
+    a real browser does - something no plain or TLS-impersonated HTTP
+    client can do (see _get_thread_impersonated_session's 2026-07-27
+    update for why that approach alone wasn't enough). Returns the
+    resulting cookies as a plain dict for reuse in ordinary HTTP requests
+    against the same host, or None if playwright isn't installed/configured
+    or the load didn't produce any cookies (browser launch failure,
+    navigation timeout, or a genuinely unresolved challenge).
+
+    This is deliberately a one-shot, fairly expensive operation (a full
+    browser launch + page load) - callers are expected to cache the result
+    per host rather than call this per document. Not verified against the
+    live site (no network access to www.legislation.govt.nz from the
+    environment this was written in); the wait_for_load_state("networkidle")
+    heuristic is a best-effort guess at "the challenge has finished
+    resolving and any redirect has settled", not a confirmed signal for
+    this specific site's challenge page.
+    """
+    if sync_playwright is None:
+        return None
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            try:
+                context = browser.new_context(user_agent=(user_agent or UK_BROWSER_UA).strip())
+                page = context.new_page()
+                page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                page.wait_for_load_state("networkidle", timeout=timeout_ms)
+                cookies = context.cookies()
+            finally:
+                browser.close()
+    except Exception:
+        return None
+    if not cookies:
+        return None
+    return {str(c.get("name")): str(c.get("value")) for c in cookies if c.get("name")}
+
+
+def _get_thread_browser_waf_cookies(url: str, *, user_agent: str | None = None) -> dict[str, str] | None:
+    """Thread-local, per-host cache around _solve_waf_challenge_via_browser.
+
+    A browser launch is expensive enough (seconds, not milliseconds) that
+    trying it again for every single subsequently-blocked document in the
+    same thread would be prohibitively slow, so both a successful solve
+    and a failed one (None) are cached - a failure this run (e.g.
+    playwright not installed, or a genuinely unsolvable challenge) is
+    assumed to still fail on the next document in the same thread rather
+    than retried.
+    """
+    host = (urlparse(url).netloc or "").lower()
+    cache = getattr(_thread_local, "browser_waf_cookies", None)
+    if cache is None:
+        cache = {}
+        _thread_local.browser_waf_cookies = cache
+    if host not in cache:
+        cache[host] = _solve_waf_challenge_via_browser(url, user_agent=user_agent)
+    return cache[host]
 
 
 def _get_thread_robots(user_agent: str | None = None) -> RobotsCache:
@@ -1738,6 +1824,7 @@ def _get_with_waf_retry(
     max_retries: int = 2,
     backoff_factor: float = 4.0,
     use_browser_impersonation: bool = True,
+    use_browser_challenge_solver: bool = True,
 ) -> requests.Response:
     """GET url, retrying with backoff if the response is a WAF challenge or
     block (see _classify_waf_response).
@@ -1757,6 +1844,15 @@ def _get_with_waf_retry(
     the challenge/block, a bounded retry with backoff is a cheap additional
     mitigation. Always paces requests to WAF-prone hosts first via
     _throttle_host_request, including before the first attempt.
+
+    If every plain/impersonated retry above is still classified as a WAF
+    challenge/block, makes one last attempt using cookies obtained by
+    actually solving the challenge in a real headless browser (see
+    _get_thread_browser_waf_cookies) - this is the only one of these
+    mitigations confirmed to matter against an AWS WAF *Challenge* action,
+    which requires executing JavaScript no HTTP client, impersonated or
+    not, can run. use_browser_challenge_solver=False skips this (tests use
+    this so they don't attempt a real Playwright browser launch).
     """
     client = session
     if use_browser_impersonation:
@@ -1773,6 +1869,18 @@ def _get_with_waf_retry(
             return response
         if attempt < max_retries:
             time.sleep(backoff_factor * (attempt + 1))
+    if use_browser_challenge_solver:
+        host = (urlparse(url).netloc or "").lower()
+        if host in _WAF_PRONE_HOST_MIN_INTERVAL_S:
+            cookies = _get_thread_browser_waf_cookies(url, user_agent=headers.get("User-Agent"))
+            if cookies:
+                _throttle_host_request(url)
+                browser_solved_response = client.get(
+                    url, timeout=timeout, verify=certifi.where(), headers=headers, cookies=cookies,
+                )
+                if _classify_waf_response(browser_solved_response) is None:
+                    return browser_solved_response
+                response = browser_solved_response
     return response
 
 
@@ -2323,6 +2431,27 @@ def add_full_texts_parallel(
             if curl_cffi_requests is not None
             else "NOT available (pip install curl_cffi) - WAF-prone hosts will "
             "use the plain requests session and may see more waf_challenge errors"
+        )
+    )
+    # playwright drives a real headless Chromium browser to actually solve
+    # an AWS WAF Challenge (see _solve_waf_challenge_via_browser) when
+    # curl_cffi's TLS impersonation alone doesn't clear it - confirmed
+    # necessary for NZ (2026-07-27: 16/17 full-text requests still
+    # waf_challenged with curl_cffi alone, unchanged from before it).
+    # Requires both `pip install playwright` and a one-time
+    # `playwright install chromium` to download the browser binary; if
+    # either is missing this silently falls back to whatever curl_cffi
+    # alone achieves, so surface it here rather than leaving it to be
+    # inferred from an unchanged waf_challenge count.
+    print(
+        "[FULLTEXT] Playwright headless-browser WAF-challenge solver: "
+        + (
+            "available"
+            if sync_playwright is not None
+            else "NOT available (pip install playwright && playwright install "
+            "chromium) - WAF-prone hosts will rely on curl_cffi TLS "
+            "impersonation alone, which is not sufficient for hosts using an "
+            "AWS WAF Challenge action (e.g. www.legislation.govt.nz)"
         )
     )
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

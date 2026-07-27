@@ -402,9 +402,25 @@ Set `write_jurisdiction_logs=False` (`--no-jurisdiction-logs` on the CLI) to go 
 
 The Python-level mechanism behind this is a small thread-aware stdout router (`_JurisdictionLogRouter` in `corpus_builder.py`) rather than a logging-module setup - none of the source adapters use Python's `logging` module today, they all print directly to stdout.
 
-Non-EU full-text fetching also prints one line per call to `add_full_texts_parallel` - `[FULLTEXT] curl_cffi browser-TLS impersonation: available` or `... NOT available (pip install curl_cffi) - ...` - stating whether the `curl_cffi` browser-TLS-impersonation path used for WAF-prone hosts (`www.legislation.govt.nz`, `www.legislation.gov.uk`, `www.legislation.gov.au`) is actually active in the current environment. If it prints "NOT available", `curl_cffi` either isn't installed or failed to import, and every request to those hosts falls back to the plain `requests` session, which is far more likely to be WAF-challenged or blocked. Check `[ERROR SUMMARY]`'s `waf_challenge`/`waf_block` counts alongside this line: a high count with impersonation "available" points at something else (rate limiting, a changed page, etc.), while a high count with "NOT available" points at the environment simply not having `curl_cffi` installed - e.g. a `pip install --upgrade` that ran before `curl_cffi` was added as a dependency, or a compute-node Python environment that differs from wherever the package was last installed.
+Non-EU full-text fetching also prints two lines per call to `add_full_texts_parallel`, one for each of the two WAF-mitigation layers described below:
 
-`waf_challenge` (an interactive HTTP 202 + `x-amzn-waf-action: challenge`, seen on NZ/UK) and `waf_block` (a hard HTTP 403, or `x-amzn-waf-action: block`, seen on AUS) are the two WAF-related `full_text_error`/log values you'll see - both get the same treatment from `_get_with_waf_retry`: throttled via `_WAF_PRONE_HOST_MIN_INTERVAL_S`, preferentially routed through the curl_cffi-impersonated session, and retried with backoff before giving up. `fetch_aus_documents`'s own search requests to `www.legislation.gov.au` go through this same helper, not just AUS full-text fetches - a 2026-07-27 AUS smoke test found a clean run for roughly its first 12 search terms and then a `waf_block` on every term after that for the rest of the run, the same rate-based-block shape NZ showed for full-text fetches.
+- `[FULLTEXT] curl_cffi browser-TLS impersonation: available` or `... NOT available (pip install curl_cffi) - ...` - whether the `curl_cffi` browser-TLS-impersonation path used for WAF-prone hosts (`www.legislation.govt.nz`, `www.legislation.gov.uk`, `www.legislation.gov.au`) is actually active. If "NOT available", `curl_cffi` either isn't installed or failed to import, and every request to those hosts falls back to the plain `requests` session.
+- `[FULLTEXT] Playwright headless-browser WAF-challenge solver: available` or `... NOT available (pip install playwright && playwright install chromium) - ...` - whether the headless-browser fallback (see below) can run at all.
+
+Check `[ERROR SUMMARY]`'s `waf_challenge`/`waf_block` counts alongside these lines: a high count with both "available" points at something else (rate limiting, a changed page, etc.), while a high count with either "NOT available" points at that specific mitigation layer simply not being set up in this environment - e.g. a `pip install --upgrade` that ran before a dependency was added, or a compute-node Python environment that differs from wherever the package was last installed.
+
+`waf_challenge` (an interactive HTTP 202 + `x-amzn-waf-action: challenge`, seen on NZ/UK) and `waf_block` (a hard HTTP 403, or `x-amzn-waf-action: block`, seen on AUS) are the two WAF-related `full_text_error`/log values you'll see - both get the same treatment from `_get_with_waf_retry`: throttled via `_WAF_PRONE_HOST_MIN_INTERVAL_S`, preferentially routed through the curl_cffi-impersonated session, retried with backoff, and - if still challenged/blocked after that - retried one final time using cookies obtained by actually solving the challenge in a real headless browser (see the next paragraph). `fetch_aus_documents`'s own search requests to `www.legislation.gov.au` go through this same helper, not just AUS full-text fetches - a 2026-07-27 AUS smoke test found a clean run for roughly its first 12 search terms and then a `waf_block` on every term after that for the rest of the run, the same rate-based-block shape NZ showed for full-text fetches.
+
+**curl_cffi's TLS impersonation alone is not sufficient for `www.legislation.govt.nz`.** It was deployed as a well-evidenced hypothesis (a real Chrome browser succeeded immediately against a URL that consistently got `waf_challenge` through Python's `requests`, pointing at TLS/JA3 fingerprinting), but a follow-up live run with it active still got `waf_challenge` on 16/17 full-text requests - statistically the same as the 92/97 (94.8%) rate *before* the fix. The most likely explanation: NZ's block is an AWS WAF *Challenge* action, which serves an interactive JavaScript challenge that must actually be executed to obtain a valid session cookie - something no HTTP client can do regardless of how well it spoofs its TLS handshake, since it's still just sending a static request rather than running JS. `_solve_waf_challenge_via_browser` addresses this directly: it loads the URL in a real headless Chromium browser via [Playwright](https://playwright.dev/), lets the challenge JS execute, and extracts the resulting cookies for reuse in ordinary HTTP requests to the same host. This is deliberately a last resort - a full browser launch is orders of magnitude slower than an HTTP request - so `_get_thread_browser_waf_cookies` caches the outcome (success or failure) per host per thread rather than attempting it for every blocked document.
+
+Playwright is an optional dependency (the `browser` extra: `pip install policy-corpus-builder[browser]`) because, unlike `curl_cffi`, it needs a second setup step beyond `pip install` - the browser binary itself isn't installed by pip:
+
+```bash
+pip install policy-corpus-builder[browser]
+playwright install chromium
+```
+
+Without that second step, retrieval still runs fine - it just falls back to whatever curl_cffi's TLS impersonation alone achieves, which the live data above shows is not much for this specific host. **Whether headless Chromium can actually launch on the DTU HPC cluster's compute nodes is untested** - shared HPC environments often restrict the sandboxing/namespace operations Chromium wants by default (mitigated by launching with `--no-sandbox`, which this module already does, but that alone doesn't guarantee it'll work on every cluster's kernel/cgroup configuration) and may not have the browser's shared-library dependencies installed system-wide. If `playwright install chromium` or the first browser-based fetch fails on the cluster, that's a real environment constraint to investigate separately, not a bug in this fallback's logic.
 
 ## Parallel Processing
 
@@ -438,6 +454,13 @@ pip install -e .
 ```
 
 Python `3.11+` is required.
+
+For NZ full-text retrieval, also install the optional `browser` extra and its browser binary (see [Supported New Zealand Workflow](#supported-new-zealand-workflow) for why this is needed):
+
+```bash
+pip install -e .[browser]
+playwright install chromium
+```
 
 ## Local Credentials
 
@@ -658,6 +681,7 @@ What it supports today:
 What it requires:
 
 - an `NZ_LEGISLATION_API_KEY` (`NZ_API_KEY` is accepted as a compatibility alias); there is no unauthenticated fallback
+- for full-text retrieval specifically (search/discovery via the API above works without it): the `browser` optional extra (`pip install policy-corpus-builder[browser]` + `playwright install chromium`), since `www.legislation.govt.nz` runs an AWS WAF Challenge that curl_cffi's TLS impersonation alone was confirmed insufficient against - see the WAF mitigation section under [Progress Output](#progress-output) for the full story
 
 The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml).
 
