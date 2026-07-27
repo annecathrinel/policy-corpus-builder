@@ -925,8 +925,9 @@ def fetch_aus_documents(
 
 
 def build_canada_publications_search_url(term: str) -> str:
-    q = quote(f'"{term}"' if " " in term else term, safe="")
-    return f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&adof=on"
+    term = term.strip()
+    q = quote(f'"{term}"', safe="")
+    return f"{CA_BASE}/site/eng/search/search.html?sLF=eng&text={q}&cnst=&adof=on"
 
 
 def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]]:

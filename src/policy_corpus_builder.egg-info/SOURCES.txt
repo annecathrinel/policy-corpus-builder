@@ -62,5 +62,6 @@ tests/test_non_eu_nz.py
 tests/test_non_eu_output.py
 tests/test_non_eu_uk.py
 tests/test_non_eu_us.py
+tests/test_non_eu_waf_retry.py
 tests/test_pipeline.py
 tests/test_postprocess.py

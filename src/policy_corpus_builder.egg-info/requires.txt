@@ -1,6 +1,11 @@
 beautifulsoup4
 certifi
+curl_cffi
 numpy
 pandas
 pypdf
 requests
+
+[dev]
+pytest
+pytest-cov
