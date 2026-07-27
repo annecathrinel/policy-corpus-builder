@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
@@ -73,6 +75,47 @@ class NonEUAustraliaTests(unittest.TestCase):
                 "Environment Protection Act 2021",
             ],
         )
+
+    def test_fetch_aus_documents_prints_progress_diagnostics_by_default(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_aus_documents(["biodiversity"], max_per_term=10)
+
+        output = stdout.getvalue()
+        self.assertIn("[AUS] term='biodiversity'", output)
+        self.assertIn("candidates=2", output)
+        self.assertIn("DONE -> kept=2", output)
+        self.assertIn("[AUS] total rows kept: 2", output)
+
+    def test_fetch_aus_documents_verbose_false_suppresses_output(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_aus_documents(["biodiversity"], max_per_term=10, verbose=False)
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_fetch_aus_documents_logs_non_200_status_and_continues_to_next_term(self) -> None:
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            if "soil" in url:
+                return _FakeResponse(503, "")
+            return _FakeResponse(200, AUS_SEARCH_HTML)
+
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
+            redirect_stdout(stdout),
+        ):
+            df = non_eu.fetch_aus_documents(["soil biodiversity", "biodiversity"], max_per_term=10)
+
+        output = stdout.getvalue()
+        self.assertIn("term='soil biodiversity' ERROR -> HTTP 503", output)
+        self.assertEqual(len(df), 2)
 
     def test_extract_aus_embedded_text_assets_prefers_document_1_html(self) -> None:
         wrapper_url = "https://www.legislation.gov.au/C2004A00485/latest/text"

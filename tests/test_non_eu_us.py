@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,6 +53,84 @@ class USNonEUWorkflowTests(unittest.TestCase):
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]["title"], "Biodiversity review notice")
         self.assertEqual(df.iloc[0]["source"], "US")
+
+    def test_fetch_us_documents_prints_progress_diagnostics_by_default(self) -> None:
+        class _FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {
+                    "data": [
+                        {
+                            "id": "EPA-HQ-OPP-2024-0010-0001",
+                            "attributes": {"title": "Biodiversity review notice"},
+                            "links": {"self": "https://api.regulations.gov/v4/documents/EPA-HQ-OPP-2024-0010-0001"},
+                        }
+                    ]
+                }
+
+        calls: list[dict[str, object]] = []
+
+        def _fake_safe_get(url: str, **kwargs):
+            calls.append(kwargs.get("params", {}))
+            if len(calls) == 1:
+                return _FakeResponse()
+            return None
+
+        stdout = StringIO()
+        with patch.object(non_eu, "safe_get", side_effect=_fake_safe_get):
+            with redirect_stdout(stdout):
+                non_eu.fetch_us_documents(
+                    ["biodiversity"],
+                    api_key="test-key",
+                    max_per_term=3,
+                    sleep_s=0,
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("[US] term='biodiversity'", output)
+        self.assertIn("candidates=1", output)
+        self.assertIn("DONE -> kept=1", output)
+        self.assertIn("[US] total rows kept: 1", output)
+
+    def test_fetch_us_documents_verbose_false_suppresses_output(self) -> None:
+        class _FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {"data": []}
+
+        stdout = StringIO()
+        with patch.object(non_eu, "safe_get", return_value=_FakeResponse()):
+            with redirect_stdout(stdout):
+                non_eu.fetch_us_documents(
+                    ["biodiversity"],
+                    api_key="test-key",
+                    max_per_term=3,
+                    sleep_s=0,
+                    verbose=False,
+                )
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_fetch_us_documents_logs_non_200_status_and_stops_term(self) -> None:
+        class _FakeResponse:
+            status_code = 503
+
+        stdout = StringIO()
+        with patch.object(non_eu, "safe_get", return_value=_FakeResponse()):
+            with redirect_stdout(stdout):
+                df = non_eu.fetch_us_documents(
+                    ["biodiversity"],
+                    api_key="test-key",
+                    max_per_term=3,
+                    sleep_s=0,
+                )
+
+        self.assertIn("term='biodiversity' page=1 ERROR -> HTTP 503", stdout.getvalue())
+        self.assertEqual(len(df), 0)
 
     def test_fetch_us_documents_falls_back_to_id_based_url_when_links_self_missing(self) -> None:
         # Regression test: a real production run found regulations.gov's search

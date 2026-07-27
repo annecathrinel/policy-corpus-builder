@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
@@ -79,6 +81,44 @@ class NonEUUkRetrievalTests(unittest.TestCase):
             df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=1)
 
         self.assertEqual(len(df), 1)
+
+    def test_fetch_uk_documents_prints_progress_diagnostics_by_default(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, UK_SEARCH_HTML)),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10)
+
+        output = stdout.getvalue()
+        self.assertIn("[UK] term='biodiversity'", output)
+        self.assertIn("candidates=2", output)
+        self.assertIn("DONE -> kept=2", output)
+        self.assertIn("[UK] total rows kept: 2", output)
+
+    def test_fetch_uk_documents_verbose_false_suppresses_output(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, UK_SEARCH_HTML)),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10, verbose=False)
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_fetch_uk_documents_logs_non_200_status_and_stops_term(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(503, "")),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            df = non_eu.fetch_uk_documents(["biodiversity"], max_per_term=10)
+
+        self.assertIn("term='biodiversity' page=1 ERROR -> HTTP 503", stdout.getvalue())
+        self.assertEqual(len(df), 0)
 
     def test_get_url_candidates_for_uk_tries_multiple_content_variants(self) -> None:
         candidates = non_eu.get_url_candidates(

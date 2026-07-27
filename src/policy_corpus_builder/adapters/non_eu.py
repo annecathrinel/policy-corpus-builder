@@ -716,22 +716,36 @@ def fetch_uk_documents(
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     sess = session or build_session()
     verify = certifi.where() if verify is None else verify
     link_re = re.compile(r"^/(" + "|".join(map(re.escape, UK_DATASETS)) + r")/\d{4}/\d+", re.I)
     rows: list[dict] = []
+    if verbose:
+        print("\n========== UK retrieval ==========")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
     for term in search_terms:
         kept = 0
         page = 1
         seen_urls: set[str] = set()
+        if verbose:
+            print(f"\n[UK] term='{term}' START")
         while kept < max_per_term:
             q = f'"{term}"' if " " in term else term
             url = f"{UK_BASE}/all?text={quote(q)}"
             if page > 1:
                 url += f"&page={page}"
+            if verbose:
+                print(f"[UK] term='{term}' page={page} -> {url}")
             response = safe_get(url, session=sess, verify=verify, verbose_err=False)
-            if response is None or response.status_code != 200:
+            if response is None:
+                if verbose:
+                    print(f"[UK] term='{term}' page={page} ERROR -> request failed; stopping this term")
+                break
+            if response.status_code != 200:
+                if verbose:
+                    print(f"[UK] term='{term}' page={page} ERROR -> HTTP {response.status_code}; stopping this term")
                 break
             soup = BeautifulSoup(response.text, "html.parser")
             page_urls = [
@@ -741,9 +755,13 @@ def fetch_uk_documents(
             ]
             page_urls = list(dict.fromkeys(page_urls))
             if not page_urls:
+                if verbose:
+                    print(f"[UK] term='{term}' page={page} -> no candidates; stopping")
                 break
             new_urls = [item for item in page_urls if item not in seen_urls]
             if not new_urls:
+                if verbose:
+                    print(f"[UK] term='{term}' page={page} -> no new urls (all duplicates); stopping")
                 break
             for doc_url in new_urls:
                 if kept >= max_per_term:
@@ -761,8 +779,14 @@ def fetch_uk_documents(
                     }
                 )
                 kept += 1
+            if verbose:
+                print(f"[UK] term='{term}' page={page} -> candidates={len(page_urls)} new_kept={len(new_urls)} kept_total={kept}")
             page += 1
             time.sleep(sleep_s)
+        if verbose:
+            print(f"[UK] term='{term}' DONE -> kept={kept}")
+    if verbose:
+        print(f"\n[UK] total rows kept: {len(rows)}")
     return _normalize_raw_rows(rows)
 
 
@@ -773,14 +797,29 @@ def fetch_aus_documents(
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     sess = session or build_session()
     verify = certifi.where() if verify is None else verify
     href_re = re.compile(r"^/(?:C|F)\d{4}[A-Z]\d{5}(?:/(?:asmade|latest|compilation|made|repealed|superseded))?$", re.I)
     rows: list[dict] = []
+    if verbose:
+        print("\n========== AUS retrieval ==========")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print("[AUS] note: search results are a single unpaginated page per term; every")
+        print("[AUS] term below is queried exactly once as an exact-phrase match.")
     for term in search_terms:
-        response = safe_get(build_aus_search_url(term), session=sess, verify=verify, verbose_err=False)
-        if response is None or response.status_code != 200:
+        request_url = build_aus_search_url(term)
+        if verbose:
+            print(f"\n[AUS] term='{term}' -> {request_url}")
+        response = safe_get(request_url, session=sess, verify=verify, verbose_err=False)
+        if response is None:
+            if verbose:
+                print(f"[AUS] term='{term}' ERROR -> request failed; skipping this term")
+            continue
+        if response.status_code != 200:
+            if verbose:
+                print(f"[AUS] term='{term}' ERROR -> HTTP {response.status_code}; skipping this term")
             continue
         soup = BeautifulSoup(response.text, "html.parser")
         candidates = [
@@ -788,8 +827,11 @@ def fetch_aus_documents(
             for anchor in soup.find_all("a", href=True)
             if href_re.match(anchor["href"].strip())
         ]
+        deduped = list(dict.fromkeys(candidates))
+        if verbose:
+            print(f"[AUS] term='{term}' status={response.status_code} -> candidates={len(deduped)}")
         kept = 0
-        for href, title in list(dict.fromkeys(candidates)):
+        for href, title in deduped:
             if kept >= max_per_term:
                 break
             doc_url = urljoin(AUS_BASE, href)
@@ -806,7 +848,11 @@ def fetch_aus_documents(
                 }
             )
             kept += 1
+        if verbose:
+            print(f"[AUS] term='{term}' DONE -> kept={kept}")
         time.sleep(sleep_s)
+    if verbose:
+        print(f"\n[AUS] total rows kept: {len(rows)}")
     return _normalize_raw_rows(rows)
 
 
@@ -921,26 +967,45 @@ def fetch_canada_documents_justice_dep(
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify_ssl_with_certifi: bool = True,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     sess = session or build_session()
     verify = certifi.where() if verify_ssl_with_certifi else True
     rows: list[dict] = []
 
+    if verbose:
+        print("\n========== CA retrieval ==========")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | max_pages: {max_pages}")
+
     for term in search_terms:
         kept = 0
         seen_keys: set[tuple[str, str]] = set()
+        if verbose:
+            print(f"\n[CA] term='{term}' START")
 
         for page in range(1, max_pages + 1):
             if kept >= max_per_term:
+                if verbose:
+                    print(f"[CA] term='{term}' reached max_per_term={max_per_term}; stopping")
                 break
 
             url = build_canada_laws_search_url(term, page=page, content_type="All")
+            if verbose:
+                print(f"[CA] term='{term}' page={page} -> {url}")
             response = safe_get(url, session=sess, verify=verify, verbose_err=False)
-            if response is None or response.status_code != 200:
+            if response is None:
+                if verbose:
+                    print(f"[CA] term='{term}' page={page} ERROR -> request failed; stopping this term")
+                break
+            if response.status_code != 200:
+                if verbose:
+                    print(f"[CA] term='{term}' page={page} ERROR -> HTTP {response.status_code}; stopping this term")
                 break
 
             page_candidates = _extract_canada_laws_result_links(response.text)
             if not page_candidates:
+                if verbose:
+                    print(f"[CA] term='{term}' page={page} -> no candidates; stopping")
                 break
 
             new_candidates = []
@@ -950,6 +1015,8 @@ def fetch_canada_documents_justice_dep(
                     new_candidates.append((result_url, canonical_url, title))
 
             if not new_candidates:
+                if verbose:
+                    print(f"[CA] term='{term}' page={page} -> no new candidates (all duplicates); stopping")
                 break
 
             for result_url, canonical_url, title in new_candidates:
@@ -976,7 +1043,16 @@ def fetch_canada_documents_justice_dep(
                 )
                 kept += 1
 
+            if verbose:
+                print(f"[CA] term='{term}' page={page} -> candidates={len(page_candidates)} new_kept={len(new_candidates)} kept_total={kept}")
+
             time.sleep(sleep_s)
+
+        if verbose:
+            print(f"[CA] term='{term}' DONE -> kept={kept}")
+
+    if verbose:
+        print(f"\n[CA] total rows kept: {len(rows)}")
 
     return _normalize_raw_rows(rows)
 
@@ -1181,29 +1257,47 @@ def fetch_us_documents(
     page_size: int = 250,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     api_key = api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
     if not api_key:
         raise RuntimeError("US live retrieval requires REGULATIONS_GOV_API_KEY or api_key.")
     sess = session or build_session()
     rows: list[dict] = []
+    if verbose:
+        print("\n========== US retrieval ==========")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | page_size: {page_size}")
     for term in search_terms:
         kept = 0
         page = 1
+        if verbose:
+            print(f"\n[US] term='{term}' START")
         while kept < max_per_term:
             request_page_size = max(5, min(page_size, max_per_term - kept))
+            search_term = f'"{term}"' if " " in term else term
             params = {
-                "filter[searchTerm]": f'"{term}"' if " " in term else term,
+                "filter[searchTerm]": search_term,
                 "page[size]": request_page_size,
                 "page[number]": page,
                 "api_key": api_key,
             }
+            if verbose:
+                print(f"[US] term='{term}' page={page} -> filter[searchTerm]={search_term!r} page[size]={request_page_size}")
             response = safe_get(f"{US_BASE}/documents", session=sess, params=params, verbose_err=False)
-            if response is None or response.status_code != 200:
+            if response is None:
+                if verbose:
+                    print(f"[US] term='{term}' page={page} ERROR -> request failed; stopping this term")
+                break
+            if response.status_code != 200:
+                if verbose:
+                    print(f"[US] term='{term}' page={page} ERROR -> HTTP {response.status_code}; stopping this term")
                 break
             data = (response.json() or {}).get("data", []) or []
             if not data:
+                if verbose:
+                    print(f"[US] term='{term}' page={page} -> no candidates; stopping")
                 break
+            page_kept = 0
             for item in data:
                 if kept >= max_per_term:
                     break
@@ -1234,8 +1328,15 @@ def fetch_us_documents(
                     }
                 )
                 kept += 1
+                page_kept += 1
+            if verbose:
+                print(f"[US] term='{term}' page={page} -> candidates={len(data)} new_kept={page_kept} kept_total={kept}")
             page += 1
             time.sleep(sleep_s)
+        if verbose:
+            print(f"[US] term='{term}' DONE -> kept={kept}")
+    if verbose:
+        print(f"\n[US] total rows kept: {len(rows)}")
     return _normalize_raw_rows(rows)
 
 

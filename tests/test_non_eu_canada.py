@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -110,6 +112,53 @@ class NonEUCanadaTests(unittest.TestCase):
             df = non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=1)
 
         self.assertEqual(len(df), 1)
+
+    def test_fetch_canada_documents_justice_dep_prints_progress_diagnostics_by_default(self) -> None:
+        empty_page_html = "<html><body></body></html>"
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            if "h1dd3nPag3Num=1" in url:
+                return _FakeResponse(200, CANADA_LAWS_SEARCH_HTML)
+            if "h1dd3nPag3Num=2" in url:
+                return _FakeResponse(200, empty_page_html)
+            raise AssertionError(f"unexpected URL: {url}")
+
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=10)
+
+        output = stdout.getvalue()
+        self.assertIn("[CA] term='biodiversity'", output)
+        self.assertIn("candidates=4", output)
+        self.assertIn("DONE -> kept=4", output)
+        self.assertIn("[CA] total rows kept: 4", output)
+
+    def test_fetch_canada_documents_justice_dep_verbose_false_suppresses_output(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_LAWS_SEARCH_HTML)),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=1, verbose=False)
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_fetch_canada_documents_justice_dep_logs_non_200_status_and_stops_term(self) -> None:
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse(503, "")),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            df = non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=10)
+
+        self.assertIn("term='biodiversity' page=1 ERROR -> HTTP 503", stdout.getvalue())
+        self.assertEqual(len(df), 0)
 
     def test_clean_canada_laws_doc_id_extracts_act_and_regulation_keys(self) -> None:
         self.assertEqual(
