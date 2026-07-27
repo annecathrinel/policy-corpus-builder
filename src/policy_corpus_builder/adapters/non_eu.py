@@ -1282,7 +1282,27 @@ def fetch_us_documents(
     api_key = api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
     if not api_key:
         raise RuntimeError("US live retrieval requires REGULATIONS_GOV_API_KEY or api_key.")
-    sess = session or build_session()
+    # regulations.gov's API is well known for tight rate limits, and this
+    # loop below is fully sequential (one term, one page, at a time) rather
+    # than parallelized like the full-text fetch stage - so every single
+    # rate-limited (429) request pays whatever retry cost the session's
+    # transport adapter incurs, one after another, with nothing else able
+    # to make progress in the meantime. build_session()'s default retry
+    # policy (total_retries=6, backoff_factor=1.0, 429 included in
+    # status_forcelist) is tuned as a generic "be persistent" default, but
+    # applied here it lets urllib3's *own* internal retry/backoff run
+    # silently inside a single sess.get() call - each fully-exhausted retry
+    # cycle can take upwards of a minute (roughly 1+2+4+8+16+32s of sleep
+    # between the 6 attempts) before this loop even sees a response back,
+    # with no diagnostic output explaining the delay since it never
+    # surfaces above the transport layer. Across many search terms this
+    # compounds into a run that looks hung rather than just slow. A much
+    # lighter, bounded retry budget here trades a bit of resilience to
+    # truly transient errors for keeping each blocked request's cost small
+    # enough that this loop - and the diagnostic prints below, which DO
+    # distinguish a 429 - stays informative rather than silent for minutes
+    # at a time.
+    sess = session or build_session(total_retries=2, backoff_factor=0.5)
     rows: list[dict] = []
     if verbose:
         print("\n========== US retrieval ==========")
@@ -1307,6 +1327,13 @@ def fetch_us_documents(
             if response is None:
                 if verbose:
                     print(f"[US] term='{term}' page={page} ERROR -> request failed; stopping this term")
+                break
+            if response.status_code == 429:
+                if verbose:
+                    print(
+                        f"[US] term='{term}' page={page} ERROR -> HTTP 429 (rate limited by "
+                        "regulations.gov); stopping this term"
+                    )
                 break
             if response.status_code != 200:
                 if verbose:

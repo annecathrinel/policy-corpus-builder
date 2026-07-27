@@ -132,6 +132,95 @@ class USNonEUWorkflowTests(unittest.TestCase):
         self.assertIn("term='biodiversity' page=1 ERROR -> HTTP 503", stdout.getvalue())
         self.assertEqual(len(df), 0)
 
+    def test_fetch_us_documents_logs_a_distinct_message_for_rate_limiting(self) -> None:
+        # Regression test: a 429 from regulations.gov was previously
+        # reported as an undifferentiated "ERROR -> HTTP 429" alongside any
+        # other non-200 status, with no indication it was rate limiting
+        # specifically (as opposed to, say, a real server error) - and,
+        # worse, urllib3's own retry/backoff inside the session's transport
+        # adapter could silently eat up to roughly a minute per request
+        # before this loop ever saw the 429 at all (see
+        # test_fetch_us_documents_builds_a_lighter_retry_session_by_default).
+        class _FakeResponse:
+            status_code = 429
+
+        stdout = StringIO()
+        with patch.object(non_eu, "safe_get", return_value=_FakeResponse()):
+            with redirect_stdout(stdout):
+                df = non_eu.fetch_us_documents(
+                    ["biodiversity"],
+                    api_key="test-key",
+                    max_per_term=3,
+                    sleep_s=0,
+                )
+
+        self.assertIn("term='biodiversity' page=1 ERROR -> HTTP 429 (rate limited by regulations.gov)", stdout.getvalue())
+        self.assertEqual(len(df), 0)
+
+    def test_fetch_us_documents_builds_a_lighter_retry_session_by_default(self) -> None:
+        # Regression test: build_session()'s default retry policy
+        # (total_retries=6, backoff_factor=1.0, 429 included in
+        # status_forcelist) is tuned as a generic "be persistent" default,
+        # but fetch_us_documents' search loop is fully sequential (one
+        # term, one page, at a time) - so every rate-limited request pays
+        # whatever retry cost the transport adapter incurs, silently,
+        # before this loop even sees a response. A production run
+        # consistent with regulations.gov rate limiting never saw its
+        # "Running jurisdiction: US" milestone appear at all. This asserts
+        # fetch_us_documents asks for a much lighter, bounded retry budget
+        # when it builds its own session (no session= passed in).
+        captured_kwargs: list[dict] = []
+
+        def _fake_build_session(**kwargs):
+            captured_kwargs.append(kwargs)
+            return non_eu.requests.Session()
+
+        class _FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {"data": []}
+
+        with (
+            patch.object(non_eu, "build_session", side_effect=_fake_build_session),
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse()),
+        ):
+            non_eu.fetch_us_documents(
+                ["biodiversity"],
+                api_key="test-key",
+                max_per_term=3,
+                sleep_s=0,
+                verbose=False,
+            )
+
+        self.assertEqual(len(captured_kwargs), 1)
+        self.assertEqual(captured_kwargs[0].get("total_retries"), 2)
+        self.assertEqual(captured_kwargs[0].get("backoff_factor"), 0.5)
+
+    def test_fetch_us_documents_does_not_build_a_session_when_one_is_provided(self) -> None:
+        class _FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {"data": []}
+
+        with (
+            patch.object(non_eu, "build_session") as mock_build_session,
+            patch.object(non_eu, "safe_get", return_value=_FakeResponse()),
+        ):
+            non_eu.fetch_us_documents(
+                ["biodiversity"],
+                api_key="test-key",
+                max_per_term=3,
+                sleep_s=0,
+                verbose=False,
+                session=non_eu.requests.Session(),
+            )
+
+        mock_build_session.assert_not_called()
+
     def test_fetch_us_documents_falls_back_to_id_based_url_when_links_self_missing(self) -> None:
         # Regression test: a real production run found regulations.gov's search
         # response omitting "links.self" for every single result (0/2023 full

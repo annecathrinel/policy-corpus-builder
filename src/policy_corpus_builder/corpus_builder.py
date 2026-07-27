@@ -882,7 +882,20 @@ def _resolve_jurisdiction_worker_count(
 
 
 def _emit_progress(message: str) -> None:
-    print(f"[policy-corpus-builder] {message}", flush=True)
+    # A timestamp on every line (not just a bare message) is what lets a
+    # multi-jurisdiction run's main log actually answer "did these
+    # jurisdictions run concurrently, or one after another?" - without it,
+    # a genuinely concurrent run where jurisdictions simply finish at very
+    # different real times (a fast NZ/CA search API vs. a WAF-blocked AUS
+    # or a rate-limited US, say) looks visually identical in the log to a
+    # falsely-serialized one: either way you just see one "Running
+    # jurisdiction X. Total hits: ..." line appear, then the next. A
+    # timestamp lets you check the actual wall-clock gap between two
+    # "Starting jurisdiction" lines (should be near-zero if launched
+    # concurrently) against the gap between two "Finished jurisdiction"
+    # lines (which reflects real per-jurisdiction runtime, not ordering).
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[policy-corpus-builder] {timestamp} {message}", flush=True)
 
 
 __all__ = [

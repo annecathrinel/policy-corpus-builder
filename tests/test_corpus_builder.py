@@ -18,6 +18,7 @@ from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (  # noq
     normalize_eligible_legal_act_celex,
     select_eligible_celex_acts,
 )
+from policy_corpus_builder import corpus_builder  # noqa: E402
 from policy_corpus_builder.corpus_builder import (  # noqa: E402
     CorpusBuildValidationError,
     build_policy_corpus,
@@ -1188,6 +1189,26 @@ class JurisdictionLogRoutingTests(unittest.TestCase):
             self.assertTrue(nim_log.exists())
             self.assertIn("[FAKE-NIM]", nim_log.read_text(encoding="utf-8"))
             self.assertEqual(result.jurisdiction_log_paths["NIM"], nim_log)
+
+
+class EmitProgressTimestampTests(unittest.TestCase):
+    # Regression coverage for a real observability gap: Cat reported that a
+    # multi-jurisdiction run's main log showed all "Starting jurisdiction"
+    # lines print immediately, but "Running jurisdiction ... Total hits"
+    # lines only trickle in one at a time - which looks identical whether
+    # jurisdictions are genuinely serializing or just genuinely concurrent
+    # with very different real durations (a fast API-backed jurisdiction vs.
+    # a WAF-blocked or rate-limited one). A timestamp on every line is what
+    # lets that be checked directly from a real run's log instead of guessed
+    # at from the ordering alone.
+    def test_emit_progress_prefixes_a_hh_mm_ss_timestamp(self) -> None:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            corpus_builder._emit_progress("Starting jurisdiction EU.")
+
+        output = stdout.getvalue()
+        self.assertIn("Starting jurisdiction EU.", output)
+        self.assertRegex(output, r"\[policy-corpus-builder\] \d{2}:\d{2}:\d{2} Starting jurisdiction EU\.")
 
 
 if __name__ == "__main__":
