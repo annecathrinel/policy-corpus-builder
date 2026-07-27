@@ -981,7 +981,7 @@ def fetch_nz_documents(
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
-    max_pages: int = 5,
+    max_pages: int = 20,
     user_agent: str | None = None,
     verbose: bool = True,
     return_diagnostics: bool = False,
