@@ -1310,7 +1310,7 @@ def fetch_nz_documents(
                 }
             )
             if verbose:
-                print(f"[NZ] term='{term}' page={page} -> candidates={len(candidates)} new_kept={new_kept} kept_total={kept}")
+                print(f"[NZ] term='{term}' page={page} -> candidates={len(page_rows)} new_kept={new_kept} kept_total={kept}")
             if kept >= max_per_term:
                 if verbose:
                     print(f"[NZ] term='{term}' reached max_per_term={max_per_term}; stopping")

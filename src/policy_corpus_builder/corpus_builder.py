@@ -478,10 +478,19 @@ def _run_jurisdiction(
             queries.extend(_build_inline_queries(translated_terms, origin="translated"))
         return _collect_normalized_documents(source, queries=queries, base_path=output_root)
 
+    non_eu_settings: dict[str, Any] = {"countries": [jurisdiction]}
+    if jurisdiction == "NZ":
+        # The non-eu adapter only accepts countries == ("NZ",) as a
+        # supported workflow when nz_mode == "api" (its default nz_mode is
+        # "auto", which it rejects for NZ specifically). Without this, every
+        # NZ build-corpus run fails validate_source_config regardless of
+        # whether an API key is configured.
+        non_eu_settings["nz_mode"] = "api"
+
     source = SourceConfig(
         name=f"{jurisdiction.lower()}-policy-source",
         adapter="non-eu",
-        settings={"countries": [jurisdiction]},
+        settings=non_eu_settings,
     )
     queries = _build_inline_queries(query_terms, origin="inline")
     return _collect_normalized_documents(source, queries=queries, base_path=output_root)

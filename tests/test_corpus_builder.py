@@ -892,6 +892,50 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertIn(("UK", "offshore wind"), tracker["non_eu_queries"])
             self.assertIn(("AUS", "offshore wind"), tracker["non_eu_queries"])
 
+    def test_run_jurisdiction_wires_nz_mode_api_only_for_new_zealand(self):
+        # Regression test: the non-eu adapter only accepts countries ==
+        # ("NZ",) as a supported workflow when nz_mode == "api" (its
+        # default is "auto", which it explicitly rejects for NZ). Without
+        # corpus_builder.py injecting nz_mode = "api" itself,
+        # build-corpus --jurisdictions NZ failed validation regardless of
+        # whether an API key was configured. Other jurisdictions must not
+        # get an nz_mode key at all.
+        captured_settings: dict[str, dict] = {}
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        class _SettingsCapturingNonEUAdapter(_FakeAdapter):
+            name = "non-eu"
+
+            def __init__(self, tracker):
+                self._tracker = tracker
+
+            def collect(self, source, query, *, base_path, loaded_source=None):
+                country = source.settings["countries"][0]
+                captured_settings[country] = dict(source.settings)
+                return _FakeNonEUAdapter(self._tracker).collect(
+                    source, query, base_path=base_path, loaded_source=loaded_source
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_SettingsCapturingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ", "UK"],
+                    outputs_path=output_root,
+                )
+
+        self.assertEqual(captured_settings["NZ"].get("nz_mode"), "api")
+        self.assertNotIn("nz_mode", captured_settings["UK"])
+
 
 if __name__ == "__main__":
     unittest.main()

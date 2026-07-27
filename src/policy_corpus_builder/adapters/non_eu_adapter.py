@@ -202,7 +202,11 @@ class NonEUAdapter:
 
     def _resolve_nz_api_key(self, settings: dict[str, Any]) -> str | None:
         env_name = self._resolve_nz_api_key_env(settings)
-        return os.getenv(env_name) or None
+        # NZ_API_KEY is accepted as a legacy/shorthand alias for the
+        # documented NZ_LEGISLATION_API_KEY variable (same pattern as
+        # EURLEX_WS_USER falling back to the legacy EURLEX_USER), so an
+        # existing .env that used the shorter name still works.
+        return os.getenv(env_name) or os.getenv("NZ_API_KEY") or None
 
     def _resolve_nz_mode(self, settings: dict[str, Any]) -> str:
         raw_value = settings.get("nz_mode", "auto")

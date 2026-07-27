@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
@@ -119,6 +121,31 @@ class NonEUNewZealandTests(unittest.TestCase):
             df["url"].iloc[0],
             "https://www.legislation.govt.nz/act/public/2024/12/en/latest/",
         )
+
+    def test_fetch_nz_documents_verbose_api_success_does_not_crash(self) -> None:
+        # Regression test: the per-page progress print on a successful API
+        # page referenced an undefined "candidates" variable (should have
+        # been "page_rows"), raising NameError on every real API success.
+        # This was invisible in tests and in production because NZ never
+        # had a working API key before, and the only other API-mode test
+        # passes verbose=False, which skips the buggy print entirely.
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            return _FakeResponse(200, json.dumps(NZ_API_PAYLOAD))
+
+        stdout = StringIO()
+        with patch.object(non_eu, "safe_get", side_effect=fake_safe_get):
+            with redirect_stdout(stdout):
+                df = non_eu.fetch_nz_documents(
+                    ["biodiversity"],
+                    api_key="nz-test-key",
+                    mode="api",
+                    max_per_term=5,
+                    # verbose defaults to True - this is the path that used
+                    # to crash.
+                )
+
+        self.assertEqual(len(df), 1)
+        self.assertIn("candidates=1", stdout.getvalue())
 
     def test_fetch_nz_documents_uses_legacy_scraper_fallback_when_no_api_key_in_auto_mode(self) -> None:
         legacy_html = """

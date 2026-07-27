@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -34,8 +35,23 @@ class NonEUOutputContractTests(unittest.TestCase):
             settings={"countries": ["NZ"], "nz_mode": "api"},
         )
 
-        with self.assertRaisesRegex(Exception, "New Zealand legislation API key"):
-            adapter.validate_source_config(source, base_path=Path("."))
+        # This test asserts behavior for a *missing* key, so it must not
+        # inherit a real key from the developer's own .env - importing
+        # policy_corpus_builder auto-loads that file's secrets into
+        # os.environ (see env.py's load_local_env), which is exactly what
+        # makes a real NZ_LEGISLATION_API_KEY/NZ_API_KEY in .env usable in
+        # production, but it means this test can't assume a clean
+        # environment.
+        original_primary = os.environ.pop("NZ_LEGISLATION_API_KEY", None)
+        original_alias = os.environ.pop("NZ_API_KEY", None)
+        try:
+            with self.assertRaisesRegex(Exception, "New Zealand legislation API key"):
+                adapter.validate_source_config(source, base_path=Path("."))
+        finally:
+            if original_primary is not None:
+                os.environ["NZ_LEGISLATION_API_KEY"] = original_primary
+            if original_alias is not None:
+                os.environ["NZ_API_KEY"] = original_alias
 
     def test_non_eu_adapter_rejects_nz_auto_mode_without_allow_internal(self) -> None:
         # Per docs/supported-surface.md, NZ is only a documented/supported workflow in
@@ -49,6 +65,47 @@ class NonEUOutputContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "New Zealand only in API mode"):
             adapter.validate_source_config(source, base_path=Path("."))
+
+    def test_non_eu_adapter_accepts_nz_mode_api_with_key_configured(self) -> None:
+        # This is exactly the settings shape corpus_builder.py's
+        # _run_jurisdiction constructs for jurisdiction == "NZ" - confirms
+        # the top-level build-corpus NZ workflow validates successfully
+        # once a key is configured, rather than only being reachable
+        # through hand-written source configs.
+        adapter = NonEUAdapter()
+        source = SourceConfig(
+            name="nz-legislation",
+            adapter="non-eu",
+            settings={"countries": ["NZ"], "nz_mode": "api"},
+        )
+
+        with patch.dict("os.environ", {"NZ_LEGISLATION_API_KEY": "nz-demo-key"}, clear=False):
+            adapter.validate_source_config(source, base_path=Path("."))
+
+    def test_non_eu_adapter_accepts_nz_api_key_as_alias_for_legislation_key(self) -> None:
+        # Regression test: .env.example documents NZ_LEGISLATION_API_KEY as
+        # the canonical variable, but a user's existing .env may already use
+        # the shorter NZ_API_KEY. The adapter accepts it as a fallback alias
+        # (mirroring the existing EURLEX_WS_USER/EURLEX_USER pattern) so
+        # that .env doesn't need to be edited.
+        adapter = NonEUAdapter()
+        source = SourceConfig(
+            name="nz-legislation",
+            adapter="non-eu",
+            settings={"countries": ["NZ"], "nz_mode": "api"},
+        )
+
+        original_primary = os.environ.pop("NZ_LEGISLATION_API_KEY", None)
+        try:
+            with patch.dict("os.environ", {"NZ_API_KEY": "nz-alias-key"}, clear=False):
+                adapter.validate_source_config(source, base_path=Path("."))
+                self.assertEqual(
+                    adapter._resolve_nz_api_key(source.settings),
+                    "nz-alias-key",
+                )
+        finally:
+            if original_primary is not None:
+                os.environ["NZ_LEGISLATION_API_KEY"] = original_primary
 
     def test_non_eu_adapter_allows_nz_auto_mode_with_allow_internal(self) -> None:
         adapter = NonEUAdapter()
