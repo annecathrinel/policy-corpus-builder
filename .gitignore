@@ -18,6 +18,8 @@ outputs/
 emb_cache/
 docs_df_cleaned/
 examples/outputs/
+examples/outputs*
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
@@ -46,5 +48,4 @@ docs_df_cleaned/
 !data/README.md
 !datasets/README.md
 
-/examples/outputs.stale.10151
-/examples/outputs.stale.28058
+
