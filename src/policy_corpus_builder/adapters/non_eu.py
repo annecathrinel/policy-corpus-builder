@@ -115,30 +115,31 @@ DEFAULT_HEADERS = _headers_for()
 UK_BASE = "https://www.legislation.gov.uk"
 UK_DATASETS = ("ukpga", "uksi", "ukla", "asp", "anaw", "wsi", "ssi", "nisr", "nisi", "ukdsi", "sdsi")
 AUS_BASE = "https://www.legislation.gov.au"
+# CA search/discovery targets publications.gc.ca's own search page directly
+# (Government of Canada Publications). An earlier version of this module
+# briefly searched laws-lois.justice.gc.ca (Justice Laws, acts/regulations
+# only) instead; that was reverted after a 2026-07-27 smoke test found every
+# search term - including nonsense terms with no plausible real hits -
+# returning the exact same 7 URLs, all of them laws-lois's own standing
+# navigation/help chrome rather than real results. publications.gc.ca is
+# the originally-verified working base, per a preserved earlier copy of
+# this module.
 CA_BASE = "https://www.publications.gc.ca"
-CA_LAWS_BASE = "https://laws-lois.justice.gc.ca"
 NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 
-# A 2026-07-27 CA smoke test found every single search term - including
-# nonsense terms like "reef ball" and "cod hotel" that have no plausible
-# real hits - returning the exact same 7 URLs: /eng, /eng/FAQ,
-# /eng/SearchHelp, /eng/const-index.html, /eng/help-index.html,
-# /eng/laws-index.html, /eng/res-index.html. None of those are actual
-# acts or regulations; they're the site's standard navigation/help chrome
-# that appears on every page (search results or not). The previous regex
-# (r"^/(eng|fra)/") matched literally any link under the site's language
-# prefix, so it was scooping up that boilerplate nav as if each link were
-# a real search hit, on every single search regardless of whether the
-# search itself returned anything. laws-lois.justice.gc.ca's own scope is
-# specifically "Consolidated Acts and Regulations" (its own page title
-# confirms this), so a real result should always sit under
-# /eng/acts/... or /eng/regulations/... (or /fra/ equivalents) - the same
-# assumption is_canada_laws_legislation_url already makes. Restricting
-# the initial candidate match to that shape means known non-result nav
-# pages can no longer be mistaken for hits, regardless of whether the
-# underlying search request itself is working.
-_CA_LAWS_RESULT_RE = re.compile(r"^/(eng|fra)/(acts|regulations)/", re.IGNORECASE)
+# publications.gc.ca's own search results page always sits under /site/eng/
+# (or /site/fra/), and the search page itself, its home page, and its
+# browse/help pages also happen to sit under /site/eng/ - so unlike AUS/UK/
+# NZ, "is this URL under the right path prefix" isn't enough on its own to
+# tell a real result apart from site chrome. _CA_PUBLICATIONS_SKIP_PATH_RE
+# excludes the known non-result page shapes (home, browse index, the search
+# page itself); anything else under /site/eng/ or ending in .pdf is treated
+# as a candidate result, matching the shape confirmed working in an earlier
+# version of this module.
+_CA_PUBLICATIONS_SKIP_PATH_RE = re.compile(
+    r"/(home\.html|browse/index\.html|search/)", re.IGNORECASE
+)
 
 CANADA_SKIP_EXTS = {
     ".zip",
@@ -487,10 +488,6 @@ def clean_canada_doc_id(rec: dict, canonical_url_value: str = "") -> str:
             return f"{prefix}_{year}_{number}"
 
     parsed = urlparse(canonical_url_value or str(rec.get("url", "") or ""))
-    host = (parsed.netloc or "").lower()
-    if host.endswith("laws-lois.justice.gc.ca"):
-        return clean_canada_laws_doc_id(parsed.geturl())
-
     return _clean_path_identifier(parsed.path)
 
 def clean_title_from_fulltext_prefix(text: str) -> str:
@@ -927,114 +924,56 @@ def fetch_aus_documents(
     return _normalize_raw_rows(rows)
 
 
-def build_canada_laws_search_url(term: str, *, page: int = 1, content_type: str = "All") -> str:
-    q = quote(term.strip(), safe="")
-    return (
-        f"{CA_LAWS_BASE}/Search/Advanced.aspx"
-        f"?ddC0nt3ntTyp3={quote(content_type)}"
-        f"&txtS3arch3xact={q}"
-        f"&h1dd3nPag3Num={page}"
-        f"&h1ts0n1y=1"
-    )
+def build_canada_publications_search_url(term: str) -> str:
+    q = quote(f'"{term}"' if " " in term else term, safe="")
+    return f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&adof=on"
 
-def canonicalize_canada_laws_doc_url(url: str) -> str:
+
+def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]]:
     """
-    Collapse section/page/index/fulltext URLs back to the root act/regulation URL, e.g.
-    /eng/acts/O-2.4/section-2.html -> /eng/acts/O-2.4/
-    /eng/regulations/SOR-96-118/section-35.html -> /eng/regulations/SOR-96-118/
-    """
-    if not url:
-        return ""
-
-    parsed = urlparse(url)
-    if "laws-lois.justice.gc.ca" not in (parsed.netloc or "").lower():
-        return ""
-
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) < 3:
-        return ""
-
-    lang, doc_type, doc_key = parts[:3]
-    if lang.lower() not in {"eng", "fra"}:
-        return ""
-    if doc_type.lower() not in {"acts", "regulations"}:
-        return ""
-
-    return urlunparse(
-        ("https", parsed.netloc.lower(), f"/{lang}/{doc_type}/{doc_key}/", "", "", "")
-    )
-
-def clean_canada_laws_title(title: str) -> str:
-    text = _WS_RE.sub(" ", str(title or "").strip())
-    if not text:
-        return ""
-
-    # "Oceans Act - S.C. 1996, c. 31 (Section 39.68)" -> "Oceans Act"
-    text = re.sub(r"\s+-\s+(?:R\.S\.C\.|S\.C\.|C\.R\.C\.|SOR\b).*?$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+\(Section .*?\)\s*$", "", text, flags=re.IGNORECASE)
-    return text.strip(" -|:\n\t")
-
-def clean_canada_laws_doc_id(url: str) -> str:
-    parsed = urlparse(url)
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) >= 3 and parts[1].lower() in {"acts", "regulations"}:
-        return f"{parts[1].lower()}_{parts[2].lower()}".replace("%2c", "_").replace(".", "_").replace("-", "_")
-    return _clean_path_identifier(parsed.path)
-
-def _extract_canada_laws_result_links(html: str) -> list[tuple[str, str, str]]:
-    """
-    Returns tuples of:
-      (result_url, canonical_doc_url, title)
-
-    - result_url: the exact search-result target
-    - canonical_doc_url: root legislation URL if this is an act/regulation,
-      otherwise the result_url itself
-    - title: cleaned anchor text
+    Returns (doc_url, title) tuples for real publications.gc.ca search
+    results, filtering out the search page's own furniture (a link back to
+    itself, the site's home page, its browse index) - everything else
+    under /site/eng/ (or /site/fra/), plus any direct .pdf link, is treated
+    as a candidate. This is the same filter shape confirmed working in an
+    earlier version of this module, before CA search briefly (and
+    incorrectly) moved to laws-lois.justice.gc.ca.
     """
     soup = BeautifulSoup(html or "", "html.parser")
-    seen: set[tuple[str, str]] = set()
-    results: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    results: list[tuple[str, str]] = []
 
     for anchor in soup.find_all("a", href=True):
         href = str(anchor["href"]).strip()
-        if not href:
+        if not href or "search/search.html" in href:
             continue
 
-        full = urljoin(CA_LAWS_BASE, href)
-        parsed = urlparse(full)
-        if "laws-lois.justice.gc.ca" not in (parsed.netloc or "").lower():
-            continue
-        if not _CA_LAWS_RESULT_RE.match(parsed.path):
+        full = urljoin(CA_BASE, href).split("#", 1)[0]
+        if "publications.gc.ca" not in full.lower():
             continue
 
-        title = clean_canada_laws_title(anchor.get_text(" ", strip=True))
-        if not title:
+        path = urlparse(full).path
+        if _CA_PUBLICATIONS_SKIP_PATH_RE.search(path):
             continue
 
-        if is_canada_laws_legislation_url(full):
-            canonical = canonicalize_canada_laws_doc_url(full) or full
-        else:
-            canonical = full.split("#", 1)[0]
-
-        key = (full.split("#", 1)[0], canonical)
-        if key in seen:
+        lower = full.lower()
+        if not (lower.endswith(".pdf") or "/site/eng/" in lower or "/site/fra/" in lower):
             continue
-        seen.add(key)
 
-        results.append((full.split("#", 1)[0], canonical, title))
+        if full in seen:
+            continue
+        seen.add(full)
+
+        title = clean_canada_title(anchor.get_text(" ", strip=True))
+        results.append((full, title))
 
     return results
 
-def is_canada_laws_legislation_url(url: str) -> bool:
-    parsed = urlparse(str(url or ""))
-    parts = [p for p in parsed.path.split("/") if p]
-    return len(parts) >= 3 and parts[0].lower() in {"eng", "fra"} and parts[1].lower() in {"acts", "regulations"}
 
-def fetch_canada_documents_justice_dep(
+def fetch_canada_documents(
     search_terms: list[str],
     *,
     max_per_term: int = 500,
-    max_pages: int = 20,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify_ssl_with_certifi: bool = True,
@@ -1046,98 +985,52 @@ def fetch_canada_documents_justice_dep(
 
     if verbose:
         print("\n========== CA retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | max_pages: {max_pages}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print("[CA] note: publications.gc.ca's search results are a single")
+        print("[CA] unpaginated page per term, same as AUS.")
 
     for term in search_terms:
-        kept = 0
-        seen_keys: set[tuple[str, str]] = set()
+        request_url = build_canada_publications_search_url(term)
         if verbose:
-            print(f"\n[CA] term='{term}' START")
+            print(f"\n[CA] term='{term}' -> {request_url}")
+        response = safe_get(request_url, session=sess, verify=verify, verbose_err=False)
+        if response is None:
+            if verbose:
+                print(f"[CA] term='{term}' ERROR -> request failed; skipping this term")
+            continue
+        if response.status_code != 200:
+            if verbose:
+                print(f"[CA] term='{term}' ERROR -> HTTP {response.status_code}; skipping this term")
+            continue
 
-        for page in range(1, max_pages + 1):
+        candidates = _extract_canada_publications_result_links(response.text)
+        if verbose:
+            print(f"[CA] term='{term}' status={response.status_code} -> candidates={len(candidates)}")
+
+        kept = 0
+        for doc_url, title in candidates:
             if kept >= max_per_term:
-                if verbose:
-                    print(f"[CA] term='{term}' reached max_per_term={max_per_term}; stopping")
                 break
-
-            url = build_canada_laws_search_url(term, page=page, content_type="All")
-            if verbose:
-                print(f"[CA] term='{term}' page={page} -> {url}")
-            response = safe_get(url, session=sess, verify=verify, verbose_err=False)
-            if response is None:
-                if verbose:
-                    print(f"[CA] term='{term}' page={page} ERROR -> request failed; stopping this term")
-                break
-            if response.status_code != 200:
-                if verbose:
-                    print(f"[CA] term='{term}' page={page} ERROR -> HTTP {response.status_code}; stopping this term")
-                break
-
-            page_candidates = _extract_canada_laws_result_links(response.text)
-            if not page_candidates:
-                if verbose:
-                    print(f"[CA] term='{term}' page={page} -> no candidates; stopping")
-                break
-
-            new_candidates = []
-            for result_url, canonical_url, title in page_candidates:
-                key = (result_url, canonical_url)
-                if key not in seen_keys:
-                    new_candidates.append((result_url, canonical_url, title))
-
-            if not new_candidates:
-                if verbose:
-                    print(f"[CA] term='{term}' page={page} -> no new candidates (all duplicates); stopping")
-                break
-
-            for result_url, canonical_url, title in new_candidates:
-                if kept >= max_per_term:
-                    break
-
-                seen_keys.add((result_url, canonical_url))
-
-                doc_url = canonical_url
-                doc_id_source = canonical_url if is_canada_laws_legislation_url(canonical_url) else result_url
-
-                rows.append(
-                    {
-                        "jurisdiction": "Canada",
-                        "source": "CA",
-                        "matched_term": term,
-                        "term": term,
-                        "doc_url": doc_url,
-                        "url": doc_url,
-                        "result_url": result_url,
-                        "title": title,
-                        "doc_uid": clean_canada_laws_doc_id(doc_id_source),
-                    }
-                )
-                kept += 1
-
-            if verbose:
-                print(f"[CA] term='{term}' page={page} -> candidates={len(page_candidates)} new_kept={len(new_candidates)} kept_total={kept}")
-
-            time.sleep(sleep_s)
-
+            rows.append(
+                {
+                    "jurisdiction": "Canada",
+                    "source": "CA",
+                    "matched_term": term,
+                    "term": term,
+                    "doc_url": doc_url,
+                    "url": doc_url,
+                    "title": title,
+                }
+            )
+            kept += 1
         if verbose:
             print(f"[CA] term='{term}' DONE -> kept={kept}")
+        time.sleep(sleep_s)
 
     if verbose:
         print(f"\n[CA] total rows kept: {len(rows)}")
 
     return _normalize_raw_rows(rows)
-
-def clean_canada_laws_doc_id(url: str) -> str:
-    parsed = urlparse(str(url or ""))
-    host = (parsed.netloc or "").lower()
-    parts = [p for p in parsed.path.strip("/").split("/") if p]
-
-    if host.endswith("laws-lois.justice.gc.ca") and len(parts) >= 3:
-        if parts[1].lower() in {"acts", "regulations"}:
-            key = parts[2].lower().replace(".", "_").replace("-", "_")
-            return f"{parts[1].lower()}_{key}"
-
-    return _clean_path_identifier(parsed.path)
 
 def fetch_nz_documents(
     search_terms: list[str],
@@ -1435,7 +1328,7 @@ def fetch_non_eu_all(
             verify=verify_default,
             user_agent=user_agent,
         ),
-        "CA": lambda: fetch_canada_documents_justice_dep(search_terms, max_per_term=max_per_term, session=session),
+        "CA": lambda: fetch_canada_documents(search_terms, max_per_term=max_per_term, session=session),
         "US": lambda: fetch_us_documents(search_terms, api_key=us_api_key, max_per_term=max_per_term, session=session),
     }
     country_labels = {"UK": "United Kingdom", "AUS": "Australia", "NZ": "New Zealand", "CA": "Canada", "US": "United States"}
@@ -1880,15 +1773,7 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
         if not url:
             return []
 
-        host = (urlparse(url).netloc or "").lower()
         lower = url.lower()
-
-        if host.endswith("laws-lois.justice.gc.ca"):
-            root = canonicalize_canada_laws_doc_url(url) or url
-            return [
-                (root.rstrip("/") + "/FullText.html", "ca_laws_html"),
-                (root, "ca_laws_root"),
-            ]
 
         if lower.endswith("/publication.html"):
             return [(url, "ca_publication")]
@@ -2058,74 +1943,6 @@ def _fix_common_mojibake(text: str) -> str:
         out = out.replace(bad, good)
     return out
 
-def clean_canada_laws_text(text: str, *, title: str = "") -> str:
-    cleaned = str(text or "")
-    cleaned = unescape(cleaned)
-    cleaned = cleaned.replace("\xa0", " ")
-    cleaned = _fix_common_mojibake(cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    # Remove obvious Justice Laws / Canada header clutter.
-    header_patterns = [
-        r"^.*?Skip to main content",
-        r'Skip to "About government"',
-        r"Switch to basic HTML version",
-        r"Language selection Français",
-        r"Search Search Canada\.ca Search Menu Main Menu",
-        r"You are here:\s*Canada\.ca Department of Justice Laws Home Legislation",
-        r"Consolidated Acts",
-        r"Consolidated Regulations",
-        r"Previous Versions",
-        r"Full Document:\s*HTML Full Document:.*?(?=Act current to|Regulation current to|Table of Contents)",
-    ]
-    for pattern in header_patterns:
-        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
-
-    # If we know the title, trim to the *body* occurrence of the title,
-    # not the header/menu occurrence.
-    if title:
-        title_clean = re.sub(r"\s+", " ", str(title).strip())
-        if title_clean:
-            occurrences = [m.start() for m in re.finditer(re.escape(title_clean), cleaned, flags=re.IGNORECASE)]
-            chosen_start = None
-
-            for pos in occurrences:
-                if pos < 50:
-                    continue
-                window = cleaned[pos : pos + 1500]
-                if re.search(
-                    r"\b(Assented to|Preamble|An Act\b|Short Title|Interpretation|PART I|Marginal note:)\b",
-                    window,
-                    flags=re.IGNORECASE,
-                ):
-                    chosen_start = pos
-                    break
-
-            # fallback: first title occurrence after the initial header block
-            if chosen_start is None:
-                later = [pos for pos in occurrences if pos > 200]
-                if later:
-                    chosen_start = later[0]
-
-            if chosen_start is not None:
-                cleaned = cleaned[chosen_start:].strip()
-
-    # Remove table-of-contents block if it still remains before the actual body.
-    toc_match = re.search(r"\bTable of Contents\b", cleaned, flags=re.IGNORECASE)
-    if toc_match:
-        after_toc = cleaned[toc_match.end():]
-        body_match = re.search(
-            r"\b(Assented to|Preamble|An Act\b|Short Title|Interpretation|PART I|Marginal note:)\b",
-            after_toc,
-            flags=re.IGNORECASE,
-        )
-        if body_match:
-            cleaned = after_toc[body_match.start():].strip()
-
-    # Final whitespace cleanup.
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
 def enrich_one_record_fulltext(
     rec: dict,
     *,
@@ -2210,30 +2027,6 @@ def enrich_one_record_fulltext(
                     return out
                 last_err = "html_empty"
                 continue
-            if mode == "ca_laws_html":
-                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
-                response.raise_for_status()
-                text = clean_canada_laws_text(html_to_visible_text(response.text), title=str(out.get("title", "") or ""),)
-                if text:
-                    out["full_text"] = text
-                    out["full_text_url"] = candidate_url
-                    out["full_text_format"] = "html"
-                    out["full_text_error"] = ""
-                    return out
-                last_err = "canada_laws_html_empty"
-                continue
-            if mode == "ca_laws_root":
-                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
-                response.raise_for_status()
-                text = clean_canada_laws_text(html_to_visible_text(response.text), title=str(out.get("title", "") or ""),)
-                if text:
-                    out["full_text"] = text
-                    out["full_text_url"] = candidate_url
-                    out["full_text_format"] = "html"
-                    out["full_text_error"] = ""
-                    return out
-                last_err = "canada_laws_root_empty"
-                continue        
             if mode == "pdf":
                 response = _get_with_waf_retry(
                     session, candidate_url, headers=request_headers, timeout=timeout,

@@ -34,7 +34,7 @@ Notes:
 - `eu_nim.toml` is a live network example and requires `EURLEX_WS_USER` and `EURLEX_WS_PASS`. `EURLEX_USER` and `EURLEX_WEB_PASS` are accepted as compatibility aliases.
 - The bundled US example query inventory is chosen to demonstrate file-backed Regulations.gov results rather than metadata-only fallback.
 - The supported non-EU workflows are UK, Canada, Australia, US, and New Zealand API mode through the `non-eu` adapter.
-- The Canada workflow now prefers the Open Government / CKAN API for discovery and resource metadata, and only falls back to `publications.gc.ca` landing-page extraction when needed.
+- The Canada workflow discovers documents by searching `publications.gc.ca`'s own search page directly, then retrieves full text from the resulting landing page or direct PDF link.
 - The UK workflow should be treated as discovery/metadata-supported first. It prefers the official `legislation.gov.uk` API for full text, but exported records may still have empty `full_text` when upstream access is challenged.
 - The New Zealand workflow prefers the official `api.legislation.govt.nz` API for discovery. Without an API key it can still fall back to the older scraper path, but that fallback is provisional and outside the supported surface.
 - A UK run can still be successful without full text. In that case, check `raw_metadata.raw_record.full_text_error` and `retrieval_status` in the exported JSONL.
