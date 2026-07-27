@@ -1666,6 +1666,81 @@ def _is_waf_challenge_response(response: requests.Response | None) -> bool:
     return response.status_code == 202 or waf_action == "challenge"
 
 
+# Hosts that run rate-based bot/WAF detection aggressive enough to challenge
+# a meaningful fraction of full-text fetch requests (observed: a 2026-07 NZ
+# smoke test got waf_challenge on 92/97 documents). A minimum interval
+# between requests to the same host - enforced across all concurrent
+# full-text fetch worker threads, not just within one - reduces the chance
+# that a burst of concurrent requests trips a rate-based challenge in the
+# first place.
+_WAF_PRONE_HOST_MIN_INTERVAL_S = {
+    "www.legislation.govt.nz": 1.5,
+    "www.legislation.gov.uk": 1.5,
+}
+_host_throttle_locks_guard = threading.Lock()
+_host_throttle_locks: dict[str, threading.Lock] = {}
+_host_last_request_monotonic: dict[str, float] = {}
+
+
+def _get_host_throttle_lock(host: str) -> threading.Lock:
+    with _host_throttle_locks_guard:
+        lock = _host_throttle_locks.get(host)
+        if lock is None:
+            lock = threading.Lock()
+            _host_throttle_locks[host] = lock
+        return lock
+
+
+def _throttle_host_request(url: str) -> None:
+    """Pace requests to WAF-prone hosts so concurrent workers don't burst them.
+
+    A no-op for any host not listed in _WAF_PRONE_HOST_MIN_INTERVAL_S.
+    """
+    host = (urlparse(url).netloc or "").lower()
+    min_interval = _WAF_PRONE_HOST_MIN_INTERVAL_S.get(host)
+    if not min_interval:
+        return
+    lock = _get_host_throttle_lock(host)
+    with lock:
+        now = time.monotonic()
+        elapsed = now - _host_last_request_monotonic.get(host, 0.0)
+        remaining = min_interval - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        _host_last_request_monotonic[host] = time.monotonic()
+
+
+def _get_with_waf_retry(
+    session: requests.Session,
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+    max_retries: int = 2,
+    backoff_factor: float = 4.0,
+) -> requests.Response:
+    """GET url, retrying with backoff if the response is a WAF challenge.
+
+    Mirrors the fix already applied to EUR-Lex NIM full-text fetches: an
+    HTTP 202 there meant "still generating, try again shortly" and a
+    bounded retry resolved it. AWS WAF's challenge action can behave
+    similarly for rate-based rules, resolving on its own after a short
+    pause - but unlike EUR-Lex this is unverified against the real site, so
+    this is a bounded, cheap-to-attempt mitigation rather than a confirmed
+    fix. Always paces requests to WAF-prone hosts first via
+    _throttle_host_request, including before the first attempt.
+    """
+    response: requests.Response | None = None
+    for attempt in range(max_retries + 1):
+        _throttle_host_request(url)
+        response = session.get(url, timeout=timeout, verify=certifi.where(), headers=headers)
+        if not _is_waf_challenge_response(response):
+            return response
+        if attempt < max_retries:
+            time.sleep(backoff_factor * (attempt + 1))
+    return response
+
+
 def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tuple[str, str]]:
     url = ensure_url_in_record(rec)
     if src == "AUS":
@@ -2034,7 +2109,12 @@ def enrich_one_record_fulltext(
                 last_err = "canada_laws_root_empty"
                 continue        
             if mode == "pdf":
-                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                response = _get_with_waf_retry(
+                    session, candidate_url, headers=request_headers, timeout=timeout,
+                )
+                if _is_waf_challenge_response(response):
+                    last_err = "waf_challenge"
+                    continue
                 response.raise_for_status()
                 content_type = str(response.headers.get("content-type", "") or "").lower()
                 if "pdf" not in content_type and response.content[:5].lower() != b"%pdf-":
@@ -2127,11 +2207,11 @@ def enrich_one_record_fulltext(
                 last_err = "us_api_json_empty"
                 continue
             if mode == "uk_xml":
-                response = session.get(
+                response = _get_with_waf_retry(
+                    session,
                     candidate_url,
-                    timeout=timeout,
-                    verify=certifi.where(),
                     headers=_uk_content_headers(user_agent=user_agent, accept_xml=True),
+                    timeout=timeout,
                 )
                 if _is_waf_challenge_response(response):
                     last_err = "waf_challenge"
@@ -2147,11 +2227,11 @@ def enrich_one_record_fulltext(
                 last_err = "uk_xml_empty"
                 continue
             if mode == "nz_xml":
-                response = session.get(
+                response = _get_with_waf_retry(
+                    session,
                     candidate_url,
-                    timeout=timeout,
-                    verify=certifi.where(),
                     headers=_headers_for(user_agent),
+                    timeout=timeout,
                 )
                 if _is_waf_challenge_response(response):
                     last_err = "waf_challenge"
@@ -2166,7 +2246,9 @@ def enrich_one_record_fulltext(
                     return out
                 last_err = "nz_xml_empty"
                 continue
-            response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+            response = _get_with_waf_retry(
+                session, candidate_url, headers=request_headers, timeout=timeout,
+            )
             if _is_waf_challenge_response(response):
                 last_err = "waf_challenge"
                 continue
