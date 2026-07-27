@@ -129,15 +129,21 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
         non_eu._thread_local.robots_user_agent = non_eu.UA
         try:
-            enriched = non_eu.enrich_one_record_fulltext(
-                {
-                    "source": "UK",
-                    "jurisdiction": "United Kingdom",
-                    "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
-                },
-                us_api_key=None,
-                obey_robots=False,
-            )
+            # Patched so this test exercises the uk_xml candidate/header
+            # logic against the injected fake session, not curl_cffi's
+            # real impersonated session (which _get_with_waf_retry now
+            # prefers for legislation.gov.uk - see test_non_eu_waf_retry.py
+            # for dedicated coverage of that routing).
+            with patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+                enriched = non_eu.enrich_one_record_fulltext(
+                    {
+                        "source": "UK",
+                        "jurisdiction": "United Kingdom",
+                        "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                    },
+                    us_api_key=None,
+                    obey_robots=False,
+                )
         finally:
             if previous_session is None and hasattr(non_eu._thread_local, "session"):
                 delattr(non_eu._thread_local, "session")
@@ -189,15 +195,20 @@ class NonEUUkRetrievalTests(unittest.TestCase):
         non_eu._thread_local.robots = type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
         non_eu._thread_local.robots_user_agent = non_eu.UA
         try:
-            enriched = non_eu.enrich_one_record_fulltext(
-                {
-                    "source": "UK",
-                    "jurisdiction": "United Kingdom",
-                    "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
-                },
-                us_api_key=None,
-                obey_robots=False,
-            )
+            # See the same patch in
+            # test_enrich_one_record_fulltext_uses_uk_xml_when_available:
+            # keeps this test on the injected fake session rather than a
+            # real curl_cffi impersonated session.
+            with patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+                enriched = non_eu.enrich_one_record_fulltext(
+                    {
+                        "source": "UK",
+                        "jurisdiction": "United Kingdom",
+                        "url": "https://www.legislation.gov.uk/ukpga/2021/30/contents",
+                    },
+                    us_api_key=None,
+                    obey_robots=False,
+                )
         finally:
             if previous_session is None and hasattr(non_eu._thread_local, "session"):
                 delattr(non_eu._thread_local, "session")

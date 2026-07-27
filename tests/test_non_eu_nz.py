@@ -194,6 +194,11 @@ class NonEUNewZealandTests(unittest.TestCase):
         with (
             patch.object(non_eu, "_get_thread_session", return_value=session),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            # Keeps this on the injected fake session rather than a real
+            # curl_cffi impersonated session, which _get_with_waf_retry now
+            # prefers for legislation.govt.nz - see test_non_eu_waf_retry.py
+            # for dedicated coverage of that routing.
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
         ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
@@ -230,6 +235,7 @@ class NonEUNewZealandTests(unittest.TestCase):
         with (
             patch.object(non_eu, "_get_thread_session", return_value=_HeaderCapturingSession()),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
         ):
             non_eu.enrich_one_record_fulltext(
                 {

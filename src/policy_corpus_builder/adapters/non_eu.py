@@ -41,6 +41,13 @@ try:
 except Exception:
     TRUSTSTORE_OK = False
 
+try:
+    from curl_cffi import requests as curl_cffi_requests
+except ImportError:  # pragma: no cover - exercised only when the optional
+    # curl_cffi dependency isn't installed; callers fall back to plain
+    # requests in that case. See _get_thread_impersonated_session.
+    curl_cffi_requests = None
+
 
 UA = os.getenv("POLICY_CORPUS_BUILDER_USER_AGENT", "policy-corpus-builder/0.1")
 UK_BROWSER_UA = (
@@ -72,15 +79,15 @@ def _uk_content_headers(*, user_agent: str | None = None, accept_xml: bool = Fal
 
 def _nz_content_headers(*, user_agent: str | None = None, accept_xml: bool = False) -> dict[str, str]:
     # A real NZ smoke test (2026-07-27) found every single full-text request
-    # to www.legislation.govt.nz getting a WAF challenge, regardless of
-    # request pacing (a per-host throttle made no difference at all), while
-    # every request to other *.govt.nz hosts succeeded. That points at a
-    # signature/UA-based bot rule rather than a rate limit. NZ requests were
-    # sending the tool's own self-identifying default User-Agent
-    # ("policy-corpus-builder/0.1"); UK's legislation.gov.uk already gets a
-    # real browser UA via _uk_content_headers/UK_BROWSER_UA, which strongly
-    # suggests the same kind of block was already solved for UK and simply
-    # never extended to NZ. Mirrors _uk_content_headers with an NZ locale.
+    # to www.legislation.govt.nz getting a WAF challenge. Sending a real
+    # browser User-Agent here (this function) was the first attempted fix,
+    # on the theory that NZ was blocked on the tool's self-identifying
+    # default User-Agent the same way UK once was. A follow-up smoke test
+    # with this fix deployed got the *exact same* 92/97 challenge count,
+    # which rules that theory out - see _get_thread_impersonated_session
+    # for the real culprit (TLS/JA3 fingerprinting) and the actual fix.
+    # This UA is kept because it's harmless and still correct browser-like
+    # behavior, just not what actually resolves the block.
     headers = {
         "User-Agent": (user_agent or UK_BROWSER_UA).strip(),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1384,6 +1391,39 @@ def _get_thread_session(user_agent: str | None = None) -> requests.Session:
     return session
 
 
+def _get_thread_impersonated_session():
+    """A thread-local curl_cffi session impersonating a real Chrome browser's
+    TLS/JA3 fingerprint, used for hosts in _WAF_PRONE_HOST_MIN_INTERVAL_S.
+
+    Why this exists: a 2026-07-27 NZ smoke test with a real browser-like
+    User-Agent header (_nz_content_headers) got the *exact same* 92/97 WAF
+    challenge count as before that header change - clear evidence the
+    block isn't header-based. A follow-up check fetching the same
+    www.legislation.govt.nz URL through an actual Chrome browser (not
+    Python requests) succeeded immediately, with zero challenges, on the
+    first try, no retries or special headers needed. Headers alone doing
+    nothing while a real browser works instantly points at TLS-handshake
+    fingerprinting (e.g. AWS WAF Bot Control's non-browser-TLS signal):
+    Python's requests/urllib3 has a distinctive TLS ClientHello that
+    differs from any real browser, and that handshake completes before a
+    single HTTP header is ever sent, so no header change could ever have
+    fixed this. curl_cffi presents a genuine browser TLS fingerprint,
+    which is the standard mitigation for this class of block.
+
+    Returns None if curl_cffi isn't installed, so callers fall back to the
+    plain requests session. This is a well-evidenced hypothesis based on
+    the browser-vs-requests comparison above, not a confirmed fix - it
+    hasn't been run against the live site yet.
+    """
+    if curl_cffi_requests is None:
+        return None
+    session = getattr(_thread_local, "impersonated_session", None)
+    if session is None:
+        session = curl_cffi_requests.Session(impersonate="chrome124")
+        _thread_local.impersonated_session = session
+    return session
+
+
 def _get_thread_robots(user_agent: str | None = None) -> RobotsCache:
     robots = getattr(_thread_local, "robots", None)
     robots_user_agent = getattr(_thread_local, "robots_user_agent", None)
@@ -1527,22 +1567,37 @@ def _get_with_waf_retry(
     timeout: int,
     max_retries: int = 2,
     backoff_factor: float = 4.0,
+    use_browser_impersonation: bool = True,
 ) -> requests.Response:
     """GET url, retrying with backoff if the response is a WAF challenge.
 
-    Mirrors the fix already applied to EUR-Lex NIM full-text fetches: an
-    HTTP 202 there meant "still generating, try again shortly" and a
-    bounded retry resolved it. AWS WAF's challenge action can behave
-    similarly for rate-based rules, resolving on its own after a short
-    pause - but unlike EUR-Lex this is unverified against the real site, so
-    this is a bounded, cheap-to-attempt mitigation rather than a confirmed
-    fix. Always paces requests to WAF-prone hosts first via
+    For hosts in _WAF_PRONE_HOST_MIN_INTERVAL_S, prefers a curl_cffi
+    session that impersonates a real browser's TLS fingerprint over the
+    plain requests session passed in - see
+    _get_thread_impersonated_session for why. Falls back to the plain
+    session if curl_cffi isn't installed, or if
+    use_browser_impersonation=False (tests use this to exercise the
+    retry/backoff logic against an injected fake session without it being
+    swapped out for a real curl_cffi client).
+
+    Also mirrors the fix already applied to EUR-Lex NIM full-text fetches:
+    an HTTP 202 there meant "still generating, try again shortly" and a
+    bounded retry resolved it. If TLS impersonation alone doesn't clear
+    the challenge, a bounded retry with backoff is a cheap additional
+    mitigation. Always paces requests to WAF-prone hosts first via
     _throttle_host_request, including before the first attempt.
     """
+    client = session
+    if use_browser_impersonation:
+        host = (urlparse(url).netloc or "").lower()
+        if host in _WAF_PRONE_HOST_MIN_INTERVAL_S:
+            impersonated = _get_thread_impersonated_session()
+            if impersonated is not None:
+                client = impersonated
     response: requests.Response | None = None
     for attempt in range(max_retries + 1):
         _throttle_host_request(url)
-        response = session.get(url, timeout=timeout, verify=certifi.where(), headers=headers)
+        response = client.get(url, timeout=timeout, verify=certifi.where(), headers=headers)
         if not _is_waf_challenge_response(response):
             return response
         if attempt < max_retries:

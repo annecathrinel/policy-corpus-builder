@@ -52,6 +52,7 @@ class GetWithWafRetryTests(unittest.TestCase):
             headers={},
             timeout=10,
             max_retries=2,
+            use_browser_impersonation=False,
         )
 
         self.assertEqual(session.calls, 3)
@@ -73,6 +74,7 @@ class GetWithWafRetryTests(unittest.TestCase):
             headers={},
             timeout=10,
             max_retries=2,
+            use_browser_impersonation=False,
         )
 
         # max_retries=2 means 3 total attempts (the initial try plus 2 retries).
@@ -88,10 +90,123 @@ class GetWithWafRetryTests(unittest.TestCase):
             headers={},
             timeout=10,
             max_retries=2,
+            use_browser_impersonation=False,
         )
 
         self.assertEqual(session.calls, 1)
         self.assertEqual(response.text, "real document text")
+
+
+class BrowserImpersonationRoutingTests(unittest.TestCase):
+    # Regression coverage for _get_thread_impersonated_session: a 2026-07
+    # diagnostic found a real Chrome browser fetched a www.legislation.govt.nz
+    # URL with zero WAF challenges, on the first try, while requests with a
+    # browser-like User-Agent still got challenged every time - pointing at
+    # TLS/JA3 fingerprinting rather than a header check. _get_with_waf_retry
+    # now prefers a curl_cffi session (which impersonates a real browser's
+    # TLS fingerprint) over the plain requests session for hosts known to
+    # run this kind of check.
+
+    def test_waf_prone_host_uses_the_impersonated_session_when_available(self) -> None:
+        plain_session = _QueuedResponseSession([_FakeResponse(200, "should not be used")])
+        impersonated_session = _QueuedResponseSession([_FakeResponse(200, "real document text")])
+
+        with patch.object(non_eu, "_get_thread_impersonated_session", return_value=impersonated_session):
+            response = non_eu._get_with_waf_retry(
+                plain_session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+            )
+
+        self.assertEqual(plain_session.calls, 0)
+        self.assertEqual(impersonated_session.calls, 1)
+        self.assertEqual(response.text, "real document text")
+
+    def test_falls_back_to_the_plain_session_when_curl_cffi_is_unavailable(self) -> None:
+        plain_session = _QueuedResponseSession([_FakeResponse(200, "real document text")])
+
+        with patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
+            response = non_eu._get_with_waf_retry(
+                plain_session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+            )
+
+        self.assertEqual(plain_session.calls, 1)
+        self.assertEqual(response.text, "real document text")
+
+    def test_use_browser_impersonation_false_always_uses_the_plain_session(self) -> None:
+        plain_session = _QueuedResponseSession([_FakeResponse(200, "real document text")])
+        impersonated_session = _QueuedResponseSession([_FakeResponse(200, "should not be used")])
+
+        with patch.object(non_eu, "_get_thread_impersonated_session", return_value=impersonated_session):
+            response = non_eu._get_with_waf_retry(
+                plain_session,
+                "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml",
+                headers={},
+                timeout=10,
+                use_browser_impersonation=False,
+            )
+
+        self.assertEqual(plain_session.calls, 1)
+        self.assertEqual(impersonated_session.calls, 0)
+        self.assertEqual(response.text, "real document text")
+
+    def test_a_host_not_known_to_be_waf_prone_never_uses_the_impersonated_session(self) -> None:
+        plain_session = _QueuedResponseSession([_FakeResponse(200, "real document text")])
+        impersonated_session = _QueuedResponseSession([_FakeResponse(200, "should not be used")])
+
+        with patch.object(non_eu, "_get_thread_impersonated_session", return_value=impersonated_session):
+            response = non_eu._get_with_waf_retry(
+                plain_session,
+                "https://example.org/doc-1.xml",
+                headers={},
+                timeout=10,
+            )
+
+        self.assertEqual(plain_session.calls, 1)
+        self.assertEqual(impersonated_session.calls, 0)
+        self.assertEqual(response.text, "real document text")
+
+
+class ImpersonatedSessionFactoryTests(unittest.TestCase):
+    def test_returns_none_when_curl_cffi_is_not_installed(self) -> None:
+        previous = getattr(non_eu._thread_local, "impersonated_session", None)
+        try:
+            if hasattr(non_eu._thread_local, "impersonated_session"):
+                delattr(non_eu._thread_local, "impersonated_session")
+            with patch.object(non_eu, "curl_cffi_requests", None):
+                self.assertIsNone(non_eu._get_thread_impersonated_session())
+        finally:
+            if previous is None and hasattr(non_eu._thread_local, "impersonated_session"):
+                delattr(non_eu._thread_local, "impersonated_session")
+            elif previous is not None:
+                non_eu._thread_local.impersonated_session = previous
+
+    def test_reuses_the_same_session_across_calls_on_one_thread(self) -> None:
+        previous = getattr(non_eu._thread_local, "impersonated_session", None)
+        try:
+            if hasattr(non_eu._thread_local, "impersonated_session"):
+                delattr(non_eu._thread_local, "impersonated_session")
+
+            class _FakeCurlCffiModule:
+                class Session:
+                    def __init__(self, impersonate: str) -> None:
+                        self.impersonate = impersonate
+
+            with patch.object(non_eu, "curl_cffi_requests", _FakeCurlCffiModule):
+                first = non_eu._get_thread_impersonated_session()
+                second = non_eu._get_thread_impersonated_session()
+
+            self.assertIsNotNone(first)
+            self.assertIs(first, second)
+        finally:
+            if previous is None and hasattr(non_eu._thread_local, "impersonated_session"):
+                delattr(non_eu._thread_local, "impersonated_session")
+            elif previous is not None:
+                non_eu._thread_local.impersonated_session = previous
 
 
 class ThrottleHostRequestTests(unittest.TestCase):
@@ -130,7 +245,7 @@ class PdfModeWafDetectionTests(unittest.TestCase):
 
         with patch.object(non_eu, "_get_thread_session", return_value=session), patch.object(
             non_eu, "_get_thread_robots", return_value=type("AllowAll", (), {"allowed": staticmethod(lambda url: True)})()
-        ):
+        ), patch.object(non_eu, "_get_thread_impersonated_session", return_value=None):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
                     "source": "NZ",
