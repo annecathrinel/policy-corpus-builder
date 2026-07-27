@@ -128,17 +128,21 @@ CA_BASE = "https://www.publications.gc.ca"
 NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 
-# publications.gc.ca's own search results page always sits under /site/eng/
-# (or /site/fra/), and the search page itself, its home page, and its
-# browse/help pages also happen to sit under /site/eng/ - so unlike AUS/UK/
-# NZ, "is this URL under the right path prefix" isn't enough on its own to
-# tell a real result apart from site chrome. _CA_PUBLICATIONS_SKIP_PATH_RE
-# excludes the known non-result page shapes (home, browse index, the search
-# page itself); anything else under /site/eng/ or ending in .pdf is treated
-# as a candidate result, matching the shape confirmed working in an earlier
-# version of this module.
+# publications.gc.ca's own search results page always sits under /site/eng/,
+# and the search page itself, its home page, and its browse/help pages also
+# happen to sit under /site/eng/ - so unlike AUS/UK/NZ, "is this URL under
+# the right path prefix" isn't enough on its own to tell a real result apart
+# from site chrome. _CA_PUBLICATIONS_SKIP_PATH_RE excludes the known
+# non-result page shapes (home, browse index, the search page itself, and
+# its French-language equivalent "recherche/recherche.html" - a 2026-07-27
+# live run found this exact URL, the site's own language-switcher link back
+# to the French search page, showing up as a "result" on every single
+# search term, real or empty, since it's present as boilerplate on every
+# results page regardless of hit count); anything else under /site/eng/ or
+# ending in .pdf is treated as a candidate result, matching the shape
+# confirmed working in an earlier version of this module.
 _CA_PUBLICATIONS_SKIP_PATH_RE = re.compile(
-    r"/(home\.html|browse/index\.html|search/)", re.IGNORECASE
+    r"/(home\.html|browse/index\.html|search/|recherche/recherche\.html)", re.IGNORECASE
 )
 
 CANADA_SKIP_EXTS = {
@@ -934,11 +938,19 @@ def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]
     """
     Returns (doc_url, title) tuples for real publications.gc.ca search
     results, filtering out the search page's own furniture (a link back to
-    itself, the site's home page, its browse index) - everything else
-    under /site/eng/ (or /site/fra/), plus any direct .pdf link, is treated
-    as a candidate. This is the same filter shape confirmed working in an
-    earlier version of this module, before CA search briefly (and
-    incorrectly) moved to laws-lois.justice.gc.ca.
+    itself and its French-language equivalent, the site's home page, its
+    browse index) - everything else under /site/eng/, plus any direct .pdf
+    link, is treated as a candidate. This is the same filter shape
+    confirmed working in an earlier version of this module, before CA
+    search briefly (and incorrectly) moved to laws-lois.justice.gc.ca.
+
+    /site/fra/ links are excluded from candidates entirely, not just the
+    search page's own self-link: this search is restricted to English
+    results (sLF=eng), and a 2026-07-27 live run found the only /site/fra/
+    link ever produced was the language-switcher's link back to the French
+    version of the *same* search page - present as boilerplate on every
+    results page, including ones with zero real hits, so a genuinely-empty
+    search was silently returning 1 fake "result" every time instead of 0.
     """
     soup = BeautifulSoup(html or "", "html.parser")
     seen: set[str] = set()
@@ -958,7 +970,7 @@ def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]
             continue
 
         lower = full.lower()
-        if not (lower.endswith(".pdf") or "/site/eng/" in lower or "/site/fra/" in lower):
+        if not (lower.endswith(".pdf") or "/site/eng/" in lower):
             continue
 
         if full in seen:

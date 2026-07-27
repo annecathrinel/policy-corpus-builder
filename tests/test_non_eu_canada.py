@@ -12,17 +12,34 @@ from policy_corpus_builder.schemas import SourceConfig
 
 # A representative publications.gc.ca search-results page: the search page's
 # own furniture (a link back to itself, the site's home page, its browse
-# index) mixed in with real result rows and a direct .pdf link, matching the
-# shape confirmed working in an earlier version of this module before CA
-# search briefly (and incorrectly) moved to laws-lois.justice.gc.ca.
+# index, and its French-language equivalent) mixed in with real result rows
+# and a direct .pdf link, matching the shape confirmed working in an earlier
+# version of this module before CA search briefly (and incorrectly) moved
+# to laws-lois.justice.gc.ca.
 CANADA_PUBLICATIONS_SEARCH_HTML = """
 <html>
   <body>
-    <a href="/site/eng/search/search.html?ast=biodiversity&cnst=&adof=on">New search</a>
+    <a href="/site/eng/search/search.html?sLF=eng&text=biodiversity&cnst=&adof=on">New search</a>
     <a href="/site/eng/home.html">Home</a>
     <a href="/site/eng/browse/index.html">Browse all publications</a>
     <a href="/site/eng/9.876543/publication.html">Biodiversity Plan 2024</a>
     <a href="/collections/collection_2024/eccc/En1-45-2024-eng.pdf">Species at Risk Report (PDF)</a>
+    <a href="/site/fra/recherche/recherche.html">Français</a>
+  </body>
+</html>
+"""
+
+# Regression fixture: a 2026-07-27 live run found the site's own
+# language-switcher link back to the French search page
+# (/site/fra/recherche/recherche.html) present as boilerplate on every
+# single search-results page, real hits or none - so a genuinely-empty
+# search was silently coming back as 1 fake "result" instead of 0 on every
+# term. This page has zero real results, only that one furniture link.
+CANADA_PUBLICATIONS_ZERO_HITS_HTML = """
+<html>
+  <body>
+    <a href="/site/eng/search/search.html?sLF=eng&text=nature%20restoration&cnst=&adof=on">New search</a>
+    <a href="/site/fra/recherche/recherche.html">Français</a>
   </body>
 </html>
 """
@@ -60,18 +77,19 @@ class NonEUCanadaTests(unittest.TestCase):
     def test_build_canada_publications_search_url_matches_current_live_route_shape(self) -> None:
         self.assertEqual(
             non_eu.build_canada_publications_search_url("biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?ast=biodiversity&cnst=&adof=on",
+            "https://www.publications.gc.ca/site/eng/search/search.html?sLF=eng&text=%22biodiversity%22&cnst=&adof=on",
         )
         self.assertEqual(
             non_eu.build_canada_publications_search_url("soil biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?ast=%22soil%20biodiversity%22&cnst=&adof=on",
+            "https://www.publications.gc.ca/site/eng/search/search.html?sLF=eng&text=%22soil%20biodiversity%22&cnst=&adof=on",
         )
 
     def test_extract_canada_publications_result_links_filters_search_furniture(self) -> None:
         results = non_eu._extract_canada_publications_result_links(CANADA_PUBLICATIONS_SEARCH_HTML)
 
         # Only the two real result rows - the self-referential search link,
-        # the home page, and the browse index are all excluded.
+        # the home page, the browse index, and the French language-switcher
+        # link are all excluded.
         self.assertEqual(
             results,
             [
@@ -85,6 +103,18 @@ class NonEUCanadaTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_extract_canada_publications_result_links_excludes_french_search_self_link(self) -> None:
+        # Regression test: a 2026-07-27 live run found every single search
+        # term - including genuinely zero-hit terms like "nature
+        # restoration" - returning exactly one "result": a link back to the
+        # French version of the search page itself
+        # (/site/fra/recherche/recherche.html), present as boilerplate on
+        # every results page. A real zero-hit search must come back as 0
+        # candidates, not 1.
+        results = non_eu._extract_canada_publications_result_links(CANADA_PUBLICATIONS_ZERO_HITS_HTML)
+
+        self.assertEqual(results, [])
 
     def test_fetch_canada_documents_extracts_results_from_search_page(self) -> None:
         with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_PUBLICATIONS_SEARCH_HTML)):
@@ -100,6 +130,12 @@ class NonEUCanadaTests(unittest.TestCase):
                 "https://www.publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf",
             ],
         )
+
+    def test_fetch_canada_documents_reports_zero_kept_for_genuinely_empty_search(self) -> None:
+        with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_PUBLICATIONS_ZERO_HITS_HTML)):
+            df = non_eu.fetch_canada_documents(["nature restoration"], max_per_term=10)
+
+        self.assertEqual(len(df), 0)
 
     def test_fetch_canada_documents_stops_when_max_per_term_reached(self) -> None:
         with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_PUBLICATIONS_SEARCH_HTML)):
