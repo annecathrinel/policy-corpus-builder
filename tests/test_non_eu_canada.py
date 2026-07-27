@@ -23,6 +23,26 @@ CANADA_LAWS_SEARCH_HTML = """
 </html>
 """
 
+# The exact 7 URLs a 2026-07-27 smoke test found returned for every single
+# search term against laws-lois.justice.gc.ca's search endpoint, including
+# nonsense terms with no plausible real hits. These are the site's
+# standing navigation/help chrome - present on every page - not search
+# results; _CA_LAWS_RESULT_RE previously matched them anyway because it
+# only checked for the /eng/ or /fra/ language prefix.
+CANADA_LAWS_NAV_CHROME_ONLY_HTML = """
+<html>
+  <body>
+    <a href="/eng/">Home</a>
+    <a href="/eng/FAQ">FAQ</a>
+    <a href="/eng/SearchHelp">Search Help</a>
+    <a href="/eng/const-index.html">Constitutional Documents</a>
+    <a href="/eng/help-index.html">Help</a>
+    <a href="/eng/laws-index.html">Consolidated Acts and Regulations</a>
+    <a href="/eng/res-index.html">Related Resources</a>
+  </body>
+</html>
+"""
+
 
 class _FakeResponse:
     def __init__(
@@ -79,6 +99,27 @@ class NonEUCanadaTests(unittest.TestCase):
             ),
             results,
         )
+        # /fra/lois/... doesn't match the acts/regulations path shape this
+        # site uses for real content (its French segment for "acts" isn't
+        # "lois" in the URL path the way the rest of this module already
+        # assumes - see is_canada_laws_legislation_url/
+        # canonicalize_canada_laws_doc_url, which also only recognize
+        # "acts"/"regulations"), and /eng/News/... is exactly the kind of
+        # non-legislation site content _CA_LAWS_RESULT_RE now excludes.
+        self.assertEqual(len(results), 2)
+
+    def test_extract_canada_laws_result_links_excludes_standing_nav_chrome(self) -> None:
+        # Regression test: a 2026-07-27 smoke test found every single
+        # search term - including nonsense terms like "reef ball" with no
+        # plausible real hits - returning the exact same 7 URLs, all of
+        # them site navigation/help pages rather than actual acts or
+        # regulations. _CA_LAWS_RESULT_RE previously matched any URL under
+        # /eng/ or /fra/, which is every link on the site including this
+        # standing chrome, so a broken or truly-empty search silently
+        # looked like 7 real hits every time instead of 0.
+        results = non_eu._extract_canada_laws_result_links(CANADA_LAWS_NAV_CHROME_ONLY_HTML)
+
+        self.assertEqual(results, [])
 
     def test_fetch_canada_documents_justice_dep_paginates_and_dedupes_by_canonical_url(self) -> None:
         empty_page_html = "<html><body></body></html>"
@@ -96,7 +137,11 @@ class NonEUCanadaTests(unittest.TestCase):
         ):
             df = non_eu.fetch_canada_documents_justice_dep(["biodiversity"], max_per_term=10)
 
-        self.assertEqual(len(df), 4)
+        # 2, not the fixture's full 4 anchors - /fra/lois/... and
+        # /eng/News/... don't match the acts/regulations shape
+        # _CA_LAWS_RESULT_RE now requires. See
+        # test_extract_canada_laws_result_links_collapses_sections_to_root_act.
+        self.assertEqual(len(df), 2)
         self.assertTrue((df["jurisdiction"] == "Canada").all())
         self.assertTrue((df["source"] == "CA").all())
         self.assertIn(
@@ -133,9 +178,9 @@ class NonEUCanadaTests(unittest.TestCase):
 
         output = stdout.getvalue()
         self.assertIn("[CA] term='biodiversity'", output)
-        self.assertIn("candidates=4", output)
-        self.assertIn("DONE -> kept=4", output)
-        self.assertIn("[CA] total rows kept: 4", output)
+        self.assertIn("candidates=2", output)
+        self.assertIn("DONE -> kept=2", output)
+        self.assertIn("[CA] total rows kept: 2", output)
 
     def test_fetch_canada_documents_justice_dep_verbose_false_suppresses_output(self) -> None:
         stdout = StringIO()

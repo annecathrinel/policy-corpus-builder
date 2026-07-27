@@ -256,6 +256,75 @@ class NonEUNewZealandTests(unittest.TestCase):
             ],
         )
 
+    def test_get_url_candidates_for_nz_adds_a_derived_pdf_when_the_api_gave_none(self) -> None:
+        # Regression test: inspecting individual NZ full-text failures (not
+        # just the aggregate waf_challenge count) found several where the
+        # html/doc_url candidate was blocked, but the same document had a
+        # working PDF rendition at the same path with the extension
+        # swapped/added - confirmed by opening that URL directly. The API's
+        # own "formats" list doesn't always include a pdf entry, so this is
+        # tried as a best-effort extra candidate rather than relying on the
+        # API to have listed one.
+        candidates = non_eu.get_url_candidates(
+            {
+                "source": "NZ",
+                "url": "https://www.legislation.govt.nz/act/public/2024/12/en/whole.html",
+                "text_url": "https://www.legislation.govt.nz/act/public/2024/12/en/whole.html",
+            },
+            "NZ",
+            None,
+        )
+
+        self.assertEqual(
+            candidates,
+            [
+                ("https://www.legislation.govt.nz/act/public/2024/12/en/whole.pdf", "pdf"),
+                ("https://www.legislation.govt.nz/act/public/2024/12/en/whole.html", "html"),
+            ],
+        )
+
+    def test_get_url_candidates_for_nz_does_not_duplicate_an_existing_pdf_url(self) -> None:
+        candidates = non_eu.get_url_candidates(
+            {
+                "source": "NZ",
+                "url": "https://www.legislation.govt.nz/act/public/2024/12/en/latest/",
+                "pdf_url": "https://www.legislation.govt.nz/act/public/2024/12/en/latest.pdf",
+                "text_url": "https://www.legislation.govt.nz/act/public/2024/12/en/latest/",
+            },
+            "NZ",
+            None,
+        )
+
+        pdf_candidates = [c for c in candidates if c[1] == "pdf"]
+        self.assertEqual(len(pdf_candidates), 1)
+
+    def test_derive_nz_pdf_url_swaps_html_extension(self) -> None:
+        self.assertEqual(
+            non_eu._derive_nz_pdf_url("https://www.legislation.govt.nz/act/public/2024/12/en/whole.html"),
+            "https://www.legislation.govt.nz/act/public/2024/12/en/whole.pdf",
+        )
+
+    def test_derive_nz_pdf_url_appends_when_there_is_no_extension(self) -> None:
+        self.assertEqual(
+            non_eu._derive_nz_pdf_url("https://www.legislation.govt.nz/act/public/2024/12/en/latest"),
+            "https://www.legislation.govt.nz/act/public/2024/12/en/latest.pdf",
+        )
+
+    def test_derive_nz_pdf_url_is_a_noop_for_an_existing_pdf(self) -> None:
+        self.assertEqual(
+            non_eu._derive_nz_pdf_url("https://www.legislation.govt.nz/act/public/2024/12/en/whole.pdf"),
+            "",
+        )
+
+    def test_derive_nz_pdf_url_does_not_guess_at_an_unrecognized_extension(self) -> None:
+        self.assertEqual(
+            non_eu._derive_nz_pdf_url("https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml"),
+            "",
+        )
+
+    def test_derive_nz_pdf_url_handles_an_empty_input(self) -> None:
+        self.assertEqual(non_eu._derive_nz_pdf_url(""), "")
+
     def test_enrich_nz_record_uses_xml_when_available(self) -> None:
         xml_url = "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml"
         session = _FakeSession({xml_url: _FakeResponse(200, NZ_XML)})

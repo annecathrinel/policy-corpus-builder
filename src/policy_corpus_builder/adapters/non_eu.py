@@ -120,7 +120,25 @@ CA_LAWS_BASE = "https://laws-lois.justice.gc.ca"
 NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 
-_CA_LAWS_RESULT_RE = re.compile(r"^/(eng|fra)/", re.IGNORECASE)
+# A 2026-07-27 CA smoke test found every single search term - including
+# nonsense terms like "reef ball" and "cod hotel" that have no plausible
+# real hits - returning the exact same 7 URLs: /eng, /eng/FAQ,
+# /eng/SearchHelp, /eng/const-index.html, /eng/help-index.html,
+# /eng/laws-index.html, /eng/res-index.html. None of those are actual
+# acts or regulations; they're the site's standard navigation/help chrome
+# that appears on every page (search results or not). The previous regex
+# (r"^/(eng|fra)/") matched literally any link under the site's language
+# prefix, so it was scooping up that boilerplate nav as if each link were
+# a real search hit, on every single search regardless of whether the
+# search itself returned anything. laws-lois.justice.gc.ca's own scope is
+# specifically "Consolidated Acts and Regulations" (its own page title
+# confirms this), so a real result should always sit under
+# /eng/acts/... or /eng/regulations/... (or /fra/ equivalents) - the same
+# assumption is_canada_laws_legislation_url already makes. Restricting
+# the initial candidate match to that shape means known non-result nav
+# pages can no longer be mistaken for hits, regardless of whether the
+# underlying search request itself is working.
+_CA_LAWS_RESULT_RE = re.compile(r"^/(eng|fra)/(acts|regulations)/", re.IGNORECASE)
 
 CANADA_SKIP_EXTS = {
     ".zip",
@@ -322,6 +340,35 @@ def _nz_pick_format_url(formats: list[dict], preferred_type: str) -> str:
         if str(item.get("type") or "").strip().lower() == preferred_type:
             return str(item.get("url") or "").strip()
     return ""
+
+
+def _derive_nz_pdf_url(url: str) -> str:
+    """Best-effort derivation of a PDF rendition URL from an NZ legislation
+    html/landing-page URL, e.g. .../whole.html -> .../whole.pdf, or
+    .../latest -> .../latest.pdf if there's no recognized extension at all.
+
+    Returns "" if url is empty, already ends in .pdf, or ends in some
+    other file extension this doesn't know how to handle (better to omit
+    a candidate than guess wrong and mask the real error).
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    path = parsed.path
+    last_segment = path.rsplit("/", 1)[-1]
+    lower_path = path.lower()
+    if lower_path.endswith(".pdf"):
+        return ""
+    if lower_path.endswith(".html") or lower_path.endswith(".htm"):
+        new_path = re.sub(r"\.html?$", ".pdf", path, flags=re.IGNORECASE)
+    elif "." in last_segment:
+        # Some other file extension (e.g. .xml) - not a shape this has
+        # evidence for, so don't guess at a transformation.
+        return ""
+    else:
+        new_path = path.rstrip("/") + ".pdf"
+    return urlunparse((parsed.scheme, parsed.netloc, new_path, "", "", ""))
 
 
 def _extract_nz_api_rows(term: str, payload: dict, *, max_per_term: int) -> list[dict]:
@@ -1858,6 +1905,21 @@ def get_url_candidates(rec: dict, src: str, us_api_key: str | None) -> list[tupl
             candidates.append((xml_url, "nz_xml"))
         if pdf_url:
             candidates.append((pdf_url, "pdf"))
+        # Manual inspection of individual NZ full-text failures (not just
+        # the aggregate waf_challenge/404 counts) found that a meaningful
+        # share of the "real" failures were the html_url/doc_url candidate
+        # below getting blocked, on documents that had a working .pdf
+        # rendition at the same path once the extension was swapped/added -
+        # confirmed by opening that .pdf URL directly. The API's own
+        # "formats" list doesn't always include a pdf entry (older acts in
+        # particular), so pdf_url above is often just empty rather than
+        # wrong - this derives a best-effort candidate instead of relying
+        # on the API to have listed one. Tried before the html candidates
+        # since those are the ones observed failing; skipped entirely if
+        # it would just duplicate pdf_url above.
+        derived_pdf_url = _derive_nz_pdf_url(text_url or doc_url)
+        if derived_pdf_url and derived_pdf_url != pdf_url:
+            candidates.append((derived_pdf_url, "pdf"))
         if text_url:
             candidates.append((text_url, "html"))
         if doc_url and doc_url not in {candidate_url for candidate_url, _ in candidates}:

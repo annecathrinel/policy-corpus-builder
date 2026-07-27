@@ -630,6 +630,8 @@ What it supports today:
 - publications.gc.ca landing-page extraction as fallback only when API metadata is insufficient
 - normalized JSONL export through the shared document model
 
+**Note (2026-07):** the description above doesn't match what `fetch_non_eu_all` actually wires up for `"CA"` today - it calls `fetch_canada_documents_justice_dep`, which searches `laws-lois.justice.gc.ca`'s Advanced Search directly (acts/regulations only), not publications.gc.ca/CKAN. This section may be describing an earlier or intended design rather than the current implementation; flagging rather than silently rewriting it, since resolving the mismatch is a bigger question than this fix. Separately, `_extract_canada_laws_result_links`'s candidate matching used to accept any `/eng/`- or `/fra/`-prefixed link, which included the site's own standing navigation/help pages (`/eng/FAQ`, `/eng/laws-index.html`, etc.) - a smoke test found every single search term, including nonsense ones, returning exactly those 7 nav links and nothing else. It's now restricted to `/eng/acts/...` and `/eng/regulations/...` (or `/fra/` equivalents) to match what `is_canada_laws_legislation_url` already considers real content, so a broken or genuinely-empty search now correctly returns 0 results instead of 7 fabricated ones - but this doesn't independently confirm the search endpoint itself is returning real hits when it does return something.
+
 The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).
 
 ## Supported Australia Workflow
@@ -650,7 +652,7 @@ The current supported New Zealand live workflow uses the `non-eu` adapter with `
 What it supports today:
 
 - official `api.legislation.govt.nz` discovery via `/v0/works`
-- API-returned version format selection for XML, PDF, and HTML
+- API-returned version format selection for XML, PDF, and HTML - plus a best-effort derived PDF candidate (`_derive_nz_pdf_url`, e.g. `.../whole.html` -> `.../whole.pdf`) tried when the API's own "formats" list doesn't include one, since manual inspection of individual full-text failures found working PDF renditions at several documents the API hadn't listed a pdf format for
 - normalized JSONL export through the shared document model
 
 What it requires:
