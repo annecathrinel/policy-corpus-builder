@@ -104,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
             "once."
         ),
     )
+    build_corpus_parser.add_argument(
+        "--max-per-term",
+        type=int,
+        help=(
+            "Maximum documents kept per query term for non-EU jurisdictions "
+            "(UK, AUS, CA, NZ, US). Defaults to 500. The underlying adapter "
+            "itself falls back to 100 when this isn't set explicitly, so "
+            "omitting this flag no longer means 'unlimited' - it means 500."
+        ),
+    )
     jurisdiction_logs_group = build_corpus_parser.add_mutually_exclusive_group()
     jurisdiction_logs_group.add_argument(
         "--jurisdiction-logs",
@@ -188,6 +198,7 @@ def main() -> int:
                 include_nim_fulltext=args.include_nim_fulltext,
                 nim_max_rows=args.nim_max_rows,
                 max_jurisdiction_workers=args.max_jurisdiction_workers,
+                non_eu_max_per_term=args.max_per_term,
                 write_jurisdiction_logs=args.write_jurisdiction_logs,
             )
         except (

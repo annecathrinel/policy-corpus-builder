@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from policy_corpus_builder.adapters import non_eu
@@ -262,6 +264,72 @@ class PdfModeWafDetectionTests(unittest.TestCase):
             )
 
         self.assertEqual(enriched["full_text_error"], "waf_challenge")
+
+
+class AddFullTextsParallelCurlCffiDiagnosticTests(unittest.TestCase):
+    # Regression coverage for the observability gap behind a real run: a
+    # 2026-07 NZ smoke test still showed 9x waf_challenge and only 5/33
+    # full texts retrieved despite the curl_cffi impersonation fix already
+    # being in the code, with nothing in the log to say whether curl_cffi
+    # was actually active or had silently failed to install. This asserts
+    # add_full_texts_parallel now prints which case it's in.
+    def test_prints_available_when_curl_cffi_is_importable(self) -> None:
+        stdout = StringIO()
+
+        class _FakeCurlCffiModule:
+            class Session:
+                def __init__(self, impersonate: str) -> None:
+                    self.impersonate = impersonate
+
+        with (
+            patch.object(non_eu, "curl_cffi_requests", _FakeCurlCffiModule),
+            patch.object(
+                non_eu,
+                "enrich_one_record_fulltext",
+                return_value={"full_text": "some text", "full_text_error": ""},
+            ),
+            redirect_stdout(stdout),
+        ):
+            non_eu.add_full_texts_parallel(
+                [{"source": "NZ", "url": "https://www.legislation.govt.nz/act/public/2024/1"}],
+                us_api_key=None,
+            )
+
+        self.assertIn(
+            "[FULLTEXT] curl_cffi browser-TLS impersonation: available",
+            stdout.getvalue(),
+        )
+
+    def test_prints_not_available_when_curl_cffi_is_missing(self) -> None:
+        stdout = StringIO()
+
+        with (
+            patch.object(non_eu, "curl_cffi_requests", None),
+            patch.object(
+                non_eu,
+                "enrich_one_record_fulltext",
+                return_value={"full_text": "some text", "full_text_error": ""},
+            ),
+            redirect_stdout(stdout),
+        ):
+            non_eu.add_full_texts_parallel(
+                [{"source": "NZ", "url": "https://www.legislation.govt.nz/act/public/2024/1"}],
+                us_api_key=None,
+            )
+
+        self.assertIn(
+            "[FULLTEXT] curl_cffi browser-TLS impersonation: NOT available",
+            stdout.getvalue(),
+        )
+
+    def test_prints_nothing_extra_when_records_is_empty(self) -> None:
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            result = non_eu.add_full_texts_parallel([], us_api_key=None)
+
+        self.assertEqual(result, [])
+        self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

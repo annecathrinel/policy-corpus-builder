@@ -898,7 +898,13 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         # (no more nz_mode setting/provisional modes), so corpus_builder.py
         # no longer needs to special-case NZ's SourceConfig settings the
         # way it briefly did - every non-EU jurisdiction, NZ included, now
-        # gets the exact same settings shape: just {"countries": [...]}.
+        # gets the exact same settings shape: {"countries": [...],
+        # "max_per_term": ...}. max_per_term defaults to
+        # NON_EU_DEFAULT_MAX_PER_TERM (500) here - see
+        # test_non_eu_max_per_term_defaults_to_500_and_is_configurable for
+        # the regression test covering why that default exists at all
+        # (NonEUAdapter itself silently falls back to 100 when a source
+        # config doesn't set this).
         captured_settings: dict[str, dict] = {}
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
 
@@ -932,8 +938,85 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     outputs_path=output_root,
                 )
 
-        self.assertEqual(captured_settings["NZ"], {"countries": ["NZ"]})
-        self.assertEqual(captured_settings["UK"], {"countries": ["UK"]})
+        self.assertEqual(captured_settings["NZ"], {"countries": ["NZ"], "max_per_term": 500})
+        self.assertEqual(captured_settings["UK"], {"countries": ["UK"], "max_per_term": 500})
+
+    def test_non_eu_max_per_term_defaults_to_500_and_is_configurable(self):
+        # Regression test: NonEUAdapter.validate_source_config defaults
+        # source.settings.max_per_term to 100 when it isn't set explicitly.
+        # build_policy_corpus's non-EU SourceConfigs never set this key, so
+        # every non-EU jurisdiction run through the CLI or Python API - not
+        # just NZ - was silently capped at 100 documents per query term.
+        # non_eu_max_per_term now defaults to 500 (NON_EU_DEFAULT_MAX_PER_TERM,
+        # matching the documented example TOML) and can be overridden.
+        captured_settings: dict[str, dict] = {}
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        class _SettingsCapturingNonEUAdapter(_FakeAdapter):
+            name = "non-eu"
+
+            def __init__(self, tracker):
+                self._tracker = tracker
+
+            def collect(self, source, query, *, base_path, loaded_source=None):
+                country = source.settings["countries"][0]
+                captured_settings[country] = dict(source.settings)
+                return _FakeNonEUAdapter(self._tracker).collect(
+                    source, query, base_path=base_path, loaded_source=loaded_source
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_SettingsCapturingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=output_root,
+                )
+
+        self.assertEqual(captured_settings["NZ"]["max_per_term"], 500)
+        self.assertEqual(result.non_eu_max_per_term, 500)
+        self.assertEqual(result.to_dict()["non_eu_max_per_term"], 500)
+
+        captured_settings.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_SettingsCapturingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=output_root,
+                    non_eu_max_per_term=1200,
+                )
+
+        self.assertEqual(captured_settings["NZ"]["max_per_term"], 1200)
+        self.assertEqual(result.non_eu_max_per_term, 1200)
+
+    def test_invalid_non_eu_max_per_term_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(CorpusBuildValidationError, "non_eu_max_per_term"):
+                build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                    non_eu_max_per_term=0,
+                )
 
 
 class _PrintingNonEUAdapter(_FakeAdapter):

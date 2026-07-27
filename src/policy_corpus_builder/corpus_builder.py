@@ -32,6 +32,16 @@ from policy_corpus_builder.postprocess import (
 from policy_corpus_builder.schemas import NormalizationConfig, SourceConfig
 
 SUPPORTED_JURISDICTIONS = ("EU", "UK", "CA", "AUS", "NZ", "US")
+# NonEUAdapter.validate_source_config defaults source.settings.max_per_term
+# to 100 when a source config doesn't set it explicitly. build-corpus (both
+# the Python API and the CLI) builds non-EU SourceConfigs itself and never
+# set this key, so every non-EU jurisdiction run through build_policy_corpus
+# was silently capped at 100 documents per term - not just NZ, all of UK/
+# AUS/CA/US too. 500 matches the documented example TOML
+# (examples/non_eu_new_zealand.toml) and every non_eu.py fetch_* function's
+# own max_per_term default, so this restores that as build-corpus's default
+# instead of the adapter's much lower internal fallback.
+NON_EU_DEFAULT_MAX_PER_TERM = 500
 MAIN_DEDUPLICATION_FIELDS = ("document_id",)
 NIM_DEDUPLICATION_FIELDS = ("document_id",)
 FINAL_CORPUS_SUBDIR = "final"
@@ -158,6 +168,7 @@ class PolicyCorpusBuildResult:
     include_nim_fulltext: bool
     nim_max_rows: int | None
     max_jurisdiction_workers: int
+    non_eu_max_per_term: int
     write_jurisdiction_logs: bool
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
@@ -189,6 +200,7 @@ class PolicyCorpusBuildResult:
             "include_nim_fulltext": self.include_nim_fulltext,
             "nim_max_rows": self.nim_max_rows,
             "max_jurisdiction_workers": self.max_jurisdiction_workers,
+            "non_eu_max_per_term": self.non_eu_max_per_term,
             "write_jurisdiction_logs": self.write_jurisdiction_logs,
             "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
             "per_jurisdiction_output_paths": {
@@ -242,6 +254,7 @@ def build_policy_corpus(
     include_nim_fulltext: bool = True,
     nim_max_rows: int | None = None,
     max_jurisdiction_workers: int | None = None,
+    non_eu_max_per_term: int | None = None,
     write_jurisdiction_logs: bool = True,
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions.
@@ -264,6 +277,17 @@ def build_policy_corpus(
     write_jurisdiction_logs=False to go back to everything printing inline
     to the main job output, e.g. for interactively debugging one
     jurisdiction.
+
+    non_eu_max_per_term caps how many documents each non-EU jurisdiction
+    (UK, AUS, CA, NZ, US) keeps per query term. It defaults to
+    NON_EU_DEFAULT_MAX_PER_TERM (500) here - the underlying NonEUAdapter
+    itself defaults to only 100 when a source config doesn't set
+    max_per_term explicitly, and build_policy_corpus's own non-EU
+    SourceConfigs never used to set it, so every non-EU jurisdiction run
+    through this function (CLI or Python API) was silently capped at 100
+    documents per term regardless of what max_per_term looked like on any
+    individual fetch_* function. Pass an explicit value to raise or lower
+    that per-run.
     """
     if not isinstance(write_jurisdiction_logs, bool):
         raise CorpusBuildValidationError("write_jurisdiction_logs must be a boolean.")
@@ -278,6 +302,7 @@ def build_policy_corpus(
             include_nim_fulltext=include_nim_fulltext,
             nim_max_rows=nim_max_rows,
             max_jurisdiction_workers=max_jurisdiction_workers,
+            non_eu_max_per_term=non_eu_max_per_term,
             stdout_router=None,
         )
 
@@ -302,6 +327,7 @@ def build_policy_corpus(
             include_nim_fulltext=include_nim_fulltext,
             nim_max_rows=nim_max_rows,
             max_jurisdiction_workers=max_jurisdiction_workers,
+            non_eu_max_per_term=non_eu_max_per_term,
             stdout_router=stdout_router,
         )
     finally:
@@ -319,6 +345,7 @@ def _build_policy_corpus_impl(
     include_nim_fulltext: bool,
     nim_max_rows: int | None,
     max_jurisdiction_workers: int | None,
+    non_eu_max_per_term: int | None,
     stdout_router: _JurisdictionLogRouter | None,
 ) -> PolicyCorpusBuildResult:
     _emit_progress("Starting build_policy_corpus: validating inputs.")
@@ -335,6 +362,9 @@ def _build_policy_corpus_impl(
     cleaned_max_jurisdiction_workers = _clean_optional_positive_int(
         max_jurisdiction_workers, field_name="max_jurisdiction_workers"
     )
+    resolved_non_eu_max_per_term = _clean_optional_positive_int(
+        non_eu_max_per_term, field_name="non_eu_max_per_term"
+    ) or NON_EU_DEFAULT_MAX_PER_TERM
 
     output_root = Path(outputs_path).expanduser().resolve()
     cache_root = output_root / CACHE_SUBDIR
@@ -393,6 +423,7 @@ def _build_policy_corpus_impl(
                     include_translations=include_translations,
                     output_root=output_root,
                     cache_root=cache_root,
+                    non_eu_max_per_term=resolved_non_eu_max_per_term,
                 )
         finally:
             if log_file is not None:
@@ -577,6 +608,7 @@ def _build_policy_corpus_impl(
         include_nim_fulltext=include_nim_fulltext,
         nim_max_rows=cleaned_nim_max_rows,
         max_jurisdiction_workers=resolved_max_workers,
+        non_eu_max_per_term=resolved_non_eu_max_per_term,
         write_jurisdiction_logs=stdout_router is not None,
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
@@ -611,6 +643,7 @@ def _build_policy_corpus_impl(
         include_nim_fulltext=result.include_nim_fulltext,
         nim_max_rows=result.nim_max_rows,
         max_jurisdiction_workers=result.max_jurisdiction_workers,
+        non_eu_max_per_term=result.non_eu_max_per_term,
         write_jurisdiction_logs=result.write_jurisdiction_logs,
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
@@ -644,6 +677,7 @@ def _run_jurisdiction(
     include_translations: bool,
     output_root: Path,
     cache_root: Path,
+    non_eu_max_per_term: int,
 ) -> _CollectionResult:
     if jurisdiction == "EU":
         source = SourceConfig(
@@ -661,7 +695,7 @@ def _run_jurisdiction(
     source = SourceConfig(
         name=f"{jurisdiction.lower()}-policy-source",
         adapter="non-eu",
-        settings={"countries": [jurisdiction]},
+        settings={"countries": [jurisdiction], "max_per_term": non_eu_max_per_term},
     )
     queries = _build_inline_queries(query_terms, origin="inline")
     return _collect_normalized_documents(source, queries=queries, base_path=output_root)

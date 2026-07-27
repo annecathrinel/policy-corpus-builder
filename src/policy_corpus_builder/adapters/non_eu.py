@@ -2273,6 +2273,26 @@ def add_full_texts_parallel(
     errors = 0
     ok = 0
     counter: Counter[str] = Counter()
+    # curl_cffi supplies the browser-TLS-fingerprint impersonation
+    # _get_with_waf_retry uses for WAF-prone hosts (see
+    # _get_thread_impersonated_session's docstring for the full story on
+    # why that's needed). If it isn't actually importable in this
+    # environment - not installed, or a `pip install --upgrade` on an
+    # existing HPC environment didn't pick up the dependency added after
+    # curl_cffi was introduced - every request to those hosts silently
+    # falls back to the plain requests session and keeps hitting the same
+    # waf_challenge this was meant to fix, with nothing in the log
+    # explaining why. This makes that observable instead of something to
+    # guess at from the waf_challenge count in [ERROR SUMMARY] alone.
+    print(
+        "[FULLTEXT] curl_cffi browser-TLS impersonation: "
+        + (
+            "available"
+            if curl_cffi_requests is not None
+            else "NOT available (pip install curl_cffi) - WAF-prone hosts will "
+            "use the plain requests session and may see more waf_challenge errors"
+        )
+    )
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
