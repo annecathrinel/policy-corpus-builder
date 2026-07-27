@@ -231,6 +231,43 @@ class NonEUNewZealandTests(unittest.TestCase):
         self.assertEqual(enriched["full_text_url"], xml_url)
         self.assertIn("Restore biodiversity values", enriched["full_text"])
 
+    def test_enrich_nz_record_sends_a_browser_user_agent_not_the_tool_default(self) -> None:
+        # Regression test: a real NZ smoke test (2026-07-27) found every
+        # single full-text request to www.legislation.govt.nz getting a WAF
+        # challenge, regardless of request pacing/retries - while requests
+        # to other *.govt.nz hosts always succeeded. NZ requests were
+        # sending the tool's own self-identifying default User-Agent
+        # ("policy-corpus-builder/0.1"); UK's legislation.gov.uk already
+        # gets a real browser UA (UK_BROWSER_UA) for exactly this reason.
+        # NZ full-text requests must get the same treatment.
+        xml_url = "https://www.legislation.govt.nz/act/public/2024/12/en/latest.xml"
+        captured_headers: list[dict[str, str]] = []
+
+        class _HeaderCapturingSession:
+            def get(self, url: str, **kwargs) -> _FakeResponse:
+                captured_headers.append(kwargs.get("headers", {}))
+                return _FakeResponse(200, NZ_XML)
+
+        with (
+            patch.object(non_eu, "_get_thread_session", return_value=_HeaderCapturingSession()),
+            patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+        ):
+            non_eu.enrich_one_record_fulltext(
+                {
+                    "source": "NZ",
+                    "jurisdiction": "New Zealand",
+                    "url": "https://www.legislation.govt.nz/act/public/2024/12/en/latest/",
+                    "xml_url": xml_url,
+                },
+                us_api_key=None,
+                obey_robots=False,
+            )
+
+        self.assertEqual(len(captured_headers), 1)
+        self.assertNotIn("policy-corpus-builder", captured_headers[0]["User-Agent"])
+        self.assertIn("Mozilla/5.0", captured_headers[0]["User-Agent"])
+        self.assertEqual(captured_headers[0]["Accept-Language"], "en-NZ,en;q=0.9")
+
 
 if __name__ == "__main__":
     unittest.main()

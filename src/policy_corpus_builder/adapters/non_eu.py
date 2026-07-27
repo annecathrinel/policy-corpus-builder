@@ -70,6 +70,28 @@ def _uk_content_headers(*, user_agent: str | None = None, accept_xml: bool = Fal
     return headers
 
 
+def _nz_content_headers(*, user_agent: str | None = None, accept_xml: bool = False) -> dict[str, str]:
+    # A real NZ smoke test (2026-07-27) found every single full-text request
+    # to www.legislation.govt.nz getting a WAF challenge, regardless of
+    # request pacing (a per-host throttle made no difference at all), while
+    # every request to other *.govt.nz hosts succeeded. That points at a
+    # signature/UA-based bot rule rather than a rate limit. NZ requests were
+    # sending the tool's own self-identifying default User-Agent
+    # ("policy-corpus-builder/0.1"); UK's legislation.gov.uk already gets a
+    # real browser UA via _uk_content_headers/UK_BROWSER_UA, which strongly
+    # suggests the same kind of block was already solved for UK and simply
+    # never extended to NZ. Mirrors _uk_content_headers with an NZ locale.
+    headers = {
+        "User-Agent": (user_agent or UK_BROWSER_UA).strip(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-NZ,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+    if accept_xml:
+        headers["Accept"] = "application/xml,text/xml;q=0.9,*/*;q=0.8"
+    return headers
+
+
 def _us_download_headers(*, detail_url: str, user_agent: str | None = None) -> dict[str, str]:
     return {
         "User-Agent": (user_agent or UK_BROWSER_UA).strip(),
@@ -2037,7 +2059,12 @@ def enrich_one_record_fulltext(
     if not candidates:
         out["full_text_error"] = "no_url_candidate"
         return out
-    request_headers = _uk_content_headers(user_agent=user_agent) if src == "UK" else _headers_for(user_agent)
+    if src == "UK":
+        request_headers = _uk_content_headers(user_agent=user_agent)
+    elif src == "NZ":
+        request_headers = _nz_content_headers(user_agent=user_agent)
+    else:
+        request_headers = _headers_for(user_agent)
     session = _get_thread_session(user_agent)
     robots = _get_thread_robots(user_agent)
     last_err = ""
@@ -2230,7 +2257,7 @@ def enrich_one_record_fulltext(
                 response = _get_with_waf_retry(
                     session,
                     candidate_url,
-                    headers=_headers_for(user_agent),
+                    headers=_nz_content_headers(user_agent=user_agent, accept_xml=True),
                     timeout=timeout,
                 )
                 if _is_waf_challenge_response(response):
