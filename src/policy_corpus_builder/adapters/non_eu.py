@@ -800,7 +800,12 @@ def fetch_aus_documents(
     verbose: bool = True,
 ) -> pd.DataFrame:
     sess = session or build_session()
-    verify = certifi.where() if verify is None else verify
+    # verify is accepted for signature/call-site compatibility with the
+    # other fetch_* functions (fetch_non_eu_all always passes it), but the
+    # search request below now goes through _get_with_waf_retry, which
+    # always uses certifi.where() internally - see the same tradeoff in
+    # every other _get_with_waf_retry caller in this module.
+    del verify
     href_re = re.compile(r"^/(?:C|F)\d{4}[A-Z]\d{5}(?:/(?:asmade|latest|compilation|made|repealed|superseded))?$", re.I)
     rows: list[dict] = []
     if verbose:
@@ -812,10 +817,29 @@ def fetch_aus_documents(
         request_url = build_aus_search_url(term)
         if verbose:
             print(f"\n[AUS] term='{term}' -> {request_url}")
-        response = safe_get(request_url, session=sess, verify=verify, verbose_err=False)
-        if response is None:
+        # www.legislation.gov.au is in _WAF_PRONE_HOST_MIN_INTERVAL_S (see
+        # _is_waf_block_response's docstring for the smoke-test evidence:
+        # ~12 clean search requests, then HTTP 403 on every remaining term
+        # for the rest of the run). _get_with_waf_retry throttles requests
+        # to this host, prefers a curl_cffi browser-TLS-impersonated
+        # session when available, and retries with backoff on a
+        # challenge/block response - safe_get alone only retries on
+        # network-level exceptions, never on a "successful" HTTP response
+        # carrying a WAF status code. Wrapped in try/except since, unlike
+        # safe_get, _get_with_waf_retry doesn't catch connection-level
+        # exceptions itself.
+        try:
+            response = _get_with_waf_retry(
+                sess, request_url, headers=_headers_for(), timeout=30,
+            )
+        except Exception as exc:
             if verbose:
-                print(f"[AUS] term='{term}' ERROR -> request failed; skipping this term")
+                print(f"[AUS] term='{term}' ERROR -> request failed ({type(exc).__name__}: {exc}); skipping this term")
+            continue
+        waf_label = _classify_waf_response(response)
+        if waf_label:
+            if verbose:
+                print(f"[AUS] term='{term}' ERROR -> {waf_label} (HTTP {response.status_code}); skipping this term")
             continue
         if response.status_code != 200:
             if verbose:
@@ -1636,16 +1660,53 @@ def _is_waf_challenge_response(response: requests.Response | None) -> bool:
     return response.status_code == 202 or waf_action == "challenge"
 
 
+def _is_waf_block_response(response: requests.Response | None) -> bool:
+    """A harder block variant of the same class of problem as
+    _is_waf_challenge_response, distinguished because it warrants a
+    different diagnostic label (waf_block vs waf_challenge) even though
+    both get the same throttle/impersonation/retry treatment.
+
+    Evidence: a 2026-07-27 AUS smoke test (fetch_aus_documents against
+    www.legislation.gov.au) got a clean HTTP 200 for its first ~12 search
+    terms, then HTTP 403 for every single term after that for the rest of
+    the run, with no recovery. That's the signature of a rate-based bot
+    rule tripping partway through a burst of requests and then blocking
+    the session/IP outright, rather than a per-term "forbidden" (which
+    would be inconsistent with success on the very same endpoint moments
+    earlier for unrelated terms). x-amzn-waf-action: block is the header
+    AWS WAF Bot Control sets for a hard block action (as opposed to
+    "challenge" for the interactive 202 case _is_waf_challenge_response
+    handles) - checked here too, but the bare status_code == 403 check is
+    kept as the primary signal since that header wasn't confirmed present
+    on the actual blocked responses (only the status code was logged).
+    """
+    if response is None:
+        return False
+    waf_action = str(response.headers.get("x-amzn-waf-action", "") or "").strip().lower()
+    return response.status_code == 403 or waf_action == "block"
+
+
+def _classify_waf_response(response: requests.Response | None) -> str | None:
+    """Returns "waf_challenge", "waf_block", or None (not WAF-related)."""
+    if _is_waf_challenge_response(response):
+        return "waf_challenge"
+    if _is_waf_block_response(response):
+        return "waf_block"
+    return None
+
+
 # Hosts that run rate-based bot/WAF detection aggressive enough to challenge
-# a meaningful fraction of full-text fetch requests (observed: a 2026-07 NZ
-# smoke test got waf_challenge on 92/97 documents). A minimum interval
-# between requests to the same host - enforced across all concurrent
-# full-text fetch worker threads, not just within one - reduces the chance
-# that a burst of concurrent requests trips a rate-based challenge in the
-# first place.
+# or block a meaningful fraction of requests (observed: a 2026-07 NZ smoke
+# test got waf_challenge on 92/97 full-text documents; a 2026-07-27 AUS
+# smoke test got a clean run for ~12 search requests and then a hard
+# waf_block - HTTP 403 - on every one of the remaining ~15). A minimum
+# interval between requests to the same host - enforced across all
+# concurrent worker threads, not just within one - reduces the chance that
+# a burst of requests trips a rate-based rule in the first place.
 _WAF_PRONE_HOST_MIN_INTERVAL_S = {
     "www.legislation.govt.nz": 1.5,
     "www.legislation.gov.uk": 1.5,
+    "www.legislation.gov.au": 1.5,
 }
 _host_throttle_locks_guard = threading.Lock()
 _host_throttle_locks: dict[str, threading.Lock] = {}
@@ -1690,7 +1751,8 @@ def _get_with_waf_retry(
     backoff_factor: float = 4.0,
     use_browser_impersonation: bool = True,
 ) -> requests.Response:
-    """GET url, retrying with backoff if the response is a WAF challenge.
+    """GET url, retrying with backoff if the response is a WAF challenge or
+    block (see _classify_waf_response).
 
     For hosts in _WAF_PRONE_HOST_MIN_INTERVAL_S, prefers a curl_cffi
     session that impersonates a real browser's TLS fingerprint over the
@@ -1704,7 +1766,7 @@ def _get_with_waf_retry(
     Also mirrors the fix already applied to EUR-Lex NIM full-text fetches:
     an HTTP 202 there meant "still generating, try again shortly" and a
     bounded retry resolved it. If TLS impersonation alone doesn't clear
-    the challenge, a bounded retry with backoff is a cheap additional
+    the challenge/block, a bounded retry with backoff is a cheap additional
     mitigation. Always paces requests to WAF-prone hosts first via
     _throttle_host_request, including before the first attempt.
     """
@@ -1719,7 +1781,7 @@ def _get_with_waf_retry(
     for attempt in range(max_retries + 1):
         _throttle_host_request(url)
         response = client.get(url, timeout=timeout, verify=certifi.where(), headers=headers)
-        if not _is_waf_challenge_response(response):
+        if _classify_waf_response(response) is None:
             return response
         if attempt < max_retries:
             time.sleep(backoff_factor * (attempt + 1))
@@ -2040,7 +2102,13 @@ def enrich_one_record_fulltext(
                 last_err = "skipped candidate: data file (zip/csv/xlsx/etc.)"
                 continue
             if mode == "aus_text_page":
-                response = session.get(candidate_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                response = _get_with_waf_retry(
+                    session, candidate_url, headers=request_headers, timeout=timeout,
+                )
+                waf_label = _classify_waf_response(response)
+                if waf_label:
+                    last_err = waf_label
+                    continue
                 response.raise_for_status()
                 asset_urls = _extract_aus_embedded_text_assets(candidate_url, response.text)
                 if asset_urls:
@@ -2050,7 +2118,13 @@ def enrich_one_record_fulltext(
                             if obey_robots and not robots.allowed(asset_url):
                                 last_err = f"robots_disallow: {asset_url}"
                                 continue
-                            asset_response = session.get(asset_url, timeout=timeout, verify=certifi.where(), headers=request_headers)
+                            asset_response = _get_with_waf_retry(
+                                session, asset_url, headers=request_headers, timeout=timeout,
+                            )
+                            asset_waf_label = _classify_waf_response(asset_response)
+                            if asset_waf_label:
+                                last_err = asset_waf_label
+                                continue
                             asset_response.raise_for_status()
                             text = html_to_visible_text(asset_response.text)
                             if text:
@@ -2102,8 +2176,9 @@ def enrich_one_record_fulltext(
                 response = _get_with_waf_retry(
                     session, candidate_url, headers=request_headers, timeout=timeout,
                 )
-                if _is_waf_challenge_response(response):
-                    last_err = "waf_challenge"
+                waf_label = _classify_waf_response(response)
+                if waf_label:
+                    last_err = waf_label
                     continue
                 response.raise_for_status()
                 content_type = str(response.headers.get("content-type", "") or "").lower()
@@ -2203,8 +2278,9 @@ def enrich_one_record_fulltext(
                     headers=_uk_content_headers(user_agent=user_agent, accept_xml=True),
                     timeout=timeout,
                 )
-                if _is_waf_challenge_response(response):
-                    last_err = "waf_challenge"
+                waf_label = _classify_waf_response(response)
+                if waf_label:
+                    last_err = waf_label
                     continue
                 response.raise_for_status()
                 text = uk_xml_to_text(response.text)
@@ -2223,8 +2299,9 @@ def enrich_one_record_fulltext(
                     headers=_nz_content_headers(user_agent=user_agent, accept_xml=True),
                     timeout=timeout,
                 )
-                if _is_waf_challenge_response(response):
-                    last_err = "waf_challenge"
+                waf_label = _classify_waf_response(response)
+                if waf_label:
+                    last_err = waf_label
                     continue
                 response.raise_for_status()
                 text = uk_xml_to_text(response.text)
@@ -2239,8 +2316,9 @@ def enrich_one_record_fulltext(
             response = _get_with_waf_retry(
                 session, candidate_url, headers=request_headers, timeout=timeout,
             )
-            if _is_waf_challenge_response(response):
-                last_err = "waf_challenge"
+            waf_label = _classify_waf_response(response)
+            if waf_label:
+                last_err = waf_label
                 continue
             response.raise_for_status()
             text = html_to_visible_text(response.text)

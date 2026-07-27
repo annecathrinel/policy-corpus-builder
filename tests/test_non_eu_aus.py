@@ -20,9 +20,10 @@ AUS_SEARCH_HTML = """
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, text: str = ""):
+    def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -57,7 +58,14 @@ class NonEUAustraliaTests(unittest.TestCase):
         )
 
     def test_fetch_aus_documents_extracts_results_from_current_search_page(self) -> None:
-        with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, AUS_SEARCH_HTML)):
+        # fetch_aus_documents' search request now goes through
+        # _get_with_waf_retry (see the module-level tests below and in
+        # test_non_eu_waf_retry.py for coverage of that function's own
+        # throttle/impersonation/retry behavior) rather than calling
+        # safe_get directly, so these tests patch _get_with_waf_retry
+        # itself to isolate fetch_aus_documents' own term-loop/parsing/
+        # diagnostic-printing logic.
+        with patch.object(non_eu, "_get_with_waf_retry", return_value=_FakeResponse(200, AUS_SEARCH_HTML)):
             df = non_eu.fetch_aus_documents(["biodiversity"], max_per_term=10)
 
         self.assertEqual(len(df), 2)
@@ -79,7 +87,7 @@ class NonEUAustraliaTests(unittest.TestCase):
     def test_fetch_aus_documents_prints_progress_diagnostics_by_default(self) -> None:
         stdout = StringIO()
         with (
-            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
+            patch.object(non_eu, "_get_with_waf_retry", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
             redirect_stdout(stdout),
         ):
             non_eu.fetch_aus_documents(["biodiversity"], max_per_term=10)
@@ -93,7 +101,7 @@ class NonEUAustraliaTests(unittest.TestCase):
     def test_fetch_aus_documents_verbose_false_suppresses_output(self) -> None:
         stdout = StringIO()
         with (
-            patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
+            patch.object(non_eu, "_get_with_waf_retry", return_value=_FakeResponse(200, AUS_SEARCH_HTML)),
             redirect_stdout(stdout),
         ):
             non_eu.fetch_aus_documents(["biodiversity"], max_per_term=10, verbose=False)
@@ -101,20 +109,90 @@ class NonEUAustraliaTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
 
     def test_fetch_aus_documents_logs_non_200_status_and_continues_to_next_term(self) -> None:
-        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+        def fake_get_with_waf_retry(session, url: str, **kwargs) -> _FakeResponse:
             if "soil" in url:
                 return _FakeResponse(503, "")
             return _FakeResponse(200, AUS_SEARCH_HTML)
 
         stdout = StringIO()
         with (
-            patch.object(non_eu, "safe_get", side_effect=fake_safe_get),
+            patch.object(non_eu, "_get_with_waf_retry", side_effect=fake_get_with_waf_retry),
             redirect_stdout(stdout),
         ):
             df = non_eu.fetch_aus_documents(["soil biodiversity", "biodiversity"], max_per_term=10)
 
         output = stdout.getvalue()
         self.assertIn("term='soil biodiversity' ERROR -> HTTP 503", output)
+        self.assertEqual(len(df), 2)
+
+    def test_fetch_aus_documents_logs_waf_block_and_continues_to_next_term(self) -> None:
+        # Regression test: a 2026-07-27 AUS smoke test got a clean HTTP 200
+        # for its first ~12 search terms, then HTTP 403 for every single
+        # term after that, permanently, for the rest of the run. This
+        # covers fetch_aus_documents' own handling once _get_with_waf_retry
+        # (already retried internally and still) returns a 403: it should
+        # log it distinctly as waf_block rather than a generic HTTP error,
+        # and keep going to the next term rather than aborting the run.
+        def fake_get_with_waf_retry(session, url: str, **kwargs) -> _FakeResponse:
+            if "biodiversity%20strategy" in url:
+                return _FakeResponse(403, "")
+            return _FakeResponse(200, AUS_SEARCH_HTML)
+
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "_get_with_waf_retry", side_effect=fake_get_with_waf_retry),
+            redirect_stdout(stdout),
+        ):
+            df = non_eu.fetch_aus_documents(
+                ["biodiversity strategy", "biodiversity"], max_per_term=10
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("term='biodiversity strategy' ERROR -> waf_block (HTTP 403)", output)
+        self.assertEqual(len(df), 2)
+
+    def test_fetch_aus_documents_recovers_from_a_persistent_block_via_the_real_waf_retry_path(self) -> None:
+        # End-to-end version of the regression above: exercises the real
+        # _get_with_waf_retry (throttle + retry-with-backoff), not a mock
+        # of it, against a fake session standing in for
+        # www.legislation.gov.au - confirming fetch_aus_documents composes
+        # correctly with the shared WAF-retry helper the same way the
+        # UK/NZ/generic full-text paths already do. Impersonation is
+        # disabled and time.sleep is patched out so this stays hermetic
+        # and fast (curl_cffi is installed in this environment, and the
+        # host is WAF-prone, so without disabling impersonation this would
+        # otherwise attempt a real network call).
+        term_1_url = non_eu.build_aus_search_url("biodiversity strategy")
+        term_2_url = non_eu.build_aus_search_url("biodiversity")
+
+        class _AlwaysBlockedSession:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def get(self, url, **kwargs):
+                self.calls.append(url)
+                if url == term_1_url:
+                    return _FakeResponse(403, "")
+                return _FakeResponse(200, AUS_SEARCH_HTML)
+
+        session = _AlwaysBlockedSession()
+        stdout = StringIO()
+        with (
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+            patch.object(non_eu.time, "sleep"),
+            redirect_stdout(stdout),
+        ):
+            df = non_eu.fetch_aus_documents(
+                ["biodiversity strategy", "biodiversity"],
+                max_per_term=10,
+                session=session,
+            )
+
+        # 1 initial attempt + 2 retries (_get_with_waf_retry's default
+        # max_retries=2) for the always-403 term, then 1 for the term that
+        # succeeds immediately.
+        self.assertEqual(session.calls.count(term_1_url), 3)
+        self.assertIn("term='biodiversity strategy' ERROR -> waf_block (HTTP 403)", stdout.getvalue())
         self.assertEqual(len(df), 2)
 
     def test_extract_aus_embedded_text_assets_prefers_document_1_html(self) -> None:
@@ -158,6 +236,18 @@ class NonEUAustraliaTests(unittest.TestCase):
         with (
             patch.object(non_eu, "_get_thread_session", return_value=session),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            # aus_text_page mode now routes through _get_with_waf_retry
+            # (www.legislation.gov.au is a WAF-prone host), which prefers a
+            # curl_cffi-impersonated session over the injected fake one
+            # when curl_cffi is importable - it is, in this environment.
+            # Disabling impersonation keeps these tests exercising the
+            # injected _FakeSession instead of attempting a real request.
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+            # www.legislation.gov.au is throttled (_WAF_PRONE_HOST_MIN_INTERVAL_S)
+            # and _host_last_request_monotonic is a shared module-level
+            # dict, so back-to-back tests hitting this host could
+            # otherwise incur a real time.sleep of up to that interval.
+            patch.object(non_eu.time, "sleep"),
         ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
@@ -197,6 +287,18 @@ class NonEUAustraliaTests(unittest.TestCase):
         with (
             patch.object(non_eu, "_get_thread_session", return_value=session),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            # aus_text_page mode now routes through _get_with_waf_retry
+            # (www.legislation.gov.au is a WAF-prone host), which prefers a
+            # curl_cffi-impersonated session over the injected fake one
+            # when curl_cffi is importable - it is, in this environment.
+            # Disabling impersonation keeps these tests exercising the
+            # injected _FakeSession instead of attempting a real request.
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+            # www.legislation.gov.au is throttled (_WAF_PRONE_HOST_MIN_INTERVAL_S)
+            # and _host_last_request_monotonic is a shared module-level
+            # dict, so back-to-back tests hitting this host could
+            # otherwise incur a real time.sleep of up to that interval.
+            patch.object(non_eu.time, "sleep"),
         ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {
@@ -230,6 +332,18 @@ class NonEUAustraliaTests(unittest.TestCase):
         with (
             patch.object(non_eu, "_get_thread_session", return_value=session),
             patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            # aus_text_page mode now routes through _get_with_waf_retry
+            # (www.legislation.gov.au is a WAF-prone host), which prefers a
+            # curl_cffi-impersonated session over the injected fake one
+            # when curl_cffi is importable - it is, in this environment.
+            # Disabling impersonation keeps these tests exercising the
+            # injected _FakeSession instead of attempting a real request.
+            patch.object(non_eu, "_get_thread_impersonated_session", return_value=None),
+            # www.legislation.gov.au is throttled (_WAF_PRONE_HOST_MIN_INTERVAL_S)
+            # and _host_last_request_monotonic is a shared module-level
+            # dict, so back-to-back tests hitting this host could
+            # otherwise incur a real time.sleep of up to that interval.
+            patch.object(non_eu.time, "sleep"),
         ):
             enriched = non_eu.enrich_one_record_fulltext(
                 {

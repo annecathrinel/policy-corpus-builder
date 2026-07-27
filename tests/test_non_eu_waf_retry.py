@@ -98,6 +98,83 @@ class GetWithWafRetryTests(unittest.TestCase):
         self.assertEqual(session.calls, 1)
         self.assertEqual(response.text, "real document text")
 
+    def test_retries_a_waf_block_then_succeeds(self) -> None:
+        # Regression test: a 2026-07-27 AUS smoke test
+        # (www.legislation.gov.au) got a clean HTTP 200 for its first ~12
+        # search requests, then HTTP 403 for every remaining request,
+        # permanently, for the rest of the run - a hard block rather than
+        # the interactive 202 challenge NZ/UK showed. _get_with_waf_retry
+        # now retries on that too (see _is_waf_block_response).
+        session = _QueuedResponseSession(
+            [
+                _FakeResponse(403, ""),
+                _FakeResponse(200, "real document text"),
+            ]
+        )
+
+        response = non_eu._get_with_waf_retry(
+            session,
+            "https://www.legislation.gov.au/search/text(%22biodiversity%22,nameAndText,contains)/pointintime(Latest)",
+            headers={},
+            timeout=10,
+            max_retries=2,
+            use_browser_impersonation=False,
+        )
+
+        self.assertEqual(session.calls, 2)
+        self.assertFalse(non_eu._is_waf_block_response(response))
+        self.assertEqual(response.text, "real document text")
+
+    def test_gives_up_after_exhausting_retries_and_still_reports_block(self) -> None:
+        session = _QueuedResponseSession([_FakeResponse(403, "")] * 3)
+
+        response = non_eu._get_with_waf_retry(
+            session,
+            "https://www.legislation.gov.au/search/text(%22biodiversity%22,nameAndText,contains)/pointintime(Latest)",
+            headers={},
+            timeout=10,
+            max_retries=2,
+            use_browser_impersonation=False,
+        )
+
+        self.assertEqual(session.calls, 3)
+        self.assertTrue(non_eu._is_waf_block_response(response))
+
+
+class WafResponseClassificationTests(unittest.TestCase):
+    def test_classifies_202_with_challenge_header_as_waf_challenge(self) -> None:
+        response = _FakeResponse(202, "", headers={"x-amzn-waf-action": "challenge"})
+        self.assertTrue(non_eu._is_waf_challenge_response(response))
+        self.assertFalse(non_eu._is_waf_block_response(response))
+        self.assertEqual(non_eu._classify_waf_response(response), "waf_challenge")
+
+    def test_classifies_403_as_waf_block(self) -> None:
+        response = _FakeResponse(403, "")
+        self.assertFalse(non_eu._is_waf_challenge_response(response))
+        self.assertTrue(non_eu._is_waf_block_response(response))
+        self.assertEqual(non_eu._classify_waf_response(response), "waf_block")
+
+    def test_classifies_x_amzn_waf_action_block_header_as_waf_block_regardless_of_status(self) -> None:
+        response = _FakeResponse(200, "", headers={"x-amzn-waf-action": "block"})
+        self.assertTrue(non_eu._is_waf_block_response(response))
+        self.assertEqual(non_eu._classify_waf_response(response), "waf_block")
+
+    def test_classifies_a_clean_200_as_neither(self) -> None:
+        response = _FakeResponse(200, "ok")
+        self.assertIsNone(non_eu._classify_waf_response(response))
+
+    def test_classifies_an_unrelated_error_status_as_neither(self) -> None:
+        # A genuine 404/503/etc. should not be mistaken for a WAF response -
+        # only the specific signals evidenced in real smoke tests (202 +
+        # challenge header, 403, or an explicit block header) count.
+        for status in (404, 500, 503):
+            with self.subTest(status=status):
+                response = _FakeResponse(status, "")
+                self.assertIsNone(non_eu._classify_waf_response(response))
+
+    def test_classifies_none_response_as_neither(self) -> None:
+        self.assertIsNone(non_eu._classify_waf_response(None))
+
 
 class BrowserImpersonationRoutingTests(unittest.TestCase):
     # Regression coverage for _get_thread_impersonated_session: a 2026-07
