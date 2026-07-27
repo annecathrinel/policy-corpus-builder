@@ -1,7 +1,7 @@
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +18,8 @@ class FakeBuildResult:
     manifest_path: Path
     final_document_count: int
     nim_corpus_path: Path | None = None
+    outputs_path: Path = Path("outputs/demo")
+    jurisdiction_log_paths: dict = field(default_factory=dict)
 
 
 class BuildCorpusCliTests(unittest.TestCase):
@@ -77,6 +79,7 @@ class BuildCorpusCliTests(unittest.TestCase):
             include_nim_fulltext=False,
             nim_max_rows=25,
             max_jurisdiction_workers=None,
+            write_jurisdiction_logs=True,
         )
         self.assertIn("Corpus build completed successfully.", stdout.getvalue())
         # Use str(Path(...)) rather than a hardcoded separator so this assertion
@@ -162,6 +165,114 @@ class BuildCorpusCliTests(unittest.TestCase):
             build_policy_corpus.call_args.kwargs["max_jurisdiction_workers"],
             2,
         )
+
+    def test_build_corpus_cli_no_jurisdiction_logs_forwards_false(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+        fake_result = FakeBuildResult(
+            final_corpus_path=Path("outputs/demo/final/documents.jsonl"),
+            manifest_path=Path("outputs/demo/run-manifest.json"),
+            final_document_count=3,
+        )
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "build-corpus",
+                "--query-terms",
+                "energy",
+                "--jurisdictions",
+                "EU",
+                "--outputs-path",
+                "outputs/demo",
+                "--no-jurisdiction-logs",
+            ]
+            with patch(
+                "policy_corpus_builder.cli.build_policy_corpus",
+                return_value=fake_result,
+            ) as build_policy_corpus:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            build_policy_corpus.call_args.kwargs["write_jurisdiction_logs"],
+            False,
+        )
+
+    def test_build_corpus_cli_defaults_to_writing_jurisdiction_logs(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+        fake_result = FakeBuildResult(
+            final_corpus_path=Path("outputs/demo/final/documents.jsonl"),
+            manifest_path=Path("outputs/demo/run-manifest.json"),
+            final_document_count=3,
+        )
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "build-corpus",
+                "--query-terms",
+                "energy",
+                "--jurisdictions",
+                "EU",
+                "--outputs-path",
+                "outputs/demo",
+            ]
+            with patch(
+                "policy_corpus_builder.cli.build_policy_corpus",
+                return_value=fake_result,
+            ) as build_policy_corpus:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            build_policy_corpus.call_args.kwargs["write_jurisdiction_logs"],
+            True,
+        )
+
+    def test_build_corpus_cli_prints_jurisdiction_logs_location_when_present(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+        fake_result = FakeBuildResult(
+            final_corpus_path=Path("outputs/demo/final/documents.jsonl"),
+            manifest_path=Path("outputs/demo/run-manifest.json"),
+            final_document_count=3,
+            outputs_path=Path("outputs/demo"),
+            jurisdiction_log_paths={"EU": Path("outputs/demo/logs/eu.log")},
+        )
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "build-corpus",
+                "--query-terms",
+                "energy",
+                "--jurisdictions",
+                "EU",
+                "--outputs-path",
+                "outputs/demo",
+            ]
+            with patch(
+                "policy_corpus_builder.cli.build_policy_corpus",
+                return_value=fake_result,
+            ):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(f"Jurisdiction logs: {Path('outputs/demo/logs')}", stdout.getvalue())
 
     def test_build_corpus_cli_reports_builder_validation_errors(self) -> None:
         stdout = StringIO()

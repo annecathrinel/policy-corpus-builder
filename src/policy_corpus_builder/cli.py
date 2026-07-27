@@ -104,6 +104,31 @@ def build_parser() -> argparse.ArgumentParser:
             "once."
         ),
     )
+    jurisdiction_logs_group = build_corpus_parser.add_mutually_exclusive_group()
+    jurisdiction_logs_group.add_argument(
+        "--jurisdiction-logs",
+        dest="write_jurisdiction_logs",
+        action="store_true",
+        default=True,
+        help=(
+            "Write each jurisdiction's (and NIM's) own diagnostic/progress "
+            "output to <outputs-path>/logs/<jurisdiction>.log instead of "
+            "the main job output. This is the default - it's what keeps "
+            "the main job output down to just the "
+            "[policy-corpus-builder] summary lines."
+        ),
+    )
+    jurisdiction_logs_group.add_argument(
+        "--no-jurisdiction-logs",
+        dest="write_jurisdiction_logs",
+        action="store_false",
+        help=(
+            "Print every jurisdiction's (and NIM's) internal diagnostic "
+            "output inline in the main job output instead of splitting it "
+            "into per-jurisdiction log files. Useful for debugging one "
+            "jurisdiction interactively."
+        ),
+    )
 
     return parser
 
@@ -163,6 +188,7 @@ def main() -> int:
                 include_nim_fulltext=args.include_nim_fulltext,
                 nim_max_rows=args.nim_max_rows,
                 max_jurisdiction_workers=args.max_jurisdiction_workers,
+                write_jurisdiction_logs=args.write_jurisdiction_logs,
             )
         except (
             AdapterError,
@@ -181,6 +207,8 @@ def main() -> int:
         print(f"Final documents: {result.final_document_count}")
         if result.nim_corpus_path is not None:
             print(f"NIM corpus: {result.nim_corpus_path}")
+        if result.jurisdiction_log_paths:
+            print(f"Jurisdiction logs: {result.outputs_path / 'logs'}")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+import sys
+import threading
 
 from policy_corpus_builder.adapters import get_adapter
 from policy_corpus_builder.adapters.eurlex_nim_supported.surface import (
@@ -36,6 +39,7 @@ INTERMEDIATE_SUBDIR = "jurisdictions"
 NIM_SUBDIR = "nim"
 CACHE_SUBDIR = "cache"
 AUDIT_SUBDIR = "audit"
+LOGS_SUBDIR = "logs"
 RUN_MANIFEST_FILENAME = "run-manifest.json"
 RESULT_SCHEMA_VERSION = "1.0"
 MANIFEST_SCHEMA_VERSION = "1.0"
@@ -57,6 +61,55 @@ except PackageNotFoundError:
 
 class CorpusBuildValidationError(ValueError):
     """Raised when the public corpus builder inputs are invalid."""
+
+
+class _JurisdictionLogRouter:
+    """Thread-local stdout multiplexer used to send a jurisdiction's (or
+    NIM's) internal diagnostic/progress prints to its own log file instead
+    of the main job output.
+
+    Every source adapter today writes its own diagnostics straight to
+    stdout with plain print() calls (NZ's per-page "[NZ] term=... page=..."
+    lines, NIM's per-document "[NIM TEXT] ..." lines, etc.) - there's no
+    shared logger to configure. Since jurisdictions are collected
+    concurrently under a ThreadPoolExecutor (see
+    _resolve_jurisdiction_worker_count) and sys.stdout is a single
+    process-global object, a plain contextlib.redirect_stdout swap from one
+    worker thread would silently redirect every other concurrently-running
+    thread's output too - there's no way to scope a global assignment to
+    one thread. This router solves that by keeping a threading.local()
+    target: each worker thread enters redirect_to() around just the one
+    call that produces its jurisdiction's internal noise, and only that
+    thread's writes, only while it's inside that block, go to the file.
+    The same worker thread's own "[policy-corpus-builder] Starting
+    jurisdiction ..." / "Running jurisdiction ... Total hits: ..." /
+    "Finished jurisdiction ..." lines are printed just before and after
+    that block (not inside it), so they fall through to the real stdout
+    exactly like any other thread that never enters redirect_to() at all -
+    which is what keeps those summary lines in the main job log.
+    """
+
+    def __init__(self, real_stdout: Any) -> None:
+        self._real_stdout = real_stdout
+        self._local = threading.local()
+
+    def write(self, text: str) -> int:
+        return self._current().write(text)
+
+    def flush(self) -> None:
+        self._current().flush()
+
+    def _current(self) -> Any:
+        return getattr(self._local, "target", None) or self._real_stdout
+
+    @contextmanager
+    def redirect_to(self, target: Any):
+        previous = getattr(self._local, "target", None)
+        self._local.target = target
+        try:
+            yield
+        finally:
+            self._local.target = previous
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +158,10 @@ class PolicyCorpusBuildResult:
     include_nim_fulltext: bool
     nim_max_rows: int | None
     max_jurisdiction_workers: int
+    write_jurisdiction_logs: bool
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
+    jurisdiction_log_paths: dict[str, Path]
     final_corpus_path: Path
     duplicate_audit_csv_path: Path
     duplicate_audit_jsonl_path: Path
@@ -134,10 +189,15 @@ class PolicyCorpusBuildResult:
             "include_nim_fulltext": self.include_nim_fulltext,
             "nim_max_rows": self.nim_max_rows,
             "max_jurisdiction_workers": self.max_jurisdiction_workers,
+            "write_jurisdiction_logs": self.write_jurisdiction_logs,
             "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
             "per_jurisdiction_output_paths": {
                 jurisdiction: str(path)
                 for jurisdiction, path in self.intermediate_paths.items()
+            },
+            "per_jurisdiction_log_paths": {
+                jurisdiction: str(path)
+                for jurisdiction, path in self.jurisdiction_log_paths.items()
             },
             "final_corpus_path": str(self.final_corpus_path),
             "duplicate_audit_csv_path": str(self.duplicate_audit_csv_path),
@@ -165,6 +225,7 @@ class PolicyCorpusBuildResult:
             "final": str((self.outputs_path / FINAL_CORPUS_SUBDIR).resolve()),
             "audit": str((self.outputs_path / AUDIT_SUBDIR).resolve()),
             "nim": str((self.outputs_path / NIM_SUBDIR).resolve()),
+            "logs": str((self.outputs_path / LOGS_SUBDIR).resolve()) if self.write_jurisdiction_logs else None,
         }
         payload["tool_version"] = TOOL_VERSION
         payload["pipeline"] = "build_policy_corpus"
@@ -181,6 +242,7 @@ def build_policy_corpus(
     include_nim_fulltext: bool = True,
     nim_max_rows: int | None = None,
     max_jurisdiction_workers: int | None = None,
+    write_jurisdiction_logs: bool = True,
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions.
 
@@ -190,8 +252,75 @@ def build_policy_corpus(
     regulations.gov, ...) with its own rate limiting and no shared mutable
     state. NIM still runs after the jurisdiction loop, since it depends on
     the EU jurisdiction's results.
-    """
 
+    Every source adapter also writes its own internal diagnostic/progress
+    prints straight to stdout (NZ's per-page search log, NIM's per-document
+    full-text log, etc.) - by default (write_jurisdiction_logs=True) those
+    are captured per-jurisdiction into <outputs_path>/logs/<jurisdiction>.log
+    (and logs/nim.log for NIM) instead of interleaving into the main job
+    output, which then contains only the top-level "[policy-corpus-builder]
+    ..." summary lines (one Starting/Running/Finished line per jurisdiction,
+    plus the merge/NIM/final summary lines). Set
+    write_jurisdiction_logs=False to go back to everything printing inline
+    to the main job output, e.g. for interactively debugging one
+    jurisdiction.
+    """
+    if not isinstance(write_jurisdiction_logs, bool):
+        raise CorpusBuildValidationError("write_jurisdiction_logs must be a boolean.")
+    if not write_jurisdiction_logs:
+        return _build_policy_corpus_impl(
+            query_terms,
+            jurisdictions,
+            outputs_path,
+            include_translations=include_translations,
+            translated_terms=translated_terms,
+            include_nim=include_nim,
+            include_nim_fulltext=include_nim_fulltext,
+            nim_max_rows=nim_max_rows,
+            max_jurisdiction_workers=max_jurisdiction_workers,
+            stdout_router=None,
+        )
+
+    # See _JurisdictionLogRouter's docstring for why a plain
+    # contextlib.redirect_stdout can't be used here: jurisdictions run
+    # concurrently, and sys.stdout is one process-global object. This
+    # installs the router for the duration of this call only, and always
+    # restores the previous sys.stdout afterwards (including on error) so
+    # this composes correctly across repeated/nested calls in the same
+    # process (e.g. a test suite calling build_policy_corpus many times).
+    previous_stdout = sys.stdout
+    stdout_router = _JurisdictionLogRouter(previous_stdout)
+    sys.stdout = stdout_router
+    try:
+        return _build_policy_corpus_impl(
+            query_terms,
+            jurisdictions,
+            outputs_path,
+            include_translations=include_translations,
+            translated_terms=translated_terms,
+            include_nim=include_nim,
+            include_nim_fulltext=include_nim_fulltext,
+            nim_max_rows=nim_max_rows,
+            max_jurisdiction_workers=max_jurisdiction_workers,
+            stdout_router=stdout_router,
+        )
+    finally:
+        sys.stdout = previous_stdout
+
+
+def _build_policy_corpus_impl(
+    query_terms: list[str],
+    jurisdictions: list[str],
+    outputs_path: str | Path,
+    *,
+    include_translations: bool,
+    translated_terms: list[str] | None,
+    include_nim: bool,
+    include_nim_fulltext: bool,
+    nim_max_rows: int | None,
+    max_jurisdiction_workers: int | None,
+    stdout_router: _JurisdictionLogRouter | None,
+) -> PolicyCorpusBuildResult:
     _emit_progress("Starting build_policy_corpus: validating inputs.")
     if not isinstance(include_nim_fulltext, bool):
         raise CorpusBuildValidationError("include_nim_fulltext must be a boolean.")
@@ -213,14 +342,18 @@ def build_policy_corpus(
     final_root = output_root / FINAL_CORPUS_SUBDIR
     audit_root = output_root / AUDIT_SUBDIR
     nim_root = output_root / NIM_SUBDIR
+    logs_root = output_root / LOGS_SUBDIR
 
     cache_root.mkdir(parents=True, exist_ok=True)
     intermediate_root.mkdir(parents=True, exist_ok=True)
     final_root.mkdir(parents=True, exist_ok=True)
     audit_root.mkdir(parents=True, exist_ok=True)
+    if stdout_router is not None:
+        logs_root.mkdir(parents=True, exist_ok=True)
 
     jurisdiction_documents: dict[str, tuple[NormalizedDocument, ...]] = {}
     intermediate_paths: dict[str, Path] = {}
+    jurisdiction_log_paths: dict[str, Path] = {}
     jurisdiction_results: list[JurisdictionBuildResult] = []
 
     resolved_max_workers = _resolve_jurisdiction_worker_count(
@@ -235,16 +368,35 @@ def build_policy_corpus(
 
     def _collect_and_export_jurisdiction(
         jurisdiction: str,
-    ) -> tuple[str, tuple[NormalizedDocument, ...], Path, int]:
+    ) -> tuple[str, tuple[NormalizedDocument, ...], Path, int, Path | None]:
         _emit_progress(f"Starting jurisdiction {jurisdiction}.")
-        jurisdiction_result = _run_jurisdiction(
-            jurisdiction,
-            query_terms=cleaned_query_terms,
-            translated_terms=cleaned_translated_terms,
-            include_translations=include_translations,
-            output_root=output_root,
-            cache_root=cache_root,
-        )
+        # The adapter's own internal diagnostic/progress prints (NZ's
+        # per-page search log being the noisiest example) happen inside
+        # _run_jurisdiction. When stdout_router is set, redirect just this
+        # call - on just this worker thread - to a per-jurisdiction log
+        # file, so the main job output only gets the _emit_progress lines
+        # around it. See _JurisdictionLogRouter's docstring for why this
+        # can't be a plain contextlib.redirect_stdout.
+        jurisdiction_log_path: Path | None = None
+        log_file = None
+        log_context = nullcontext()
+        if stdout_router is not None:
+            jurisdiction_log_path = logs_root / f"{jurisdiction.lower()}.log"
+            log_file = jurisdiction_log_path.open("w", encoding="utf-8")
+            log_context = stdout_router.redirect_to(log_file)
+        try:
+            with log_context:
+                jurisdiction_result = _run_jurisdiction(
+                    jurisdiction,
+                    query_terms=cleaned_query_terms,
+                    translated_terms=cleaned_translated_terms,
+                    include_translations=include_translations,
+                    output_root=output_root,
+                    cache_root=cache_root,
+                )
+        finally:
+            if log_file is not None:
+                log_file.close()
         documents = clean_documents_for_downstream_analysis(
             jurisdiction_result.documents,
             expected_jurisdiction_code=jurisdiction,
@@ -260,7 +412,7 @@ def build_policy_corpus(
             f"{sum(1 for document in documents if document.full_text)}. "
             f"Normalized documents: {len(documents)}."
         )
-        return jurisdiction, documents, path, jurisdiction_result.raw_result_count
+        return jurisdiction, documents, path, jurisdiction_result.raw_result_count, jurisdiction_log_path
 
     # Jurisdictions hit fully independent external APIs and share no mutable
     # state (each adapter call gets a fresh adapter instance and, where
@@ -273,7 +425,7 @@ def build_policy_corpus(
     # the first exception encountered is re-raised once every jurisdiction
     # has completed - matching the previous fail-on-first-error contract
     # without discarding concurrent progress.
-    per_jurisdiction_output: dict[str, tuple[tuple[NormalizedDocument, ...], Path, int]] = {}
+    per_jurisdiction_output: dict[str, tuple[tuple[NormalizedDocument, ...], Path, int, Path | None]] = {}
     first_exception: BaseException | None = None
     with ThreadPoolExecutor(max_workers=resolved_max_workers) as executor:
         futures = {
@@ -283,20 +435,22 @@ def build_policy_corpus(
         for future in as_completed(futures):
             jurisdiction = futures[future]
             try:
-                _, documents, path, raw_result_count = future.result()
+                _, documents, path, raw_result_count, jurisdiction_log_path = future.result()
             except BaseException as exc:  # noqa: BLE001 - re-raised below
                 if first_exception is None:
                     first_exception = exc
                 continue
-            per_jurisdiction_output[jurisdiction] = (documents, path, raw_result_count)
+            per_jurisdiction_output[jurisdiction] = (documents, path, raw_result_count, jurisdiction_log_path)
 
     if first_exception is not None:
         raise first_exception
 
     for jurisdiction in cleaned_jurisdictions:
-        documents, path, raw_result_count = per_jurisdiction_output[jurisdiction]
+        documents, path, raw_result_count, jurisdiction_log_path = per_jurisdiction_output[jurisdiction]
         jurisdiction_documents[jurisdiction] = documents
         intermediate_paths[jurisdiction] = path
+        if jurisdiction_log_path is not None:
+            jurisdiction_log_paths[jurisdiction] = jurisdiction_log_path
         jurisdiction_results.append(
             JurisdictionBuildResult(
                 jurisdiction_code=jurisdiction,
@@ -360,13 +514,35 @@ def build_policy_corpus(
         _emit_progress(f"Number of NIM eligible EU acts: {nim_eligible_seed_count}.")
         if eu_celex_seeds:
             nim_status = "ran"
-            nim_documents = _run_eu_nim(
-                eu_celex_seeds,
-                output_root=output_root,
-                cache_root=cache_root,
-                include_nim_fulltext=include_nim_fulltext,
-                nim_max_rows=cleaned_nim_max_rows,
-            )
+            # NIM's own internal progress ("NIM seed ...: N eligible EU
+            # act(s).", per-document "[NIM TEXT] ..." lines, and the
+            # "=== NIM FULLTEXT RESUME/SUMMARY ===" blocks) is the noisiest
+            # single source of output in a full run. Route it to
+            # logs/nim.log the same way each jurisdiction's internal
+            # diagnostics are routed, leaving only the four
+            # "[policy-corpus-builder] ...NIM..." summary lines above/below
+            # in the main job output.
+            nim_log_path: Path | None = None
+            nim_log_file = None
+            nim_log_context = nullcontext()
+            if stdout_router is not None:
+                nim_log_path = logs_root / "nim.log"
+                nim_log_file = nim_log_path.open("w", encoding="utf-8")
+                nim_log_context = stdout_router.redirect_to(nim_log_file)
+            try:
+                with nim_log_context:
+                    nim_documents = _run_eu_nim(
+                        eu_celex_seeds,
+                        output_root=output_root,
+                        cache_root=cache_root,
+                        include_nim_fulltext=include_nim_fulltext,
+                        nim_max_rows=cleaned_nim_max_rows,
+                    )
+            finally:
+                if nim_log_file is not None:
+                    nim_log_file.close()
+            if nim_log_path is not None:
+                jurisdiction_log_paths["NIM"] = nim_log_path
             nim_documents = clean_documents_for_downstream_analysis(nim_documents)
             nim_deduplication_result = deduplicate_documents(
                 nim_documents,
@@ -401,8 +577,10 @@ def build_policy_corpus(
         include_nim_fulltext=include_nim_fulltext,
         nim_max_rows=cleaned_nim_max_rows,
         max_jurisdiction_workers=resolved_max_workers,
+        write_jurisdiction_logs=stdout_router is not None,
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
+        jurisdiction_log_paths=dict(jurisdiction_log_paths),
         final_corpus_path=final_corpus_path,
         duplicate_audit_csv_path=duplicate_audit_csv_path,
         duplicate_audit_jsonl_path=duplicate_audit_jsonl_path,
@@ -433,8 +611,10 @@ def build_policy_corpus(
         include_nim_fulltext=result.include_nim_fulltext,
         nim_max_rows=result.nim_max_rows,
         max_jurisdiction_workers=result.max_jurisdiction_workers,
+        write_jurisdiction_logs=result.write_jurisdiction_logs,
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
+        jurisdiction_log_paths=result.jurisdiction_log_paths,
         final_corpus_path=result.final_corpus_path,
         duplicate_audit_csv_path=result.duplicate_audit_csv_path,
         duplicate_audit_jsonl_path=result.duplicate_audit_jsonl_path,

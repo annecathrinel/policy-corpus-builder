@@ -288,6 +288,7 @@ Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
 - `outputs/policy-corpus-demo/audit/duplicate_groups_summary.csv`
 - `outputs/policy-corpus-demo/audit/duplicate_groups_summary.json`
 - `outputs/policy-corpus-demo/nim/documents.jsonl` when `include_nim=True` and NIM results are produced
+- `outputs/policy-corpus-demo/logs/<jurisdiction>.log` for each selected jurisdiction, plus `logs/nim.log` when NIM ran - written by default (`write_jurisdiction_logs=True`); see [Progress Output](#progress-output)
 - `outputs/policy-corpus-demo/run-manifest.json`
 
 The final merged corpus is always written to `final/documents.jsonl`.
@@ -371,6 +372,7 @@ NIM runtime can be controlled with two optional top-level arguments:
 - whether EU translations were included
 - whether NIM was included
 - per-jurisdiction output paths and document counts
+- per-jurisdiction (and NIM) log file paths, and whether log-splitting was on for this run (`jurisdiction_log_paths`, `write_jurisdiction_logs`)
 - final corpus path
 - NIM corpus path when produced
 - duplicate-audit CSV and JSONL paths
@@ -383,9 +385,7 @@ For programmatic consumption, `PolicyCorpusBuildResult.to_dict()` returns a stab
 
 ## Progress Output
 
-The builder emits lightweight progress messages directly from `build_policy_corpus(...)`.
-
-At minimum it reports:
+The builder emits lightweight progress messages directly from `build_policy_corpus(...)`, all prefixed `[policy-corpus-builder]`. At minimum it reports:
 
 - pipeline start and input validation
 - each selected jurisdiction starting
@@ -393,12 +393,33 @@ At minimum it reports:
 - each selected jurisdiction finishing with normalized and full-text document counts
 - whether NIM is running or skipped
 - NIM seed candidate and eligible seed counts
-- NIM national measure counts before full-text retrieval
-- NIM full-text retrieval progress when enabled
 - final merge and deduplication
 - duplicates removed, final document count, final output write, and completion
 
-The goal is readable build-stage visibility, not verbose logging.
+That is the *only* thing that prints to the main job output by default. Every source adapter also does its own, much noisier internal diagnostic/progress printing - most visibly NZ's per-page search log (`[NZ] term=... page=...`) and NIM's per-document full-text log (`[NIM TEXT] ...` plus `=== NIM FULLTEXT RESUME/SUMMARY ===` blocks). By default (`write_jurisdiction_logs=True`, the default for both the Python API and the `build-corpus` CLI command) that internal output is captured per-jurisdiction into `outputs_path/logs/<jurisdiction>.log`, and NIM's into `outputs_path/logs/nim.log`, instead of interleaving into the main job output above. This is what keeps a full multi-jurisdiction run's main log down to just the summary lines listed above, one block per jurisdiction, in the order jurisdictions finish (jurisdictions run concurrently - see [Parallel Processing](#parallel-processing) - so that order isn't necessarily the order you passed to `--jurisdictions`).
+
+Set `write_jurisdiction_logs=False` (`--no-jurisdiction-logs` on the CLI) to go back to everything printing inline in the main job output instead - useful when you're interactively debugging a single jurisdiction and don't want to tail a separate file. When jurisdictions run concurrently with this flag off, the internal diagnostic lines from different jurisdictions can interleave with each other in the main output, since each adapter's own `print()` calls aren't coordinated across threads.
+
+The Python-level mechanism behind this is a small thread-aware stdout router (`_JurisdictionLogRouter` in `corpus_builder.py`) rather than a logging-module setup - none of the source adapters use Python's `logging` module today, they all print directly to stdout.
+
+## Parallel Processing
+
+There are two independent levels of concurrency in a `build_policy_corpus(...)` run, and neither of them looks at the machine's CPU count - both are fixed defaults you set explicitly if you want to tune them.
+
+**Jurisdiction-level concurrency** (jurisdictions collected at the same time): controlled by `max_jurisdiction_workers` (`--max-jurisdiction-workers` on the CLI).
+
+- Default (`max_jurisdiction_workers=None`): one worker per *requested* jurisdiction - if you ask for `--jurisdictions EU UK CA`, all three run at once. Each jurisdiction hits a fully separate external API (EUR-Lex, legislation.gov.uk, CanLII, AustLII, api.legislation.govt.nz, regulations.gov), so there's no shared rate limit to protect by throttling below that.
+- Set it lower (e.g. `--max-jurisdiction-workers 2`) to cap how many jurisdictions run concurrently - useful if you want to be gentler on your own network connection or watch progress more linearly. The effective worker count is always `min(max_jurisdiction_workers, number of jurisdictions requested)`.
+- This number is **not** derived from `os.cpu_count()` or any other machine property - it only depends on how many jurisdictions you asked for and this optional override. A run with 6 jurisdictions gets 6 worker threads on a 2-core laptop exactly the same as it would on a 64-core HPC node; these are lightweight I/O-bound network threads, not CPU-bound work, so core count isn't the relevant constraint here anyway.
+
+**Full-text-fetch concurrency within a jurisdiction** (how many documents' full text a single jurisdiction fetches at once): only implemented for the non-EU jurisdictions (UK, CA, AUS, NZ, US), via a `ThreadPoolExecutor` in `non_eu.py`'s `add_full_texts_parallel`.
+
+- The effective default is **4** concurrent full-text fetches per jurisdiction, set by `NonEUAdapter`'s `max_workers` setting default. This is only overridable today through a TOML `source.settings.max_workers` value passed to the lower-level `run` CLI command (see [Lower-Level Config And Adapter Usage](#lower-level-config-and-adapter-usage)) - `build-corpus` doesn't expose it, since it builds each jurisdiction's `SourceConfig` inline with no settings beyond `countries`.
+- Note there's a known inconsistency worth being aware of: `add_full_texts_parallel` and `build_non_eu_fulltext_docs` each default to `max_workers=12` if called directly (e.g. from a notebook or script using the library level API), while `run_non_eu_query_pipeline` (what the adapter actually calls) defaults to `4`. If you're calling these functions directly rather than through `build_policy_corpus`/the CLI, check which one you're using.
+- EUR-Lex and EUR-Lex NIM full-text retrieval (the EU jurisdiction and NIM) have **no concurrency at all** - both `batch_fetch_eurlex_fulltext` and `batch_fetch_nim_fulltext` process documents in a plain sequential loop. This is generally the slowest stage of a run that includes NIM with full text.
+- Like the jurisdiction-level setting, none of these numbers adapt to the machine you're running on.
+
+If you're moving a job to a machine with more (or fewer) cores or a faster/slower network - e.g. onto an HPC node - `max_jurisdiction_workers` is the one lever exposed on `build-corpus` today; the non-EU full-text `max_workers` needs a TOML config via `run` to change.
 
 ## Install
 

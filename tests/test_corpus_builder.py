@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 import unittest
 import csv
 from contextlib import redirect_stdout
@@ -933,6 +934,177 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
 
         self.assertEqual(captured_settings["NZ"], {"countries": ["NZ"]})
         self.assertEqual(captured_settings["UK"], {"countries": ["UK"]})
+
+
+class _PrintingNonEUAdapter(_FakeAdapter):
+    """A fake non-EU adapter that prints its own internal diagnostic line,
+    mirroring how the real non_eu.py adapters (NZ especially) print their
+    own progress straight to stdout. Optionally waits on a barrier before
+    returning, so a test can force two jurisdictions' collect() calls to
+    genuinely overlap in time rather than happening to run one after the
+    other - the only way to actually exercise cross-thread contamination
+    in _JurisdictionLogRouter rather than just the happy, non-overlapping
+    case.
+    """
+
+    name = "non-eu"
+
+    def __init__(self, tracker, *, barrier: threading.Barrier | None = None):
+        self._tracker = tracker
+        self._barrier = barrier
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        country = source.settings["countries"][0]
+        print(f"[FAKE-{country}] internal diagnostic line for {country}")
+        if self._barrier is not None:
+            self._barrier.wait(timeout=5)
+        return _FakeNonEUAdapter(self._tracker).collect(
+            source, query, base_path=base_path, loaded_source=loaded_source
+        )
+
+
+class _PrintingNIMAdapter(_FakeAdapter):
+    """A fake NIM adapter that prints its own internal diagnostic line,
+    mirroring how eurlex_nim_supported's [NIM TEXT] prints work in the
+    real adapter.
+    """
+
+    name = "eurlex-nim"
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def collect(self, source, query, *, base_path, loaded_source=None):
+        print(f"[FAKE-NIM] internal diagnostic line for {query.text}")
+        return _FakeNIMAdapter(self._tracker).collect(
+            source, query, base_path=base_path, loaded_source=loaded_source
+        )
+
+
+class JurisdictionLogRoutingTests(unittest.TestCase):
+    def _build_fake_get_adapter(self, tracker, *, non_eu_adapter_class, nim_adapter_class=_FakeNIMAdapter):
+        def _fake_get_adapter(adapter_name):
+            if adapter_name == "eurlex":
+                return _FakeEurlexAdapter(tracker)
+            if adapter_name == "non-eu":
+                return non_eu_adapter_class(tracker)
+            if adapter_name == "eurlex-nim":
+                return nim_adapter_class(tracker)
+            raise KeyError(adapter_name)
+
+        return _fake_get_adapter
+
+    def test_internal_diagnostics_are_split_into_per_jurisdiction_log_files_by_default(self) -> None:
+        # Regression test: every source adapter prints its own internal
+        # diagnostics straight to stdout (NZ's per-page search log being
+        # the noisiest real example), which used to interleave directly
+        # into the main job output. By default, that output should now go
+        # to <outputs_path>/logs/<jurisdiction>.log instead, leaving only
+        # the "[policy-corpus-builder] ..." summary lines in the main job
+        # output. Uses a barrier to force UK and CA's collect() calls to
+        # genuinely overlap, so this also verifies one jurisdiction's
+        # internal output never leaks into another's log file.
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+        barrier = threading.Barrier(2)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(
+                    tracker,
+                    non_eu_adapter_class=lambda tracker: _PrintingNonEUAdapter(tracker, barrier=barrier),
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["UK", "CA"],
+                    outputs_path=output_root,
+                )
+
+            main_output = stdout.getvalue()
+            self.assertIn("Starting jurisdiction UK.", main_output)
+            self.assertIn("Starting jurisdiction CA.", main_output)
+            self.assertIn("Finished jurisdiction UK.", main_output)
+            self.assertIn("Finished jurisdiction CA.", main_output)
+            self.assertNotIn("[FAKE-UK]", main_output)
+            self.assertNotIn("[FAKE-CA]", main_output)
+
+            uk_log = output_root / "logs" / "uk.log"
+            ca_log = output_root / "logs" / "ca.log"
+            self.assertTrue(uk_log.exists())
+            self.assertTrue(ca_log.exists())
+            uk_log_text = uk_log.read_text(encoding="utf-8")
+            ca_log_text = ca_log.read_text(encoding="utf-8")
+            self.assertIn("[FAKE-UK]", uk_log_text)
+            self.assertNotIn("[FAKE-CA]", uk_log_text)
+            self.assertIn("[FAKE-CA]", ca_log_text)
+            self.assertNotIn("[FAKE-UK]", ca_log_text)
+
+            self.assertEqual(result.jurisdiction_log_paths["UK"], uk_log)
+            self.assertEqual(result.jurisdiction_log_paths["CA"], ca_log)
+            self.assertTrue(result.write_jurisdiction_logs)
+            manifest = result.to_manifest_dict()
+            self.assertEqual(manifest["per_jurisdiction_log_paths"]["UK"], str(uk_log))
+            self.assertEqual(manifest["output_layout"]["logs"], str((output_root / "logs").resolve()))
+
+    def test_write_jurisdiction_logs_false_keeps_output_inline(self) -> None:
+        # write_jurisdiction_logs=False is the escape hatch back to the old
+        # behavior (everything printing straight to the main job output) -
+        # e.g. for interactively debugging a single jurisdiction.
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(
+                    tracker,
+                    non_eu_adapter_class=_PrintingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["UK"],
+                    outputs_path=output_root,
+                    write_jurisdiction_logs=False,
+                )
+
+            self.assertIn("[FAKE-UK]", stdout.getvalue())
+            self.assertFalse((output_root / "logs").exists())
+            self.assertFalse(result.write_jurisdiction_logs)
+            self.assertEqual(result.jurisdiction_log_paths, {})
+            self.assertIsNone(result.to_manifest_dict()["output_layout"]["logs"])
+
+    def test_nim_internal_diagnostics_are_written_to_nim_log(self) -> None:
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_fake_get_adapter(
+                    tracker,
+                    non_eu_adapter_class=_FakeNonEUAdapter,
+                    nim_adapter_class=_PrintingNIMAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine spatial planning"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    include_nim=True,
+                )
+
+            self.assertNotIn("[FAKE-NIM]", stdout.getvalue())
+            self.assertIn("Running NIM from EU CELEX results.", stdout.getvalue())
+            nim_log = output_root / "logs" / "nim.log"
+            self.assertTrue(nim_log.exists())
+            self.assertIn("[FAKE-NIM]", nim_log.read_text(encoding="utf-8"))
+            self.assertEqual(result.jurisdiction_log_paths["NIM"], nim_log)
 
 
 if __name__ == "__main__":
