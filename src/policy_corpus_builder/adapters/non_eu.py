@@ -622,6 +622,41 @@ def _extract_aus_embedded_text_assets(wrapper_url: str, html: str) -> list[str]:
     return [url for _, url in ranked]
 
 
+def _extract_canada_publication_pdf_url(landing_url: str, html: str) -> str:
+    """Finds the actual downloadable-PDF link embedded in a
+    publications.gc.ca /publication.html catalogue-record landing page.
+
+    That landing page is a metadata/catalogue record (title, department,
+    a one-paragraph abstract, "Permanent link to this Catalogue record",
+    links to "MARC XML"/"MARC HTML" *metadata* formats) - not the document
+    itself. A 2026-07-27 live run found every CA full_text was just that
+    catalogue-record boilerplate, because enrich_one_record_fulltext had
+    no dedicated handling for "ca_publication" candidates and fell through
+    to the generic HTML-page handler, which took the landing page's own
+    visible text as if it were the document. The real content lives at a
+    separate PDF the landing page links to (same shape as the direct .pdf
+    hits publications.gc.ca's search results page returns directly, e.g.
+    /collections/collection_2024/eccc/En1-45-2024-eng.pdf) - this pulls
+    that link out rather than guessing a filename from the catalogue
+    number, since the catalogue-number-to-filename mapping isn't reliably
+    derivable and a wrong guess would silently point at nothing.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        if not href:
+            continue
+        full = urljoin(landing_url or CA_BASE, href).split("#", 1)[0]
+        if "publications.gc.ca" not in full.lower():
+            continue
+        if not full.lower().endswith(".pdf"):
+            continue
+        if should_skip_canada_url(full):
+            continue
+        return full
+    return ""
+
+
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
@@ -2039,6 +2074,57 @@ def enrich_one_record_fulltext(
                     out["full_text_error"] = ""
                     return out
                 last_err = "html_empty"
+                continue
+            if mode == "ca_publication":
+                response = _get_with_waf_retry(
+                    session, candidate_url, headers=request_headers, timeout=timeout,
+                )
+                waf_label = _classify_waf_response(response)
+                if waf_label:
+                    last_err = waf_label
+                    continue
+                response.raise_for_status()
+                pdf_url = _extract_canada_publication_pdf_url(candidate_url, response.text)
+                if pdf_url and not should_skip_canada_url(pdf_url):
+                    try:
+                        if obey_robots and not robots.allowed(pdf_url):
+                            last_err = f"robots_disallow: {pdf_url}"
+                        else:
+                            pdf_response = _get_with_waf_retry(
+                                session, pdf_url, headers=request_headers, timeout=timeout,
+                            )
+                            pdf_waf_label = _classify_waf_response(pdf_response)
+                            if pdf_waf_label:
+                                last_err = pdf_waf_label
+                            else:
+                                pdf_response.raise_for_status()
+                                pdf_content_type = str(pdf_response.headers.get("content-type", "") or "").lower()
+                                if "pdf" in pdf_content_type or pdf_response.content[:5].lower() == b"%pdf-":
+                                    pdf_text = clean_canada_full_text(_extract_pdf_text(pdf_response.content))
+                                    if pdf_text:
+                                        out["full_text"] = pdf_text
+                                        out["full_text_url"] = pdf_url
+                                        out["full_text_format"] = "pdf"
+                                        out["full_text_error"] = ""
+                                        return out
+                                    last_err = "canada_publication_pdf_empty"
+                                else:
+                                    last_err = "canada_publication_pdf_unavailable"
+                    except Exception as exc:
+                        last_err = f"{type(exc).__name__}: {exc}"
+                # No embedded PDF link found (or it failed) - fall back to
+                # the landing page's own visible text, same as before this
+                # mode existed. That's catalogue metadata rather than the
+                # real document body, but it's better than nothing for the
+                # (apparently rare) publication that has no linked PDF.
+                text = clean_canada_full_text(html_to_visible_text(response.text))
+                if text:
+                    out["full_text"] = text
+                    out["full_text_url"] = candidate_url
+                    out["full_text_format"] = "html"
+                    out["full_text_error"] = ""
+                    return out
+                last_err = "canada_publication_landing_empty"
                 continue
             if mode == "pdf":
                 response = _get_with_waf_retry(

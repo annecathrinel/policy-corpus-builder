@@ -46,10 +46,17 @@ CANADA_PUBLICATIONS_ZERO_HITS_HTML = """
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        text: str = "",
+        *,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self.text = text
-        self.content = text.encode("utf-8")
+        self.content = content if content is not None else text.encode("utf-8")
         self.headers = headers or {}
 
     def raise_for_status(self) -> None:
@@ -255,6 +262,86 @@ class NonEUCanadaTests(unittest.TestCase):
             ),
             [("https://www.publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf", "pdf")],
         )
+
+    def test_enrich_canada_publication_follows_embedded_pdf_link_for_real_full_text(self) -> None:
+        # Regression test: a 2026-07-27 live run found every CA full_text
+        # was just the /publication.html catalogue-record page's own
+        # boilerplate (title, department, "Permanent link to this
+        # Catalogue record", "MARC XML format MARC HTML format", nav menu
+        # chrome) rather than the actual document - because there was no
+        # dedicated handling for "ca_publication" candidates, so it fell
+        # through to the generic HTML-page handler, which just took the
+        # landing page's own visible text. The real content lives at a PDF
+        # the landing page links to.
+        landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        pdf_url = "https://www.publications.gc.ca/collections/collection_2005/environ/FA1-2-2005-3E.pdf"
+        session = _FakeSession(
+            {
+                landing_url: _FakeResponse(
+                    200,
+                    f"""
+                    <html><body>
+                      You are here: Canada.ca About government Government communications
+                      Government of Canada Publications
+                      Report of the Commissioner ... : FA1-2/2005-3E-PDF
+                      <a href="{pdf_url}">PDF Version</a>
+                      Permanent link to this Catalogue record MARC XML format MARC HTML format
+                    </body></html>
+                    """,
+                ),
+                pdf_url: _FakeResponse(
+                    200,
+                    "",
+                    content=b"%PDF-1.4 fake pdf bytes",
+                    headers={"content-type": "application/pdf"},
+                ),
+            }
+        )
+
+        with (
+            patch.object(non_eu, "_get_thread_session", return_value=session),
+            patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            patch.object(non_eu, "_extract_pdf_text", return_value="The actual audit report full text."),
+        ):
+            enriched = non_eu.enrich_one_record_fulltext(
+                {
+                    "source": "CA",
+                    "jurisdiction": "Canada",
+                    "url": landing_url,
+                },
+                us_api_key=None,
+                obey_robots=True,
+            )
+
+        self.assertEqual(enriched["full_text"], "The actual audit report full text.")
+        self.assertEqual(enriched["full_text_url"], pdf_url)
+        self.assertEqual(enriched["full_text_format"], "pdf")
+        self.assertEqual(enriched["full_text_error"], "")
+
+    def test_extract_canada_publication_pdf_url_finds_embedded_pdf_link(self) -> None:
+        landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        html = """
+        <html><body>
+          <a href="/pub?id=9.576782&sl=0">Permanent link</a>
+          <a href="/collections/collection_2005/environ/FA1-2-2005-3E.pdf">PDF Version</a>
+        </body></html>
+        """
+
+        self.assertEqual(
+            non_eu._extract_canada_publication_pdf_url(landing_url, html),
+            "https://www.publications.gc.ca/collections/collection_2005/environ/FA1-2-2005-3E.pdf",
+        )
+
+    def test_extract_canada_publication_pdf_url_returns_empty_when_no_pdf_link_present(self) -> None:
+        landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
+        html = """
+        <html><body>
+          <a href="/pub?id=9.123456&sl=0">Permanent link</a>
+          <a href="/site/eng/9.123456/marc.xml">MARC XML format</a>
+        </body></html>
+        """
+
+        self.assertEqual(non_eu._extract_canada_publication_pdf_url(landing_url, html), "")
 
     def test_enrich_canada_publication_falls_back_to_landing_page_when_no_asset_is_available(self) -> None:
         landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
