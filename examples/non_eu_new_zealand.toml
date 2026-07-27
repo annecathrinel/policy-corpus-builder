@@ -16,7 +16,6 @@ enabled = true
 # fallback mode.
 countries = ["NZ"]
 max_per_term = 500
-max_pages = 5
 max_workers = 8
 progress_every = 0
 obey_robots = true

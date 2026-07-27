@@ -80,6 +80,24 @@ class NonEUNewZealandTests(unittest.TestCase):
             "https://api.legislation.govt.nz/v0/works?search_term=biodiversity&search_field=content&page=2&per_page=20",
         )
 
+    def test_nz_search_url_quotes_multi_word_terms_for_an_exact_phrase_match(self) -> None:
+        # Regression test: legislation.govt.nz's search (both the website
+        # and this API) treats unquoted multi-word input as a fuzzy/OR
+        # match over the individual words, not a phrase - "marine
+        # biodiversity" without quotes matched "marine" OR "biodiversity"
+        # rather than the actual phrase. `"..."` is the documented
+        # operator for an exact phrase match, and UK/US already quote
+        # their multi-word terms the same way.
+        url = non_eu.nz_search_url(non_eu.NZ_API_BASE, "marine biodiversity", page=1)
+
+        self.assertIn("search_term=%22marine%20biodiversity%22", url)
+
+    def test_nz_search_url_does_not_quote_a_single_word_term(self) -> None:
+        url = non_eu.nz_search_url(non_eu.NZ_API_BASE, "biodiversity", page=1)
+
+        self.assertIn("search_term=biodiversity", url)
+        self.assertNotIn("%22", url)
+
     def test_extract_nz_api_rows_prefers_version_formats(self) -> None:
         rows = non_eu._extract_nz_api_rows("biodiversity", NZ_API_PAYLOAD, max_per_term=10)
 
@@ -121,6 +139,57 @@ class NonEUNewZealandTests(unittest.TestCase):
             df["url"].iloc[0],
             "https://www.legislation.govt.nz/act/public/2024/12/en/latest/",
         )
+
+    def test_fetch_nz_documents_paginates_past_twenty_pages_when_more_results_remain(self) -> None:
+        # Regression test: fetch_nz_documents used to stop after a fixed
+        # max_pages ceiling (originally 5, later bumped to 20) regardless
+        # of max_per_term, unlike UK/AUS/US which paginate until
+        # max_per_term is reached or the API genuinely runs out of
+        # results. At the API's fixed per_page=20, a max_pages=20 ceiling
+        # silently capped every NZ term at 400 documents, always short of
+        # the default max_per_term=500 budget every other jurisdiction
+        # gets to use in full. This simulates a term with 25 one-result
+        # pages (25 total results) and a max_per_term of 25, which used to
+        # get cut off at page 20/result 20.
+        total_results = 25
+        requested_pages: list[int] = []
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            page = int(url.split("page=")[1].split("&")[0])
+            requested_pages.append(page)
+            payload = {
+                "results": [
+                    {
+                        "work_id": f"act_public_2024_{page}",
+                        "latest_matching_version": {
+                            "title": f"Act {page}",
+                            "version_id": f"act_public_2024_{page}_en_latest",
+                            "formats": [
+                                {
+                                    "type": "xml",
+                                    "url": f"https://www.legislation.govt.nz/act/public/2024/{page}/en/latest.xml",
+                                },
+                            ],
+                        },
+                    }
+                ],
+                "page": page,
+                "per_page": 1,
+                "total": total_results,
+            }
+            return _FakeResponse(200, json.dumps(payload))
+
+        with patch.object(non_eu, "safe_get", side_effect=fake_safe_get):
+            df = non_eu.fetch_nz_documents(
+                ["biodiversity"],
+                api_key="nz-test-key",
+                max_per_term=total_results,
+                verbose=False,
+            )
+
+        self.assertEqual(len(df), total_results)
+        self.assertEqual(max(requested_pages), total_results)
+        self.assertGreater(max(requested_pages), 20)
 
     def test_fetch_nz_documents_verbose_api_success_does_not_crash(self) -> None:
         # Regression test: the per-page progress print on a successful API

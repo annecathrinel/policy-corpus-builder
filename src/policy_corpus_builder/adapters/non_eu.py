@@ -287,9 +287,21 @@ def build_aus_search_url(term: str) -> str:
 
 
 def nz_search_url(base: str, term: str, page: int = 1) -> str:
+    # legislation.govt.nz's search (both the website box and this API,
+    # which the developer docs say has "functionality equivalent to the
+    # search function on this website") treats unquoted multi-word input
+    # as a fuzzy/OR-style match over the individual words, not a phrase.
+    # `"..."` is the documented operator for an exact word/phrase match
+    # (confirmed on /advanced_search/'s "Search operators and examples").
+    # Without it, a term like "marine biodiversity" was being searched as
+    # "marine" OR "biodiversity" rather than the actual phrase - the same
+    # quoting fetch_uk_documents and fetch_us_documents already do for
+    # their multi-word terms.
+    term = term.strip()
+    query_term = f'"{term}"' if " " in term else term
     query = "&".join(
         [
-            f"search_term={quote(term)}",
+            f"search_term={quote(query_term)}",
             "search_field=content",
             f"page={page}",
             "per_page=20",
@@ -988,7 +1000,6 @@ def fetch_nz_documents(
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
-    max_pages: int = 20,
     user_agent: str | None = None,
     verbose: bool = True,
     return_diagnostics: bool = False,
@@ -1009,13 +1020,21 @@ def fetch_nz_documents(
     diagnostics: list[dict] = []
     if verbose:
         print("\n========== NZ retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | max_pages: {max_pages}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
         print("[NZ] Using official API: api.legislation.govt.nz/v0/works")
     for term in search_terms:
         kept = 0
         if verbose:
             print(f"\n[NZ] term='{term}' START")
-        for page in range(1, max_pages + 1):
+        # No page-count ceiling here, to match UK/AUS/US: pagination keeps
+        # going until max_per_term is reached or the API runs out of
+        # results (either an empty page or the total-results check below).
+        # A fixed max_pages (previously 5, then 20) was silently capping
+        # NZ well below max_per_term=500 - at 20 pages * 20 results/page
+        # that's at most 400 documents per term, always short of the
+        # per-term budget every other jurisdiction gets to use in full.
+        page = 1
+        while kept < max_per_term:
             request_url = nz_search_url(NZ_API_BASE, term, page=page)
             if verbose:
                 print(f"[NZ] term='{term}' page={page} -> {request_url}")
@@ -1143,6 +1162,7 @@ def fetch_nz_documents(
                 if verbose:
                     print(f"[NZ] term='{term}' reached final API page; stopping")
                 break
+            page += 1
             time.sleep(sleep_s)
         if verbose:
             print(f"[NZ] term='{term}' DONE -> kept={kept}")
