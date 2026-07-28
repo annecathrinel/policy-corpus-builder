@@ -648,6 +648,22 @@ def _extract_canada_publication_pdf_url(landing_url: str, html: str) -> str:
     that link out rather than guessing a filename from the catalogue
     number, since the catalogue-number-to-filename mapping isn't reliably
     derivable and a wrong guess would silently point at nothing.
+
+    A 2026-07-28 live rerun (after the fix above shipped) found the
+    catalogue page's "Electronic document" row is still not being
+    followed: its href isn't always a literal *.pdf* URL (some are
+    server-side redirect/collection links, e.g.
+    publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf reached
+    via a wrapper), so the old strict ``endswith(".pdf")`` filter missed
+    it and every record fell through to the landing-page-only fallback.
+    This now also accepts an anchor whose link *text* mentions "pdf"
+    (e.g. "FA1-2-2005-3E.pdf (PDF, 547 KB)") or whose path is under
+    publications.gc.ca's /collections/ document-hosting prefix, even
+    without a literal .pdf suffix on the href itself. A false positive
+    here just costs one wasted fetch - enrich_one_record_fulltext still
+    verifies the actual response content-type/magic-bytes before
+    trusting it as a PDF, so this can't silently mislabel non-PDF
+    content as the document.
     """
     soup = BeautifulSoup(html or "", "html.parser")
     for anchor in soup.find_all("a", href=True):
@@ -657,12 +673,105 @@ def _extract_canada_publication_pdf_url(landing_url: str, html: str) -> str:
         full = urljoin(landing_url or CA_BASE, href).split("#", 1)[0]
         if "publications.gc.ca" not in full.lower():
             continue
-        if not full.lower().endswith(".pdf"):
+        lower_full = full.lower()
+        looks_like_pdf = lower_full.endswith(".pdf")
+        if not looks_like_pdf:
+            link_text = anchor.get_text(" ", strip=True).lower()
+            looks_like_pdf = "pdf" in link_text or "/collections/" in lower_full
+        if not looks_like_pdf:
             continue
         if should_skip_canada_url(full):
             continue
         return full
     return ""
+
+
+def _canada_marc_xml_url(publication_url: str) -> str:
+    """Derives a publications.gc.ca catalogue record's MARC XML metadata
+    URL from its /publication.html landing-page URL, e.g.
+    .../site/eng/9.698872/publication.html ->
+    .../site/eng/9.698872/marcXml.html - same catalogue ID, sibling page.
+    """
+    if not publication_url:
+        return ""
+    lower = publication_url.lower()
+    suffix = "/publication.html"
+    if not lower.endswith(suffix):
+        return ""
+    return publication_url[: -len(suffix)] + "/marcXml.html"
+
+
+def _extract_canada_marc_pdf_url(xml_text: str) -> str:
+    """Extracts the real document URL from a publications.gc.ca MARC XML
+    metadata record (the page linked as "MARC XML format" from a
+    catalogue-record landing page).
+
+    Confirmed live (2026-07-28) that this is a more reliable source for
+    the actual document link than scraping the landing page's own HTML
+    (see _extract_canada_publication_pdf_url): the landing page's
+    "Electronic document" link isn't always a literal *.pdf*-suffixed
+    href, but the MARC record's standard 856 "location and access"
+    field's $u subfield always has the direct URL, e.g.:
+        <marc:datafield tag="856" ind1="4" ind2="0">
+          <marc:subfield code="u">https://publications.gc.ca/collections/collection_2007/ic/Iu91-4-8-2004E.pdf</marc:subfield>
+        </marc:datafield>
+    """
+    try:
+        root = ET.fromstring(xml_text or "")
+    except ET.ParseError:
+        return ""
+
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+    for datafield in root.iter():
+        if local_name(datafield.tag) != "datafield" or datafield.get("tag") != "856":
+            continue
+        for subfield in datafield:
+            if local_name(subfield.tag) != "subfield" or subfield.get("code") != "u":
+                continue
+            url = (subfield.text or "").strip()
+            if url:
+                return url
+    return ""
+
+
+def _fetch_and_extract_canada_pdf(
+    session: requests.Session,
+    pdf_url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+    obey_robots: bool,
+    robots: "RobotsCache",
+) -> tuple[str, str]:
+    """Fetches pdf_url and, if it's really a PDF, extracts+cleans its
+    text. Returns (text, "") on success or ("", error_label) on any
+    failure. Shared by enrich_one_record_fulltext's two CA-publication
+    PDF-discovery paths (the MARC XML 856 $u field, and the HTML-scrape
+    fallback) so a bad/blocked/non-PDF link is handled identically
+    either way.
+    """
+    if obey_robots and not robots.allowed(pdf_url):
+        return "", f"robots_disallow: {pdf_url}"
+    try:
+        pdf_response = _get_with_waf_retry(session, pdf_url, headers=headers, timeout=timeout)
+    except Exception as exc:
+        return "", f"{type(exc).__name__}: {exc}"
+    waf_label = _classify_waf_response(pdf_response)
+    if waf_label:
+        return "", waf_label
+    try:
+        pdf_response.raise_for_status()
+    except Exception as exc:
+        return "", f"{type(exc).__name__}: {exc}"
+    content_type = str(pdf_response.headers.get("content-type", "") or "").lower()
+    if "pdf" not in content_type and pdf_response.content[:5].lower() != b"%pdf-":
+        return "", "canada_publication_pdf_unavailable"
+    text = clean_canada_full_text(_extract_pdf_text(pdf_response.content))
+    if not text:
+        return "", "canada_publication_pdf_empty"
+    return text, ""
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -2219,39 +2328,67 @@ def enrich_one_record_fulltext(
                     last_err = waf_label
                     continue
                 response.raise_for_status()
-                pdf_url = _extract_canada_publication_pdf_url(candidate_url, response.text)
-                if pdf_url and not should_skip_canada_url(pdf_url):
+
+                # Primary: the record's MARC XML metadata page (same
+                # catalogue ID, sibling of the .../publication.html
+                # landing page) has a standard 856 field whose $u
+                # subfield is the real document URL - confirmed live
+                # 2026-07-28 as the reliable source for this, since the
+                # landing page's own "Electronic document" link isn't
+                # always a literal *.pdf*-suffixed href (see
+                # _extract_canada_publication_pdf_url's docstring for
+                # the HTML-scrape fallback this supersedes as the first
+                # choice).
+                marc_url = _canada_marc_xml_url(candidate_url)
+                if marc_url and not should_skip_canada_url(marc_url):
                     try:
-                        if obey_robots and not robots.allowed(pdf_url):
-                            last_err = f"robots_disallow: {pdf_url}"
+                        marc_response = _get_with_waf_retry(
+                            session, marc_url, headers=request_headers, timeout=timeout,
+                        )
+                        marc_waf_label = _classify_waf_response(marc_response)
+                        if marc_waf_label:
+                            last_err = marc_waf_label
                         else:
-                            pdf_response = _get_with_waf_retry(
-                                session, pdf_url, headers=request_headers, timeout=timeout,
-                            )
-                            pdf_waf_label = _classify_waf_response(pdf_response)
-                            if pdf_waf_label:
-                                last_err = pdf_waf_label
+                            marc_response.raise_for_status()
+                            marc_pdf_url = _extract_canada_marc_pdf_url(marc_response.text)
+                            if marc_pdf_url and not should_skip_canada_url(marc_pdf_url):
+                                text, err = _fetch_and_extract_canada_pdf(
+                                    session, marc_pdf_url, headers=request_headers, timeout=timeout,
+                                    obey_robots=obey_robots, robots=robots,
+                                )
+                                if text:
+                                    out["full_text"] = text
+                                    out["full_text_url"] = marc_pdf_url
+                                    out["full_text_format"] = "pdf"
+                                    out["full_text_error"] = ""
+                                    return out
+                                last_err = err or "canada_publication_marc_pdf_failed"
                             else:
-                                pdf_response.raise_for_status()
-                                pdf_content_type = str(pdf_response.headers.get("content-type", "") or "").lower()
-                                if "pdf" in pdf_content_type or pdf_response.content[:5].lower() == b"%pdf-":
-                                    pdf_text = clean_canada_full_text(_extract_pdf_text(pdf_response.content))
-                                    if pdf_text:
-                                        out["full_text"] = pdf_text
-                                        out["full_text_url"] = pdf_url
-                                        out["full_text_format"] = "pdf"
-                                        out["full_text_error"] = ""
-                                        return out
-                                    last_err = "canada_publication_pdf_empty"
-                                else:
-                                    last_err = "canada_publication_pdf_unavailable"
+                                last_err = "canada_publication_marc_no_856_url"
                     except Exception as exc:
                         last_err = f"{type(exc).__name__}: {exc}"
-                # No embedded PDF link found (or it failed) - fall back to
-                # the landing page's own visible text, same as before this
-                # mode existed. That's catalogue metadata rather than the
-                # real document body, but it's better than nothing for the
-                # (apparently rare) publication that has no linked PDF.
+
+                # Fallback: scrape the landing page's own HTML for
+                # something that looks like the document link, in case
+                # the MARC XML page is unavailable or lacks an 856 $u.
+                pdf_url = _extract_canada_publication_pdf_url(candidate_url, response.text)
+                if pdf_url and not should_skip_canada_url(pdf_url):
+                    text, err = _fetch_and_extract_canada_pdf(
+                        session, pdf_url, headers=request_headers, timeout=timeout,
+                        obey_robots=obey_robots, robots=robots,
+                    )
+                    if text:
+                        out["full_text"] = text
+                        out["full_text_url"] = pdf_url
+                        out["full_text_format"] = "pdf"
+                        out["full_text_error"] = ""
+                        return out
+                    last_err = err or last_err
+
+                # Last resort: the landing page's own visible text.
+                # That's catalogue metadata rather than the real
+                # document body, but it's better than nothing for the
+                # (apparently rare) publication with no PDF link at all.
                 text = clean_canada_full_text(html_to_visible_text(response.text))
                 if text:
                     out["full_text"] = text
@@ -2425,6 +2562,52 @@ def enrich_one_record_fulltext(
     out["full_text_error"] = last_err or "unknown_error"
     return out
 
+def _matched_terms_found_in_text(matched_terms: object, title: str, full_text: str) -> bool | None:
+    """Checks whether every word of at least one of a record's matched
+    query terms literally appears (case-insensitively) in its own title
+    or full_text.
+
+    Returns None when there's nothing to check against (no matched terms
+    recorded, or full-text retrieval never produced any text) - a fetch
+    failure shouldn't be reported as an irrelevant match, since there's
+    no text to judge relevance from.
+
+    A 2026-07-28 live run's US results included several fetched
+    documents that share no words at all with their matched search term
+    (e.g. a "blue economy" hit whose title/text was an unrelated raw
+    climate-data CSV export, and a "nature repair" hit that was an EPA
+    spill-response data-export stub). regulations.gov's
+    filter[searchTerm] appears to match at the docket/submission level
+    rather than the individual attached document's own text, so the
+    API returning a hit doesn't guarantee the fetched document is
+    actually about the term. AUS showed a milder version of the same
+    thing (large omnibus Acts like the Income Tax Assessment Act 1997
+    matching "offshore renewable" via a full-text-contains search with
+    no relevance ranking). This flags the mismatch (term_verified=False
+    in the output) rather than silently trusting every upstream hit -
+    it doesn't drop the record outright, since a false negative here (a
+    genuinely relevant document that just phrases things differently)
+    would otherwise disappear from the corpus with no way to notice or
+    recover it; callers can filter on term_verified downstream instead.
+    """
+    if isinstance(matched_terms, (list, tuple, set)):
+        terms = [str(term) for term in matched_terms if str(term).strip()]
+    elif matched_terms:
+        terms = [str(matched_terms)]
+    else:
+        terms = []
+    if not terms:
+        return None
+    haystack = f"{title or ''} {full_text or ''}".lower()
+    if not haystack.strip():
+        return None
+    for term in terms:
+        words = [word for word in re.split(r"\s+", term.lower().strip()) if word]
+        if words and all(word in haystack for word in words):
+            return True
+    return False
+
+
 def add_full_texts_parallel(
     records: list[dict],
     *,
@@ -2433,13 +2616,45 @@ def add_full_texts_parallel(
     progress_every: int = 25,
     obey_robots: bool = True,
     user_agent: str | None = None,
+    fulltext_cache: dict[str, dict] | None = None,
 ) -> list[dict]:
     if not records:
         return []
+    # fulltext_cache lets a caller (NonEUAdapter, in practice) share one
+    # dict across every query term's separate call into this pipeline
+    # within the same jurisdiction run. Each query term is otherwise a
+    # fully independent, stateless pass (see run_non_eu_query_pipeline),
+    # so the same document turning up under two different search terms
+    # was being fetched and parsed from scratch twice - confirmed on a
+    # 2026-07-27 live run (EU: one 5.4MB Commission working document was
+    # independently fetched 5 separate times, once per matching term;
+    # US/EU overall had 14%/30% of their full-text fetches be exact
+    # duplicate URLs already seen under a different term in the same
+    # run). Only successful fetches are cached: a failure (WAF
+    # challenge, timeout, etc.) is left to retry fresh under the next
+    # term rather than being permanently remembered as failed, since
+    # this run's per-term throttling/backoff timing could easily let a
+    # later attempt succeed where an earlier one didn't.
+    cache = fulltext_cache if fulltext_cache is not None else {}
+    cache_hits = 0
+    to_fetch: list[dict] = []
+    cached_results: dict[int, dict] = {}
+    for index, rec in enumerate(records):
+        key = doc_key_country(rec)
+        cached = cache.get(key) if key else None
+        if cached:
+            enriched = dict(rec)
+            enriched.update(cached)
+            cached_results[index] = enriched
+            cache_hits += 1
+        else:
+            to_fetch.append((index, rec))
     out: list[dict] = []
     errors = 0
     ok = 0
     counter: Counter[str] = Counter()
+    term_mismatches = 0
+    term_checked = 0
     # curl_cffi supplies the browser-TLS-fingerprint impersonation
     # _get_with_waf_retry uses for WAF-prone hosts (see
     # _get_thread_impersonated_session's docstring for the full story on
@@ -2481,6 +2696,29 @@ def add_full_texts_parallel(
             "AWS WAF Challenge action (e.g. www.legislation.govt.nz)"
         )
     )
+    def _apply_term_check(enriched: dict) -> None:
+        nonlocal term_checked, term_mismatches
+        verified = _matched_terms_found_in_text(
+            enriched.get("matched_terms"), enriched.get("title", ""), enriched.get("full_text", ""),
+        )
+        enriched["term_verified"] = verified
+        if verified is not None:
+            term_checked += 1
+            if not verified:
+                term_mismatches += 1
+
+    for enriched in cached_results.values():
+        _apply_term_check(enriched)
+        out.append(enriched)
+        if enriched.get("full_text"):
+            ok += 1
+        else:
+            errors += 1
+            counter[str(enriched.get("full_text_error", "error"))[:120]] += 1
+
+    if cache_hits:
+        print(f"[FULLTEXT] cross-term cache: reused {cache_hits} already-fetched document(s), skipping their fetch")
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
@@ -2490,7 +2728,7 @@ def add_full_texts_parallel(
                 obey_robots=obey_robots,
                 user_agent=user_agent,
             )
-            for rec in records
+            for _, rec in to_fetch
         ]
         for idx, future in enumerate(as_completed(futures), start=1):
             try:
@@ -2499,9 +2737,18 @@ def add_full_texts_parallel(
                 errors += 1
                 counter[type(exc).__name__] += 1
                 continue
+            _apply_term_check(enriched)
             out.append(enriched)
             if enriched.get("full_text"):
                 ok += 1
+                key = doc_key_country(enriched)
+                if key:
+                    cache[key] = {
+                        "full_text": enriched.get("full_text", ""),
+                        "full_text_url": enriched.get("full_text_url", ""),
+                        "full_text_format": enriched.get("full_text_format", ""),
+                        "full_text_error": "",
+                    }
             else:
                 errors += 1
                 counter[str(enriched.get("full_text_error", "error"))[:120]] += 1
@@ -2511,6 +2758,12 @@ def add_full_texts_parallel(
         print("[ERROR SUMMARY]")
         for label, count in counter.most_common(15):
             print(f"{count}x {label}")
+    if term_checked:
+        print(
+            f"[RELEVANCE] {term_mismatches}/{term_checked} fetched document(s) don't contain any of "
+            "their matched query term's words in title/full_text (term_verified=False) - likely a "
+            "docket-level or loose upstream search match rather than a wrong fetch"
+        )
     return out
 
 def build_non_eu_doc_tables(all_non_eu_rows_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -2556,11 +2809,12 @@ def build_non_eu_fulltext_docs(
     progress_every: int = 25,
     obey_robots: bool = True,
     user_agent: str | None = None,
+    fulltext_cache: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
     resolved_us_api_key = us_api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
     if raw_hits_df.empty:
         return pd.DataFrame(
-            columns=["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source"]
+            columns=["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified"]
         )
     grouped_docs = aggregate_one_row_per_doc(raw_hits_df.to_dict(orient="records"))
     enriched = add_full_texts_parallel(
@@ -2570,6 +2824,7 @@ def build_non_eu_fulltext_docs(
         progress_every=progress_every,
         obey_robots=obey_robots,
         user_agent=user_agent,
+        fulltext_cache=fulltext_cache,
     )
     df = pd.DataFrame(enriched)
     if df.empty:
@@ -2592,7 +2847,7 @@ def build_non_eu_fulltext_docs(
     for column in ["jurisdiction", "title", "lang", "source"]:
         if column not in df.columns:
             df[column] = ""
-    ordered = ["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source"]
+    ordered = ["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified"]
     for column in ordered:
         if column not in df.columns:
             df[column] = ""
@@ -2667,8 +2922,18 @@ def run_non_eu_query_pipeline(
     progress_every: int = 0,
     obey_robots: bool = True,
     user_agent: str | None = None,
+    fulltext_cache: dict[str, dict] | None = None,
 ) -> NonEUQueryRun:
-    """Run one real non-EU retrieval query through retrieval, full text, and harmonization."""
+    """Run one real non-EU retrieval query through retrieval, full text, and harmonization.
+
+    fulltext_cache, if given, is a plain dict the caller owns and reuses
+    across multiple calls to this function for the same jurisdiction (one
+    call per query term - see NonEUAdapter.collect) so a document that
+    matches more than one search term only gets its full text fetched
+    once. Leaving it as None (the default) preserves the old
+    fetch-every-time behaviour for direct callers/tests that don't care
+    about cross-call caching.
+    """
 
     resolved_us_api_key = us_api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
 
@@ -2687,6 +2952,7 @@ def run_non_eu_query_pipeline(
         progress_every=progress_every,
         obey_robots=obey_robots,
         user_agent=user_agent,
+        fulltext_cache=fulltext_cache,
     )
 
     if not fulltext_docs_df.empty:

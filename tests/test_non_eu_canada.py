@@ -273,7 +273,13 @@ class NonEUCanadaTests(unittest.TestCase):
         # through to the generic HTML-page handler, which just took the
         # landing page's own visible text. The real content lives at a PDF
         # the landing page links to.
+        #
+        # The marcXml.html response here has no 856 field, so this
+        # exercises the HTML-scrape fallback path specifically (see
+        # test_enrich_canada_publication_prefers_marc_xml_856_link_when_available
+        # for the primary MARC XML path).
         landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        marc_url = "https://www.publications.gc.ca/site/eng/9.576782/marcXml.html"
         pdf_url = "https://www.publications.gc.ca/collections/collection_2005/environ/FA1-2-2005-3E.pdf"
         session = _FakeSession(
             {
@@ -289,6 +295,7 @@ class NonEUCanadaTests(unittest.TestCase):
                     </body></html>
                     """,
                 ),
+                marc_url: _FakeResponse(200, "<record><leader>00000</leader></record>"),
                 pdf_url: _FakeResponse(
                     200,
                     "",
@@ -317,6 +324,131 @@ class NonEUCanadaTests(unittest.TestCase):
         self.assertEqual(enriched["full_text_url"], pdf_url)
         self.assertEqual(enriched["full_text_format"], "pdf")
         self.assertEqual(enriched["full_text_error"], "")
+
+    def test_enrich_canada_publication_prefers_marc_xml_856_link_when_available(self) -> None:
+        # A 2026-07-28 live rerun (after the HTML-scrape PDF-follow fix
+        # above shipped) found every CA full_text was STILL landing-page
+        # boilerplate: the "Electronic document" link on these catalogue
+        # pages isn't always a literal *.pdf*-suffixed href, so the
+        # HTML-scrape extractor missed it. Cat identified the reliable
+        # source: the record's MARC XML metadata page has a standard 856
+        # field whose $u subfield is the real document URL. This is tried
+        # first, before the HTML-scrape fallback.
+        landing_url = "https://www.publications.gc.ca/site/eng/9.698872/publication.html"
+        marc_url = "https://www.publications.gc.ca/site/eng/9.698872/marcXml.html"
+        pdf_url = "https://publications.gc.ca/collections/collection_2007/ic/Iu91-4-8-2004E.pdf"
+        marc_xml = f"""<?xml version="1.0"?>
+        <marc:record xmlns:marc="http://www.loc.gov/MARC21/slim">
+          <marc:datafield tag="856" ind1="4" ind2="0">
+            <marc:subfield code="a">http://publications.gc.ca</marc:subfield>
+            <marc:subfield code="q">PDF</marc:subfield>
+            <marc:subfield code="s">5640 KB</marc:subfield>
+            <marc:subfield code="u">{pdf_url}</marc:subfield>
+          </marc:datafield>
+        </marc:record>
+        """
+        session = _FakeSession(
+            {
+                landing_url: _FakeResponse(
+                    200,
+                    "<html><body>Government of Canada Publications landing page chrome.</body></html>",
+                ),
+                marc_url: _FakeResponse(200, marc_xml),
+                pdf_url: _FakeResponse(
+                    200,
+                    "",
+                    content=b"%PDF-1.4 fake pdf bytes",
+                    headers={"content-type": "application/pdf"},
+                ),
+            }
+        )
+
+        with (
+            patch.object(non_eu, "_get_thread_session", return_value=session),
+            patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            patch.object(non_eu, "_extract_pdf_text", return_value="The real document text from the MARC-linked PDF."),
+        ):
+            enriched = non_eu.enrich_one_record_fulltext(
+                {
+                    "source": "CA",
+                    "jurisdiction": "Canada",
+                    "url": landing_url,
+                },
+                us_api_key=None,
+                obey_robots=True,
+            )
+
+        self.assertEqual(enriched["full_text"], "The real document text from the MARC-linked PDF.")
+        self.assertEqual(enriched["full_text_url"], pdf_url)
+        self.assertEqual(enriched["full_text_format"], "pdf")
+        self.assertEqual(enriched["full_text_error"], "")
+
+    def test_canada_marc_xml_url_derives_sibling_page_from_publication_html(self) -> None:
+        self.assertEqual(
+            non_eu._canada_marc_xml_url("https://www.publications.gc.ca/site/eng/9.698872/publication.html"),
+            "https://www.publications.gc.ca/site/eng/9.698872/marcXml.html",
+        )
+        self.assertEqual(non_eu._canada_marc_xml_url(""), "")
+        self.assertEqual(
+            non_eu._canada_marc_xml_url("https://www.publications.gc.ca/collections/example.pdf"),
+            "",
+        )
+
+    def test_extract_canada_marc_pdf_url_finds_856_subfield_u(self) -> None:
+        xml = """<?xml version="1.0"?>
+        <marc:record xmlns:marc="http://www.loc.gov/MARC21/slim">
+          <marc:datafield tag="856" ind1="4" ind2="0">
+            <marc:subfield code="a">http://publications.gc.ca</marc:subfield>
+            <marc:subfield code="u">https://publications.gc.ca/collections/collection_2007/ic/Iu91-4-8-2004E.pdf</marc:subfield>
+          </marc:datafield>
+        </marc:record>
+        """
+        self.assertEqual(
+            non_eu._extract_canada_marc_pdf_url(xml),
+            "https://publications.gc.ca/collections/collection_2007/ic/Iu91-4-8-2004E.pdf",
+        )
+
+    def test_extract_canada_marc_pdf_url_returns_empty_without_856_field(self) -> None:
+        self.assertEqual(non_eu._extract_canada_marc_pdf_url("<record><leader>00000</leader></record>"), "")
+        self.assertEqual(non_eu._extract_canada_marc_pdf_url(""), "")
+        self.assertEqual(non_eu._extract_canada_marc_pdf_url("not xml at all <<<"), "")
+
+    def test_extract_canada_publication_pdf_url_matches_link_text_mentioning_pdf_without_pdf_suffix(self) -> None:
+        # Broadened 2026-07-28: the catalogue landing page's "Electronic
+        # document" link isn't always a literal *.pdf*-ending href (some
+        # are reached through a redirect/collections link, e.g.
+        # /pub?id=...&sl=1), so this now also accepts a link whose
+        # visible text mentions "pdf" even without a .pdf-suffixed href.
+        landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        html = """
+        <html><body>
+          <a href="/pub?id=9.576782&sl=0">Permanent link</a>
+          <a href="/pub?id=9.576782&sl=1">FA1-2-2005-3E.pdf (PDF, 547 KB).</a>
+        </body></html>
+        """
+        self.assertEqual(
+            non_eu._extract_canada_publication_pdf_url(landing_url, html),
+            "https://www.publications.gc.ca/pub?id=9.576782&sl=1",
+        )
+
+    def test_extract_canada_publication_pdf_url_matches_collections_path_without_pdf_suffix(self) -> None:
+        # Also accepts a publications.gc.ca /collections/ path even
+        # without a literal .pdf suffix or "pdf" in the link text -
+        # that's the document-hosting path prefix regardless of
+        # extension. The actual content-type is verified after
+        # fetching, so a false positive here just costs one wasted
+        # fetch rather than mislabeling the wrong thing as the document.
+        landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        html = """
+        <html><body>
+          <a href="/pub?id=9.576782&sl=0">Permanent link</a>
+          <a href="https://publications.gc.ca/collections/Collection/FA1-2-2005-3E">View document</a>
+        </body></html>
+        """
+        self.assertEqual(
+            non_eu._extract_canada_publication_pdf_url(landing_url, html),
+            "https://publications.gc.ca/collections/Collection/FA1-2-2005-3E",
+        )
 
     def test_extract_canada_publication_pdf_url_finds_embedded_pdf_link(self) -> None:
         landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"

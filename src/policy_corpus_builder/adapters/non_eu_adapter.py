@@ -42,6 +42,21 @@ class NonEUAdapter:
     name = "non-eu"
     execution_mode = "query-aware"
 
+    def __init__(self) -> None:
+        # _collect_normalized_documents (corpus_builder.py) creates one
+        # adapter instance via get_adapter() and then calls .collect()
+        # once per query term in a plain sequential loop, so this dict -
+        # shared across every term for the same jurisdiction run - is a
+        # safe place to cache successful full-text fetches keyed by
+        # document identity (see add_full_texts_parallel's
+        # fulltext_cache param). Each query term is otherwise a fully
+        # independent, stateless pipeline call with no memory of what
+        # any other term already fetched, which a 2026-07-27 live run
+        # showed wastes real time: the same large EU document was
+        # fetched and parsed 5 separate times because it matched 5
+        # different search terms in the same run.
+        self._fulltext_cache: dict[str, dict] = {}
+
     def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         settings = source.settings
         countries = self._resolve_countries(settings)
@@ -101,6 +116,7 @@ class NonEUAdapter:
             progress_every=self._require_non_negative_int(settings, "progress_every", default=0),
             obey_robots=self._require_bool(settings, "obey_robots", default=True),
             user_agent=self._resolve_user_agent(settings),
+            fulltext_cache=self._fulltext_cache,
         )
         retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -311,6 +327,7 @@ def _build_non_eu_raw_record(
         "retrieval_status": _optional_string(normalized_row.get("retrieval_status")),
         "source": _optional_string(normalized_row.get("source")),
         "source_log": _sanitize_value(source_log),
+        "term_verified": _parse_bool(normalized_row.get("term_verified")),
         "text_len": _parse_int(normalized_row.get("text_len")),
         "year": _parse_int(normalized_row.get("year")),
     }
