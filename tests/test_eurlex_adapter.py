@@ -415,6 +415,52 @@ class BatchFetchEurlexFulltextConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(captured_max_workers, [4])
 
+    def test_worker_threads_write_to_the_jurisdiction_log_target_not_real_stdout(self) -> None:
+        # Regression test for a 2026-07-28 live report: the moment EU's
+        # full-text fetch was parallelized, [EURLEX TEXT] lines started
+        # leaking into the MAIN job output instead of staying in
+        # logs/eu.log. Cause: corpus_builder.py's _JurisdictionLogRouter
+        # routes each jurisdiction's prints via a threading.local()
+        # target set on the ONE thread that calls into that
+        # jurisdiction's collect() - new threads a jurisdiction spawns
+        # itself (this function's own ThreadPoolExecutor workers) get
+        # their own fresh threading.local() with no target set, so their
+        # prints fell back to the real stdout. This exercises the real
+        # _JurisdictionLogRouter (not a stand-in) with two rows and
+        # max_workers=2, so two genuinely different worker threads each
+        # have to resolve the correct target independently.
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+        from policy_corpus_builder.corpus_builder import _JurisdictionLogRouter
+
+        real_stdout = StringIO()
+        jurisdiction_log = StringIO()
+        router = _JurisdictionLogRouter(real_stdout)
+
+        def fake_fetch(row, **kwargs):
+            print(f"[EURLEX TEXT] fake line for {row['celex_full']}", flush=True)
+            return {**self._row(row["celex_full"]), "full_text_clean": "Full text.", "text_len": 10}
+
+        original_stdout = sys.stdout
+        sys.stdout = router
+        try:
+            with router.redirect_to(jurisdiction_log):
+                with TemporaryDirectory() as cache_dir:
+                    with patch.object(eurlex_supported_module, "fetch_eurlex_fulltext_for_row", side_effect=fake_fetch):
+                        batch_fetch_eurlex_fulltext(
+                            pd.DataFrame([self._row("32014L0089"), self._row("32014L0090")]),
+                            cache_dir=Path(cache_dir),
+                            use_cache=False,
+                            resume=False,
+                            verbose=False,
+                            max_workers=2,
+                        )
+        finally:
+            sys.stdout = original_stdout
+
+        self.assertIn("[EURLEX TEXT] fake line for 32014L0089", jurisdiction_log.getvalue())
+        self.assertIn("[EURLEX TEXT] fake line for 32014L0090", jurisdiction_log.getvalue())
+        self.assertEqual(real_stdout.getvalue(), "")
+
 
 class EurlexTermLabelInSearchLogTests(unittest.TestCase):
     # Regression tests for a 2026-07-28 report: Cat asked for the EU log

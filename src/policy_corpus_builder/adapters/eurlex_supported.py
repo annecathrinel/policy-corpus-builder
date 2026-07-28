@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1604,10 +1605,37 @@ def batch_fetch_eurlex_fulltext(
     # identifier for a given document even though the lines will
     # interleave out of numeric order in the log - itself a visible sign
     # that fetches are now running concurrently.
+    #
+    # A live 2026-07-28 run found this parallelization introduced a
+    # regression: [EURLEX TEXT] lines leaked into the MAIN job output
+    # instead of staying in logs/eu.log. Cause: corpus_builder.py's
+    # _JurisdictionLogRouter routes each jurisdiction's prints to its own
+    # log file via a threading.local() target set on the ONE worker
+    # thread that calls into this jurisdiction's collect() - but that
+    # thread-local state is never inherited by new threads it spawns
+    # itself, so the ThreadPoolExecutor workers below each started with
+    # no target set and fell back to the real stdout. Fixed by capturing
+    # this calling thread's current effective target (via
+    # sys.stdout.current_target(), duck-typed so this file doesn't need
+    # to import _JurisdictionLogRouter directly and still works when no
+    # router is installed at all - write_jurisdiction_logs=False, or
+    # calling this function directly/in tests) and having each worker
+    # explicitly redirect to that same target for the duration of its
+    # own fetch.
+    stdout_target = None
+    if hasattr(sys.stdout, "current_target"):
+        stdout_target = sys.stdout.current_target()
+
+    def _fetch_with_propagated_log_target(row: pd.Series, **kwargs: object) -> dict:
+        if stdout_target is not None and hasattr(sys.stdout, "redirect_to"):
+            with sys.stdout.redirect_to(stdout_target):
+                return fetch_eurlex_fulltext_for_row(row, **kwargs)
+        return fetch_eurlex_fulltext_for_row(row, **kwargs)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                fetch_eurlex_fulltext_for_row,
+                _fetch_with_propagated_log_target,
                 row,
                 cache_dir=cache_dir,
                 use_cache=use_cache,

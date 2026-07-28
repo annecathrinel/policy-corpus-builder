@@ -144,6 +144,30 @@ class _JurisdictionLogRouter:
     def _current(self) -> Any:
         return getattr(self._local, "target", None) or self._real_stdout
 
+    def current_target(self) -> Any:
+        """Return whatever the calling thread's writes currently resolve to
+        (its own redirected target if it's inside a redirect_to() block, or
+        the real stdout otherwise).
+
+        Public counterpart to _current(), for callers *outside* this class
+        that spawn their own new worker threads and need those threads'
+        writes to land in the same place as the thread that spawned them.
+        threading.local() state is per-thread by design and is never
+        inherited by a new thread automatically - a live 2026-07-28 run
+        found this exact gap when EU's full-text fetch was parallelized:
+        the jurisdiction-level worker thread correctly had its writes
+        routed to logs/eu.log via redirect_to(), but the new
+        ThreadPoolExecutor worker threads inside
+        batch_fetch_eurlex_fulltext each got their own fresh
+        threading.local() with no target set, so their prints fell back to
+        _real_stdout - i.e. leaked into the main job output. See
+        batch_fetch_eurlex_fulltext's own use of this method (via
+        duck-typing on sys.stdout, not a direct import of this class, to
+        keep eurlex_supported.py decoupled from corpus_builder.py) for the
+        fix.
+        """
+        return self._current()
+
     @contextmanager
     def redirect_to(self, target: Any):
         previous = getattr(self._local, "target", None)
