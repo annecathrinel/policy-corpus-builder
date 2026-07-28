@@ -80,6 +80,7 @@ class BuildCorpusCliTests(unittest.TestCase):
             nim_max_rows=25,
             max_jurisdiction_workers=None,
             non_eu_max_per_term=None,
+            non_eu_max_workers=None,
             write_jurisdiction_logs=True,
         )
         self.assertIn("Corpus build completed successfully.", stdout.getvalue())
@@ -241,6 +242,81 @@ class BuildCorpusCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIsNone(build_policy_corpus.call_args.kwargs["non_eu_max_per_term"])
+
+    def test_build_corpus_cli_forwards_max_workers(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+        fake_result = FakeBuildResult(
+            final_corpus_path=Path("outputs/demo/final/documents.jsonl"),
+            manifest_path=Path("outputs/demo/run-manifest.json"),
+            final_document_count=3,
+        )
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "build-corpus",
+                "--query-terms",
+                "energy",
+                "--jurisdictions",
+                "CA",
+                "--outputs-path",
+                "outputs/demo",
+                "--max-workers",
+                "10",
+            ]
+            with patch(
+                "policy_corpus_builder.cli.build_policy_corpus",
+                return_value=fake_result,
+            ) as build_policy_corpus:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(
+            build_policy_corpus.call_args.kwargs["non_eu_max_workers"],
+            10,
+        )
+
+    def test_build_corpus_cli_max_workers_defaults_to_none(self) -> None:
+        # None here means "let build_policy_corpus apply its own default
+        # (8)" - the CLI itself doesn't hardcode a value, it just forwards
+        # whatever argparse gives it.
+        stdout = StringIO()
+        stderr = StringIO()
+        original_argv = sys.argv[:]
+        fake_result = FakeBuildResult(
+            final_corpus_path=Path("outputs/demo/final/documents.jsonl"),
+            manifest_path=Path("outputs/demo/run-manifest.json"),
+            final_document_count=3,
+        )
+
+        try:
+            sys.argv = [
+                "policy-corpus-builder",
+                "build-corpus",
+                "--query-terms",
+                "energy",
+                "--jurisdictions",
+                "NZ",
+                "--outputs-path",
+                "outputs/demo",
+            ]
+            with patch(
+                "policy_corpus_builder.cli.build_policy_corpus",
+                return_value=fake_result,
+            ) as build_policy_corpus:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = cli_main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(build_policy_corpus.call_args.kwargs["non_eu_max_workers"])
 
     def test_build_corpus_cli_no_jurisdiction_logs_forwards_false(self) -> None:
         stdout = StringIO()

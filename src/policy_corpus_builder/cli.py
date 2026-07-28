@@ -114,6 +114,20 @@ def build_parser() -> argparse.ArgumentParser:
             "omitting this flag no longer means 'unlimited' - it means 500."
         ),
     )
+    build_corpus_parser.add_argument(
+        "--max-workers",
+        type=int,
+        help=(
+            "Maximum concurrent full-text fetches per query term for non-EU "
+            "jurisdictions (UK, AUS, CA, NZ, US). Defaults to 8; the "
+            "underlying adapter itself falls back to 4 when this isn't set "
+            "explicitly. Raising this mainly speeds up CA and US - UK and "
+            "AUS's full-text fetches hit a rate-limited host regardless of "
+            "worker count, and NZ only partially benefits (its official API "
+            "calls do, its browser-fallback path doesn't). Has no effect on "
+            "EU, whose full-text fetch is a separate, sequential pipeline."
+        ),
+    )
     jurisdiction_logs_group = build_corpus_parser.add_mutually_exclusive_group()
     jurisdiction_logs_group.add_argument(
         "--jurisdiction-logs",
@@ -199,6 +213,7 @@ def main() -> int:
                 nim_max_rows=args.nim_max_rows,
                 max_jurisdiction_workers=args.max_jurisdiction_workers,
                 non_eu_max_per_term=args.max_per_term,
+                non_eu_max_workers=args.max_workers,
                 write_jurisdiction_logs=args.write_jurisdiction_logs,
             )
         except (

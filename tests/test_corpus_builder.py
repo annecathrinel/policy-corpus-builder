@@ -900,12 +900,14 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         # no longer needs to special-case NZ's SourceConfig settings the
         # way it briefly did - every non-EU jurisdiction, NZ included, now
         # gets the exact same settings shape: {"countries": [...],
-        # "max_per_term": ...}. max_per_term defaults to
+        # "max_per_term": ..., "max_workers": ...}. max_per_term defaults to
         # NON_EU_DEFAULT_MAX_PER_TERM (500) here - see
         # test_non_eu_max_per_term_defaults_to_500_and_is_configurable for
         # the regression test covering why that default exists at all
         # (NonEUAdapter itself silently falls back to 100 when a source
-        # config doesn't set this).
+        # config doesn't set this). max_workers defaults to
+        # NON_EU_DEFAULT_MAX_WORKERS (8) for the same reason - see
+        # test_non_eu_max_workers_defaults_to_8_and_is_configurable.
         captured_settings: dict[str, dict] = {}
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
 
@@ -939,8 +941,14 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     outputs_path=output_root,
                 )
 
-        self.assertEqual(captured_settings["NZ"], {"countries": ["NZ"], "max_per_term": 500})
-        self.assertEqual(captured_settings["UK"], {"countries": ["UK"], "max_per_term": 500})
+        self.assertEqual(
+            captured_settings["NZ"],
+            {"countries": ["NZ"], "max_per_term": 500, "max_workers": 8},
+        )
+        self.assertEqual(
+            captured_settings["UK"],
+            {"countries": ["UK"], "max_per_term": 500, "max_workers": 8},
+        )
 
     def test_non_eu_max_per_term_defaults_to_500_and_is_configurable(self):
         # Regression test: NonEUAdapter.validate_source_config defaults
@@ -1017,6 +1025,86 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     jurisdictions=["NZ"],
                     outputs_path=Path(tmpdir) / "corpus-output",
                     non_eu_max_per_term=0,
+                )
+
+    def test_non_eu_max_workers_defaults_to_8_and_is_configurable(self):
+        # Same shape of regression test as
+        # test_non_eu_max_per_term_defaults_to_500_and_is_configurable, for
+        # max_workers: NonEUAdapter.validate_source_config defaults
+        # source.settings.max_workers to only 4 concurrent full-text
+        # fetches per query term when it isn't set explicitly, and
+        # build_policy_corpus's non-EU SourceConfigs never set this key
+        # either - a 2026-07-28 speed review found every non-EU
+        # jurisdiction run through the CLI or Python API was silently
+        # capped at 4 concurrent fetches. non_eu_max_workers now defaults
+        # to 8 (NON_EU_DEFAULT_MAX_WORKERS) and can be overridden.
+        captured_settings: dict[str, dict] = {}
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        class _SettingsCapturingNonEUAdapter(_FakeAdapter):
+            name = "non-eu"
+
+            def __init__(self, tracker):
+                self._tracker = tracker
+
+            def collect(self, source, query, *, base_path, loaded_source=None):
+                country = source.settings["countries"][0]
+                captured_settings[country] = dict(source.settings)
+                return _FakeNonEUAdapter(self._tracker).collect(
+                    source, query, base_path=base_path, loaded_source=loaded_source
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_SettingsCapturingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=output_root,
+                )
+
+        self.assertEqual(captured_settings["NZ"]["max_workers"], 8)
+        self.assertEqual(result.non_eu_max_workers, 8)
+        self.assertEqual(result.to_dict()["non_eu_max_workers"], 8)
+
+        captured_settings.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_FakeEurlexAdapter,
+                    non_eu_adapter_class=_SettingsCapturingNonEUAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=output_root,
+                    non_eu_max_workers=16,
+                )
+
+        self.assertEqual(captured_settings["NZ"]["max_workers"], 16)
+        self.assertEqual(result.non_eu_max_workers, 16)
+
+    def test_invalid_non_eu_max_workers_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(CorpusBuildValidationError, "non_eu_max_workers"):
+                build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["NZ"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                    non_eu_max_workers=0,
                 )
 
 
