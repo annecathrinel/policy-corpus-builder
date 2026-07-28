@@ -2249,6 +2249,7 @@ def enrich_one_record_fulltext(
     out.setdefault("full_text_error", "")
     out.setdefault("full_text_format", "")
     out.setdefault("full_text_path", "")
+    out.setdefault("full_text_pdf_lookup_status", "")
     src = canonical_source(out.get("source") or out.get("jurisdiction") or out.get("country") or "")
     out["source_canonical"] = src
     candidates = get_url_candidates(out, src, us_api_key)
@@ -2389,6 +2390,18 @@ def enrich_one_record_fulltext(
                 # That's catalogue metadata rather than the real
                 # document body, but it's better than nothing for the
                 # (apparently rare) publication with no PDF link at all.
+                #
+                # A 2026-07-28 live run found this "last resort" was
+                # STILL being hit for every single record even with the
+                # MARC XML lookup above in place, with no way to tell
+                # from the output alone whether that's because the MARC
+                # fetch failed, no 856 $u was present, the HTML-scrape
+                # fallback also came up empty, or the PDF it found
+                # wasn't actually a PDF - full_text_error stays "" on
+                # this branch since some text was still retrieved, so
+                # that field can't carry the reason. full_text_pdf_lookup_status
+                # records it instead, specifically for diagnosing this.
+                out["full_text_pdf_lookup_status"] = last_err or "no_pdf_link_found"
                 text = clean_canada_full_text(html_to_visible_text(response.text))
                 if text:
                     out["full_text"] = text
@@ -2814,7 +2827,7 @@ def build_non_eu_fulltext_docs(
     resolved_us_api_key = us_api_key or os.getenv("REGULATIONS_GOV_API_KEY", "")
     if raw_hits_df.empty:
         return pd.DataFrame(
-            columns=["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified"]
+            columns=["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified", "full_text_pdf_lookup_status"]
         )
     grouped_docs = aggregate_one_row_per_doc(raw_hits_df.to_dict(orient="records"))
     enriched = add_full_texts_parallel(
@@ -2847,7 +2860,7 @@ def build_non_eu_fulltext_docs(
     for column in ["jurisdiction", "title", "lang", "source"]:
         if column not in df.columns:
             df[column] = ""
-    ordered = ["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified"]
+    ordered = ["doc_id", "country", "jurisdiction", "doc_uid", "title", "url", "lang", "date", "year", "source_file", "full_text_clean", "text_len", "has_text", "retrieval_status", "full_text_url", "full_text_error", "full_text_format", "source", "term_verified", "full_text_pdf_lookup_status"]
     for column in ordered:
         if column not in df.columns:
             df[column] = ""

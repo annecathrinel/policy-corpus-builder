@@ -321,6 +321,7 @@ def _build_non_eu_raw_record(
         "contents_url": _optional_string(normalized_row.get("contents_url")),
         "full_text_error": _optional_string(normalized_row.get("full_text_error")),
         "full_text_format": _optional_string(normalized_row.get("full_text_format")),
+        "full_text_pdf_lookup_status": _optional_string(normalized_row.get("full_text_pdf_lookup_status")),
         "full_text_url": _optional_string(normalized_row.get("full_text_url")),
         "has_text": _parse_bool(normalized_row.get("has_text")),
         "matched_terms": _parse_string_list(normalized_row.get("matched_terms")),

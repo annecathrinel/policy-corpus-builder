@@ -477,6 +477,7 @@ class NonEUCanadaTests(unittest.TestCase):
 
     def test_enrich_canada_publication_falls_back_to_landing_page_when_no_asset_is_available(self) -> None:
         landing_url = "https://www.publications.gc.ca/site/eng/9.123456/publication.html"
+        marc_url = "https://www.publications.gc.ca/site/eng/9.123456/marcXml.html"
         session = _FakeSession(
             {
                 landing_url: _FakeResponse(
@@ -488,6 +489,7 @@ class NonEUCanadaTests(unittest.TestCase):
                     </body></html>
                     """,
                 ),
+                marc_url: _FakeResponse(200, "<record><leader>00000</leader></record>"),
             }
         )
 
@@ -509,6 +511,54 @@ class NonEUCanadaTests(unittest.TestCase):
         self.assertEqual(enriched["full_text_url"], landing_url)
         self.assertEqual(enriched["full_text_format"], "html")
         self.assertEqual(enriched["full_text_error"], "")
+        # Regression test for a 2026-07-28 live run where every single CA
+        # record fell back to this landing-page text even after the MARC
+        # XML fix shipped, with no way to tell from the output alone
+        # whether that's because the MARC page had no 856 $u, the
+        # HTML-scrape fallback also failed, or something else entirely -
+        # full_text_error stays "" here (some text WAS retrieved), so this
+        # dedicated field carries the reason instead.
+        self.assertEqual(enriched["full_text_pdf_lookup_status"], "canada_publication_marc_no_856_url")
+
+    def test_full_text_pdf_lookup_status_is_empty_when_the_pdf_is_actually_found(self) -> None:
+        # The flip side of the regression above: once a real PDF is found
+        # (via either the MARC XML path or the HTML-scrape fallback), the
+        # function returns immediately and never touches
+        # full_text_pdf_lookup_status - it should stay unset/empty rather
+        # than carrying a stale value.
+        landing_url = "https://www.publications.gc.ca/site/eng/9.576782/publication.html"
+        marc_url = "https://www.publications.gc.ca/site/eng/9.576782/marcXml.html"
+        pdf_url = "https://publications.gc.ca/collections/collection_2007/ic/Iu91-4-8-2004E.pdf"
+        marc_xml = f"""<?xml version="1.0"?>
+        <marc:record xmlns:marc="http://www.loc.gov/MARC21/slim">
+          <marc:datafield tag="856" ind1="4" ind2="0">
+            <marc:subfield code="u">{pdf_url}</marc:subfield>
+          </marc:datafield>
+        </marc:record>
+        """
+        session = _FakeSession(
+            {
+                landing_url: _FakeResponse(200, "<html><body>Landing chrome.</body></html>"),
+                marc_url: _FakeResponse(200, marc_xml),
+                pdf_url: _FakeResponse(
+                    200, "", content=b"%PDF-1.4 fake pdf bytes", headers={"content-type": "application/pdf"},
+                ),
+            }
+        )
+
+        with (
+            patch.object(non_eu, "_get_thread_session", return_value=session),
+            patch.object(non_eu, "_get_thread_robots", return_value=_FakeRobots()),
+            patch.object(non_eu, "_extract_pdf_text", return_value="Real PDF text."),
+        ):
+            enriched = non_eu.enrich_one_record_fulltext(
+                {"source": "CA", "jurisdiction": "Canada", "url": landing_url},
+                us_api_key=None,
+                obey_robots=True,
+            )
+
+        self.assertEqual(enriched["full_text_format"], "pdf")
+        self.assertEqual(enriched.get("full_text_pdf_lookup_status", ""), "")
 
     def test_canada_row_to_result_preserves_working_output_shape(self) -> None:
         adapter = NonEUAdapter()
