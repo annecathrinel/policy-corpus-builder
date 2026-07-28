@@ -92,7 +92,7 @@ class _JurisdictionLogRouter:
     call that produces its jurisdiction's internal noise, and only that
     thread's writes, only while it's inside that block, go to the file.
     The same worker thread's own "[policy-corpus-builder] Starting
-    jurisdiction ..." / "Running jurisdiction ... Total hits: ..." /
+    jurisdiction ..." / "Collected jurisdiction ... Total hits: ..." /
     "Finished jurisdiction ..." lines are printed just before and after
     that block (not inside it), so they fall through to the real stdout
     exactly like any other thread that never enters redirect_to() at all -
@@ -412,7 +412,22 @@ def _build_policy_corpus_impl(
         log_context = nullcontext()
         if stdout_router is not None:
             jurisdiction_log_path = logs_root / f"{jurisdiction.lower()}.log"
-            log_file = jurisdiction_log_path.open("w", encoding="utf-8")
+            # buffering=1 (line-buffered) rather than the default full
+            # buffering: a 2026-07-28 live run found EU and US - the two
+            # slowest jurisdictions, each taking hours - showed a
+            # completely empty log file the entire time they were
+            # running, even though both adapters print plenty of
+            # internal progress (EUR-Lex's own "[EURLEX] group N/M"
+            # lines, for one). With the default buffering a regular file
+            # gets, those writes just accumulate in memory and only hit
+            # disk when the buffer fills or the file is closed - which
+            # for this file only happens once the whole jurisdiction
+            # (search AND full-text) has already finished, i.e. exactly
+            # when the log stops being useful to tail. Line-buffering
+            # flushes after every print() call (each already ends in a
+            # newline), so the file reflects real progress while it's
+            # still running.
+            log_file = jurisdiction_log_path.open("w", encoding="utf-8", buffering=1)
             log_context = stdout_router.redirect_to(log_file)
         try:
             with log_context:
@@ -432,8 +447,21 @@ def _build_policy_corpus_impl(
             jurisdiction_result.documents,
             expected_jurisdiction_code=jurisdiction,
         )
+        # Renamed from "Running jurisdiction {jurisdiction}." (2026-07-28):
+        # that phrasing implied this prints while the jurisdiction is
+        # still in progress, as a heartbeat between "Starting" and
+        # "Finished". It never did - jurisdiction_result.raw_result_count
+        # only exists once _run_jurisdiction has already returned, i.e.
+        # search AND full-text are BOTH already done by the time this
+        # line prints, typically a second (or less) before "Finished"
+        # right below it. A real report found this made EU/US look stuck
+        # for hours with no signal at all in the main log, when they were
+        # actually just slow - "Collected" reflects what actually
+        # happened; real in-progress signal is in logs/<jurisdiction>.log
+        # (see the line-buffering fix above for why that's now reliable
+        # to tail while a jurisdiction is still running).
         _emit_progress(
-            f"Running jurisdiction {jurisdiction}. Total hits: {jurisdiction_result.raw_result_count}."
+            f"Collected jurisdiction {jurisdiction}. Total hits: {jurisdiction_result.raw_result_count}."
         )
         jurisdiction_output_dir = intermediate_root / jurisdiction.lower()
         path = export_documents_jsonl(documents, output_dir=jurisdiction_output_dir)
@@ -558,7 +586,11 @@ def _build_policy_corpus_impl(
             nim_log_context = nullcontext()
             if stdout_router is not None:
                 nim_log_path = logs_root / "nim.log"
-                nim_log_file = nim_log_path.open("w", encoding="utf-8")
+                # buffering=1: see the matching comment on the
+                # per-jurisdiction log file above - same fix, same
+                # reason (an empty-looking log file for as long as NIM
+                # is still running).
+                nim_log_file = nim_log_path.open("w", encoding="utf-8", buffering=1)
                 nim_log_context = stdout_router.redirect_to(nim_log_file)
             try:
                 with nim_log_context:

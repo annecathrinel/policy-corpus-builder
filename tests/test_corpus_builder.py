@@ -475,7 +475,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             progress = stdout.getvalue()
             self.assertIn("Starting build_policy_corpus: validating inputs.", progress)
             self.assertIn("Starting jurisdiction EU.", progress)
-            self.assertIn("Running jurisdiction EU. Total hits: 2.", progress)
+            self.assertIn("Collected jurisdiction EU. Total hits: 2.", progress)
             self.assertIn("Finished jurisdiction UK. Unique full-text documents retrieved: 1.", progress)
             self.assertIn("Running NIM from EU CELEX results.", progress)
             self.assertIn("Number of NIM eligible EU acts: 1.", progress)
