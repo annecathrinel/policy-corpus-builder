@@ -87,6 +87,16 @@ def run_eurlex_query_pipeline(
     if filtered_docs_df.empty:
         return []
 
+    # A marker line for the search-to-full-text transition, so a reader
+    # tailing logs/eu.log can see which term the [EURLEX TEXT] lines that
+    # follow belong to. The per-document [EURLEX TEXT] lines themselves
+    # don't repeat the term (matching the non-EU jurisdictions' own
+    # asymmetry: add_full_texts_parallel's prints don't repeat term either
+    # - only each jurisdiction's search phase does, e.g. fetch_nz_documents'
+    # "[NZ] term='...' page=..." lines) - this single line is what makes
+    # that omission unambiguous instead of requiring a scroll back up to
+    # the last "=== JOB ===" header.
+    print(f"[EURLEX] term={query_text!r} starting full-text fetch for {len(filtered_docs_df)} document(s).", flush=True)
     fulltext_df = batch_fetch_eurlex_fulltext(
         filtered_docs_df,
         cache_dir=_resolve_cache_dir(source, base_path=base_path),

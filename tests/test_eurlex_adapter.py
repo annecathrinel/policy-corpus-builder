@@ -293,6 +293,158 @@ class EurlexAdapterTests(unittest.TestCase):
         self.assertFalse(_contains_nan(documents[0].to_dict()))
 
 
+class _FakePostResponse:
+    def __init__(self, status_code: int, text: str) -> None:
+        self.status_code = status_code
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        pass
+
+
+class _FakePostSession:
+    def __init__(self, response: _FakePostResponse) -> None:
+        self._response = response
+
+    def post(self, *args, **kwargs):
+        return self._response
+
+
+class EurlexTermLabelInSearchLogTests(unittest.TestCase):
+    # Regression tests for a 2026-07-28 report: Cat asked for the EU log
+    # to show which query term it's currently on, the way every non-EU
+    # jurisdiction's own log does (e.g. fetch_nz_documents' repeated
+    # "[NZ] term='...' page=..." lines) - EU's search-phase log
+    # (fetch_eurlex_job/post_eurlex_ws) previously showed page numbers,
+    # HTTP status, and hit counts with no indication of which of the
+    # run's many query terms any of it belonged to.
+
+    def test_post_eurlex_ws_prints_term_label_when_given(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        session = _FakePostSession(_FakePostResponse(200, "<xml/>"))
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            eurlex_supported_module.post_eurlex_ws(
+                "<payload/>",
+                session=session,
+                debug=True,
+                term_label="nature-based solution",
+            )
+
+        self.assertIn("term='nature-based solution' POST", stdout.getvalue())
+
+    def test_post_eurlex_ws_omits_term_label_when_not_given(self) -> None:
+        # No caller passes an empty term_label today (fetch_eurlex_job's
+        # two call sites always pass term_group), but post_eurlex_ws is a
+        # general-purpose SOAP helper - a future caller without a term
+        # shouldn't get a blank "term='' " clause cluttering its output.
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        session = _FakePostSession(_FakePostResponse(200, "<xml/>"))
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            eurlex_supported_module.post_eurlex_ws(
+                "<payload/>",
+                session=session,
+                debug=True,
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("POST", output)
+        self.assertNotIn("term=", output)
+
+    def test_fetch_eurlex_job_prints_the_query_term_on_its_debug_lines(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        stdout = StringIO()
+        with (
+            patch.object(
+                eurlex_supported_module,
+                "post_eurlex_ws",
+                return_value=("<xml/>", 200, "<xml/>"),
+            ),
+            patch.object(
+                eurlex_supported_module,
+                "parse_searchresults",
+                return_value=(0, 0, [], 0),
+            ),
+            redirect_stdout(stdout),
+        ):
+            eurlex_supported_module.fetch_eurlex_job(
+                {
+                    "scope": "ALL_ALL",
+                    "expert_scope": "TI_TE",
+                    "lang": "en",
+                    "terms": ["nature-based solution"],
+                },
+                debug=True,
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("terms=['nature-based solution']", output)
+        self.assertIn("[EURLEX] term='nature-based solution' group 1/1", output)
+        self.assertIn("[EURLEX] term='nature-based solution' trying page_size=", output)
+        self.assertIn("[EURLEX] term='nature-based solution' page=1 totalhits=0", output)
+
+    def test_run_eurlex_query_pipeline_prints_a_term_marker_before_full_text_fetch(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_adapter as eurlex_adapter_module
+
+        fake_rows = [
+            {
+                "source": "EU",
+                "scope": "ALL_ALL",
+                "lang": "en",
+                "term_group": "nature-based solution",
+                "title": "Directive Example",
+                "celex": "32014L0089",
+                "date": "2014-01-01",
+                "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+            }
+        ]
+        fake_fulltext_df = pd.DataFrame(
+            [
+                {
+                    "celex_full": "32014L0089",
+                    "celex": "32014L0089",
+                    "celex_version": "",
+                    "text_source_url": "",
+                    "full_text_raw": "",
+                    "full_text_clean": "",
+                    "retrieval_status": 404,
+                    "retrieval_error": "not_found",
+                    "lang": "en",
+                    "fetch_seconds": 0.0,
+                    "fetched_from_cache": False,
+                    "text_path": "",
+                    "route_used": "cellar",
+                    "content_type": "",
+                }
+            ]
+        )
+        stdout = StringIO()
+        with (
+            patch.object(eurlex_adapter_module, "fetch_eurlex_job", return_value=fake_rows),
+            patch.object(
+                eurlex_adapter_module,
+                "batch_fetch_eurlex_fulltext",
+                return_value=fake_fulltext_df,
+            ),
+            redirect_stdout(stdout),
+        ):
+            eurlex_adapter_module.run_eurlex_query_pipeline(
+                "nature-based solution",
+                source=SourceConfig(name="eu-eurlex", adapter="eurlex", settings={}),
+                base_path=Path("."),
+            )
+
+        output = stdout.getvalue()
+        self.assertIn(
+            "[EURLEX] term='nature-based solution' starting full-text fetch for 1 document(s).",
+            output,
+        )
+
+
 class FetchEurlexFulltextForRowVerboseLiveFetchTests(unittest.TestCase):
     # Regression tests for a 2026-07-28 live report: logs/eu.log stayed
     # completely empty for EU's entire (multi-hour) runtime even after

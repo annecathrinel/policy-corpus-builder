@@ -126,6 +126,7 @@ def post_eurlex_ws(
     min_interval_s: float = 1.6,
     debug: bool = False,
     state: dict | None = None,
+    term_label: str = "",
 ) -> tuple[str | None, int, str]:
     sess = session or SESSION
     tracker = state if state is not None else {}
@@ -151,7 +152,19 @@ def post_eurlex_ws(
         tracker["last_call"] = time.time()
 
         if debug:
-            print(f"[EURLEX] POST {dt:.2f}s status={response.status_code} bytes={len(response.text)}")
+            # term_label lets a reader tailing logs/eu.log see which query
+            # term this request belongs to, matching how every non-EU
+            # jurisdiction's own log repeats term='...' on each of its
+            # search-progress lines (see fetch_uk_documents/fetch_nz_documents/
+            # etc. in non_eu.py) - a 2026-07-28 report noted EU's log was
+            # the one exception, showing raw page/status/byte-count lines
+            # with no indication of which of the run's many query terms
+            # was currently being searched. Empty by default so any other
+            # caller of this general-purpose SOAP helper (there are none
+            # today - see fetch_eurlex_job's two call sites) isn't forced
+            # to supply one.
+            label = f"term={term_label!r} " if term_label else ""
+            print(f"[EURLEX] {label}POST {dt:.2f}s status={response.status_code} bytes={len(response.text)}")
 
         if response.status_code in (500, 502, 503, 504):
             if attempt < retry_5xx:
@@ -347,9 +360,15 @@ def fetch_eurlex_job(
 
     groups = chunk_terms(terms, terms_per_query)
     if debug:
+        # terms=<list> (not just the count) so a reader tailing
+        # logs/eu.log can see which query term this JOB block is for -
+        # the CLI/build_policy_corpus always calls this with a single
+        # term (terms_per_query=1), so in practice this is one term per
+        # JOB header, same granularity as every non-EU jurisdiction's own
+        # per-term log lines.
         print(
             f"\n=== JOB scope={scope} lang={lang} "
-            f"terms={len(terms)} groups={len(groups)} fields={fields} ==="
+            f"terms={terms!r} groups={len(groups)} fields={fields} ==="
         )
 
     final_out: list[dict] = []
@@ -361,12 +380,12 @@ def fetch_eurlex_job(
         term_group = " | ".join(group_terms)
         expert_query = build_expert_query(expert_scope, group_terms, fields=fields)
         if debug:
-            print(f"\n[EURLEX] group {group_index}/{len(groups)} | terms={len(group_terms)}")
+            print(f"\n[EURLEX] term={term_group!r} group {group_index}/{len(groups)}")
 
         group_success = False
         for page_size_try in candidates:
             if debug:
-                print(f"[EURLEX] trying page_size={page_size_try}")
+                print(f"[EURLEX] term={term_group!r} trying page_size={page_size_try}")
 
             payload = build_soap_envelope(
                 expert_query,
@@ -382,24 +401,25 @@ def fetch_eurlex_job(
                 min_interval_s=min_interval_s,
                 debug=debug,
                 state=post_state,
+                term_label=term_group,
             )
             if xml1 is None:
                 if debug:
                     print(
-                        f"[EURLEX] page_size={page_size_try} failed on page 1 "
+                        f"[EURLEX] term={term_group!r} page_size={page_size_try} failed on page 1 "
                         f"(status={status1}); trying smaller."
                     )
                 continue
             if "Fault" in xml1 or "<soap:Fault" in xml1 or "fault" in xml1.lower():
                 if debug:
-                    print("[EURLEX] SOAP Fault on page 1; skipping this page_size.")
+                    print(f"[EURLEX] term={term_group!r} SOAP Fault on page 1; skipping this page_size.")
                     print(raw1[:500])
                 continue
 
             totalhits, numhits, hits, missing_celex = parse_searchresults(xml1, lang_for_url="EN")
             if debug:
                 print(
-                    f"[EURLEX] page=1 totalhits={totalhits} numhits={numhits} "
+                    f"[EURLEX] term={term_group!r} page=1 totalhits={totalhits} numhits={numhits} "
                     f"hits_parsed={len(hits)} missing_celex={missing_celex}"
                 )
 
@@ -446,25 +466,26 @@ def fetch_eurlex_job(
                     min_interval_s=min_interval_s,
                     debug=debug,
                     state=post_state,
+                    term_label=term_group,
                 )
                 if xmlp is None:
                     if debug:
                         print(
-                            f"[EURLEX] page={page} failed (status={statusp}) "
+                            f"[EURLEX] term={term_group!r} page={page} failed (status={statusp}) "
                             f"with page_size={page_size_try}; retry with smaller."
                         )
                     failed = True
                     break
                 if "Fault" in xmlp or "<soap:Fault" in xmlp or "fault" in xmlp.lower():
                     if debug:
-                        print(f"[EURLEX] SOAP Fault at page={page}; stopping this page_size.")
+                        print(f"[EURLEX] term={term_group!r} SOAP Fault at page={page}; stopping this page_size.")
                         print(rawp[:500])
                     failed = True
                     break
                 _, numhits2, hits2, missing2 = parse_searchresults(xmlp, lang_for_url="EN")
                 if debug:
                     print(
-                        f"[EURLEX] page={page} numhits={numhits2} "
+                        f"[EURLEX] term={term_group!r} page={page} numhits={numhits2} "
                         f"hits_parsed={len(hits2)} missing_celex={missing2}"
                     )
                 if not hits2:
@@ -477,7 +498,7 @@ def fetch_eurlex_job(
 
         if not group_success and debug:
             print(
-                f"[EURLEX] group {group_index} could not complete across "
+                f"[EURLEX] term={term_group!r} group {group_index} could not complete across "
                 f"page_size candidates; continuing."
             )
 
