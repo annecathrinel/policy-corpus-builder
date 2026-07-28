@@ -736,6 +736,25 @@ def _extract_canada_marc_pdf_url(xml_text: str) -> str:
     return ""
 
 
+def _is_canada_archived_notice_response(response: requests.Response) -> bool:
+    """Detects publications.gc.ca's "Information Archived on the Web"
+    interstitial - a real, live-confirmed (2026-07-28) reason a genuine
+    PDF link still doesn't serve the PDF: for older catalogue entries,
+    the direct .pdf URL 302-redirects to
+    site/archivee-archived.html?url=<original PDF URL>, an ordinary
+    (HTTP 200, text/html) archival-compliance notice with a "Continue to
+    publication" link back to the very same URL - not an AWS WAF action,
+    so _classify_waf_response never flags it, and not something requests
+    treats as an error, so it looks exactly like "the PDF link just
+    doesn't have a PDF at it" without this dedicated check.
+    """
+    final_url = str(getattr(response, "url", "") or "")
+    if "archivee-archived.html" in final_url.lower():
+        return True
+    text_head = (getattr(response, "text", "") or "")[:2000]
+    return "Information Archived on the Web" in text_head
+
+
 def _fetch_and_extract_canada_pdf(
     session: requests.Session,
     pdf_url: str,
@@ -765,6 +784,27 @@ def _fetch_and_extract_canada_pdf(
         pdf_response.raise_for_status()
     except Exception as exc:
         return "", f"{type(exc).__name__}: {exc}"
+    if _is_canada_archived_notice_response(pdf_response):
+        # A live 2026-07-28 run found this notice on every single CA
+        # "Electronic document" link it followed (both the MARC XML 856
+        # $u path and the HTML-scrape fallback found the right URL, but
+        # every one of them hit this page instead of the PDF). The
+        # notice page's own "Continue to publication" link points right
+        # back at the same URL, which suggests the notice may only show
+        # once per session (a cookie-gated "you've been warned"
+        # pattern) - so retry the identical URL once more on the same
+        # session, which will carry forward whatever cookies the first
+        # response set. This is a reasonable, live-motivated guess, not
+        # a confirmed mechanism - it may simply not work, in which case
+        # this second attempt will hit the same notice and fail the
+        # same way, which is still safe (just one extra request).
+        try:
+            pdf_response = _get_with_waf_retry(session, pdf_url, headers=headers, timeout=timeout)
+            pdf_response.raise_for_status()
+        except Exception as exc:
+            return "", f"canada_publication_archived_notice retry_failed: {type(exc).__name__}: {exc}"
+        if _is_canada_archived_notice_response(pdf_response):
+            return "", "canada_publication_archived_notice"
     content_type = str(pdf_response.headers.get("content-type", "") or "").lower()
     if "pdf" not in content_type and pdf_response.content[:5].lower() != b"%pdf-":
         return "", "canada_publication_pdf_unavailable"

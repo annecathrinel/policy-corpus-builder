@@ -63,7 +63,18 @@ def run_eurlex_query_pipeline(
         min_interval_s=_require_non_negative_number(settings, "min_interval_s", default=1.6),
         timeout=_require_positive_int(settings, "timeout_s", default=45),
         retry_5xx=_require_non_negative_int(settings, "retry_5xx", default=3),
-        debug=False,
+        # debug/verbose were hardcoded False here, unlike every non-EU
+        # jurisdiction's own fetch_* function (all verbose=True by
+        # default) - meaning logs/eu.log was always completely empty for
+        # EU's entire runtime, not because of the per-jurisdiction log
+        # file's own buffering (fixed 2026-07-28 for the other
+        # jurisdictions, see corpus_builder.py) but because nothing was
+        # ever being printed at all. A live run found this made EU (one
+        # of the two slowest jurisdictions) look totally silent for
+        # hours, with zero way to distinguish "still searching" from
+        # "stuck", while UK/AUS/CA/NZ/US all showed real per-term
+        # progress. Flipped to match that same default.
+        debug=True,
     )
     if not rows:
         return []
@@ -83,7 +94,7 @@ def run_eurlex_query_pipeline(
         timeout_s=_require_positive_int(settings, "timeout_s", default=45),
         retries=_require_non_negative_int(settings, "fulltext_retries", default=4),
         min_interval_s=_require_non_negative_number(settings, "fulltext_min_interval_s", default=2.0),
-        verbose=False,
+        verbose=True,
         resume=True,
         retry_failures=_require_bool(settings, "retry_failures", default=True),
         progress_every=_require_non_negative_int(settings, "progress_every", default=0),

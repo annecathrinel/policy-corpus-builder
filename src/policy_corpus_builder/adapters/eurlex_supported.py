@@ -1410,6 +1410,28 @@ def fetch_eurlex_fulltext_for_row(
             text_path.write_text(str(multi_result.get("full_text_clean", "")), encoding="utf-8")
         except Exception:
             pass
+    if verbose:
+        # The cache-hit branch above has always printed per-document
+        # progress when verbose=True, but this live-fetch branch never
+        # did - meaning even with verbose on, the slow path (an actual
+        # HTTP fetch, as opposed to a cache hit) produced zero
+        # per-document signal. That's backwards: cache hits are the
+        # fast, uninteresting case, and live fetches are exactly what
+        # someone watching logs/eu.log while EU is still running wants
+        # to see progressing.
+        fetched_len = len(str(multi_result.get("full_text_clean", "") or ""))
+        if fetched_len > 0:
+            print(
+                f"[EURLEX TEXT] {progress_label} CELEX={celex} success length={fetched_len} "
+                f"source=LIVE route={multi_result.get('route_used', 'cellar')}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[EURLEX TEXT] {progress_label} CELEX={celex} FAILED status={multi_result.get('status', 0)} "
+                f"error={multi_result.get('error', '') or 'empty_text'}",
+                flush=True,
+            )
     return {
         "celex": celex,
         "celex_full": celex_full,

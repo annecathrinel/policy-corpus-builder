@@ -1,7 +1,10 @@
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 import math
 from tempfile import TemporaryDirectory
 
@@ -12,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from policy_corpus_builder.adapters.base import AdapterConfigError  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_adapter import EurlexAdapter  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_supported import batch_fetch_eurlex_fulltext  # noqa: E402
+from policy_corpus_builder.adapters.eurlex_supported import fetch_eurlex_fulltext_for_row  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_supported import merge_and_save_fulltext_cache  # noqa: E402
 from policy_corpus_builder.models import Query  # noqa: E402
 from policy_corpus_builder.pipeline import normalize_adapter_results  # noqa: E402
@@ -286,6 +290,154 @@ class EurlexAdapterTests(unittest.TestCase):
         )
         self.assertEqual(documents[0].full_text, "Full text of the directive.")
         self.assertFalse(_contains_nan(documents[0].to_dict()))
+
+
+class FetchEurlexFulltextForRowVerboseLiveFetchTests(unittest.TestCase):
+    # Regression tests for a 2026-07-28 live report: logs/eu.log stayed
+    # completely empty for EU's entire (multi-hour) runtime even after
+    # fixing the per-jurisdiction log file's buffering, because
+    # run_eurlex_query_pipeline hardcoded debug=False/verbose=False -
+    # unlike every non-EU jurisdiction's own fetch_* function
+    # (verbose=True by default). Separately, even with verbose=True,
+    # fetch_eurlex_fulltext_for_row's cache-hit branch already printed
+    # per-document progress, but its live-fetch branch (the actually
+    # slow path someone tailing the log while EU is still running cares
+    # about) never printed anything at all. These tests cover that
+    # live-fetch branch directly.
+
+    def _row(self) -> pd.Series:
+        return pd.Series(
+            {
+                "celex_full": "32014L0089",
+                "celex": "32014L0089",
+                "celex_version": "",
+                "title": "Directive Example",
+                "url_fix": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                "query_langs": '["en"]',
+            }
+        )
+
+    def test_verbose_prints_a_success_line_for_a_live_non_cached_fetch(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>Full text.</html>",
+                "full_text_clean": "Full text.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "lang": "en",
+                "fetch_seconds": 0.4,
+                "attempt_trace": [],
+            }
+            stdout = StringIO()
+            with (
+                patch(
+                    "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                    return_value=fake_result,
+                ),
+                patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"),
+                redirect_stdout(stdout),
+            ):
+                result = fetch_eurlex_fulltext_for_row(
+                    self._row(),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=True,
+                    progress_label="1/1",
+                )
+
+        self.assertEqual(result["full_text_clean"], "Full text.")
+        output = stdout.getvalue()
+        self.assertIn("[EURLEX TEXT] 1/1 CELEX=32014L0089 success length=10 source=LIVE route=cellar", output)
+
+    def test_verbose_prints_a_failure_line_for_a_live_fetch_that_returns_no_text(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "",
+                "full_text_clean": "",
+                "status": 404,
+                "error": "not_found",
+                "final_url": "",
+                "route_used": "cellar",
+                "attempt_trace": [],
+            }
+            stdout = StringIO()
+            with (
+                patch(
+                    "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                    return_value=fake_result,
+                ),
+                patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"),
+                redirect_stdout(stdout),
+            ):
+                fetch_eurlex_fulltext_for_row(
+                    self._row(),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=True,
+                    progress_label="1/1",
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("[EURLEX TEXT] 1/1 CELEX=32014L0089 FAILED status=404 error=not_found", output)
+
+    def test_verbose_false_suppresses_the_live_fetch_line(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>Full text.</html>",
+                "full_text_clean": "Full text.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "attempt_trace": [],
+            }
+            stdout = StringIO()
+            with (
+                patch(
+                    "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                    return_value=fake_result,
+                ),
+                patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"),
+                redirect_stdout(stdout),
+            ):
+                fetch_eurlex_fulltext_for_row(
+                    self._row(),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=False,
+                    progress_label="1/1",
+                )
+
+        self.assertEqual(stdout.getvalue(), "")
+
+
+class EurlexQueryPipelineVerbosityDefaultsTests(unittest.TestCase):
+    def test_run_eurlex_query_pipeline_requests_verbose_search_and_fulltext_logging(self) -> None:
+        # Regression test: fetch_eurlex_job's debug and
+        # batch_fetch_eurlex_fulltext's verbose were both hardcoded to
+        # False here, which is why logs/eu.log stayed empty for EU's
+        # entire runtime even once the per-jurisdiction log file's
+        # buffering was fixed - nothing was ever being printed in the
+        # first place. Both should now default to on, matching every
+        # non-EU jurisdiction's own fetch_* function.
+        import policy_corpus_builder.adapters.eurlex_adapter as eurlex_adapter_module
+
+        captured: dict[str, dict] = {}
+
+        def fake_fetch_eurlex_job(job, *, fields, terms_per_query, **kwargs):
+            captured["fetch_eurlex_job_kwargs"] = kwargs
+            return []
+
+        with patch.object(eurlex_adapter_module, "fetch_eurlex_job", side_effect=fake_fetch_eurlex_job):
+            eurlex_adapter_module.run_eurlex_query_pipeline(
+                "marine spatial planning",
+                source=SourceConfig(name="eu", adapter="eurlex", settings={}),
+                base_path=Path("."),
+            )
+
+        self.assertTrue(captured["fetch_eurlex_job_kwargs"]["debug"])
 
 
 def _contains_nan(value: object) -> bool:

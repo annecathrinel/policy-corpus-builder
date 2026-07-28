@@ -53,11 +53,13 @@ class _FakeResponse:
         *,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        url: str = "",
     ):
         self.status_code = status_code
         self.text = text
         self.content = content if content is not None else text.encode("utf-8")
         self.headers = headers or {}
+        self.url = url
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -559,6 +561,74 @@ class NonEUCanadaTests(unittest.TestCase):
 
         self.assertEqual(enriched["full_text_format"], "pdf")
         self.assertEqual(enriched.get("full_text_pdf_lookup_status", ""), "")
+
+    def test_is_canada_archived_notice_response_detects_url_pattern(self) -> None:
+        # Live 2026-07-28 finding: publications.gc.ca redirects some
+        # older catalogue entries' direct .pdf links to an "Information
+        # Archived on the Web" notice page instead of serving the PDF -
+        # ordinary HTTP 200 text/html, so nothing else in the pipeline
+        # (WAF detection, raise_for_status) would ever catch it.
+        response = _FakeResponse(
+            200,
+            "Information Archived on the Web notice content",
+            url="https://publications.gc.ca/site/archivee-archived.html?url=https%3A%2F%2Fpublications.gc.ca%2Fcollections%2FCollection%2FFA1-2-2005-3E.pdf",
+        )
+        self.assertTrue(non_eu._is_canada_archived_notice_response(response))
+
+    def test_is_canada_archived_notice_response_detects_by_text_marker_without_url(self) -> None:
+        response = _FakeResponse(200, "Information Archived on the Web / Information archivée dans le Web")
+        self.assertTrue(non_eu._is_canada_archived_notice_response(response))
+
+    def test_is_canada_archived_notice_response_false_for_a_real_pdf_response(self) -> None:
+        response = _FakeResponse(
+            200, "", content=b"%PDF-1.4 real content", headers={"content-type": "application/pdf"},
+            url="https://publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf",
+        )
+        self.assertFalse(non_eu._is_canada_archived_notice_response(response))
+
+    def test_fetch_and_extract_canada_pdf_retries_once_after_archived_notice_and_succeeds(self) -> None:
+        # A live run found EVERY CA "Electronic document" link - found
+        # correctly via either the MARC XML 856 $u field or the
+        # HTML-scrape fallback - hit this notice instead of the PDF. The
+        # notice's own "Continue to publication" link points back at the
+        # identical URL, consistent with a cookie-gated "you've been
+        # warned" pattern, so this retries the same URL once more on the
+        # same session before giving up.
+        pdf_url = "https://publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf"
+        responses = [
+            _FakeResponse(
+                200,
+                "Information Archived on the Web",
+                url="https://publications.gc.ca/site/archivee-archived.html?url=...",
+            ),
+            _FakeResponse(200, "", content=b"%PDF-1.4 real", headers={"content-type": "application/pdf"}),
+        ]
+
+        class _QueuedSession:
+            def get(self, url, **kwargs):
+                return responses.pop(0)
+
+        with patch.object(non_eu, "_extract_pdf_text", return_value="Real document text."):
+            text, err = non_eu._fetch_and_extract_canada_pdf(
+                _QueuedSession(), pdf_url, headers={}, timeout=10, obey_robots=True, robots=_FakeRobots(),
+            )
+
+        self.assertEqual(text, "Real document text.")
+        self.assertEqual(err, "")
+
+    def test_fetch_and_extract_canada_pdf_gives_up_if_the_archived_notice_persists(self) -> None:
+        pdf_url = "https://publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf"
+        notice = _FakeResponse(
+            200, "Information Archived on the Web", url="https://publications.gc.ca/site/archivee-archived.html?url=...",
+        )
+        session = _FakeSession({pdf_url: notice})
+
+        text, err = non_eu._fetch_and_extract_canada_pdf(
+            session, pdf_url, headers={}, timeout=10, obey_robots=True, robots=_FakeRobots(),
+        )
+
+        self.assertEqual(text, "")
+        self.assertEqual(err, "canada_publication_archived_notice")
 
     def test_canada_row_to_result_preserves_working_output_shape(self) -> None:
         adapter = NonEUAdapter()
