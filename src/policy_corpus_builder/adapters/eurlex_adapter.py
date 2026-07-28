@@ -110,6 +110,11 @@ def run_eurlex_query_pipeline(
         progress_every=_require_non_negative_int(settings, "progress_every", default=0),
         cache_every=_require_positive_int(settings, "cache_every", default=50),
         success_min_chars=_require_non_negative_int(settings, "success_min_chars", default=500),
+        # See batch_fetch_eurlex_fulltext's own comment for why 4 is a
+        # deliberately moderate default (no confirmed EUR-Lex rate-limit
+        # incident to calibrate against, unlike non_eu.py's WAF-prone
+        # hosts) rather than matching non-EU's higher default.
+        max_workers=_require_positive_int(settings, "max_workers", default=4),
     )
 
     fulltext_columns = [
@@ -190,6 +195,7 @@ class EurlexAdapter:
         _require_non_negative_int(settings, "progress_every", default=0)
         _require_positive_int(settings, "cache_every", default=50)
         _require_non_negative_int(settings, "success_min_chars", default=500)
+        _require_positive_int(settings, "max_workers", default=4)
         _resolve_cache_dir(source, base_path=base_path)
 
         user_env = _resolve_credentials_env_name(settings, "webservice_user_env", default="EURLEX_WS_USER")

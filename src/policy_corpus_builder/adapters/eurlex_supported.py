@@ -8,6 +8,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -1512,6 +1513,7 @@ def batch_fetch_eurlex_fulltext(
     progress_every: int = 50,
     cache_every: int = 50,
     success_min_chars: int = 500,
+    max_workers: int = 4,
 ) -> pd.DataFrame:
     if df_docs.empty:
         return pd.DataFrame(
@@ -1568,42 +1570,82 @@ def batch_fetch_eurlex_fulltext(
     n_success = 0
     n_failed = 0
     failure_counts: dict[str, int] = {}
-    for idx, (_, row) in enumerate(work_df.iterrows(), start=1):
-        result = fetch_eurlex_fulltext_for_row(
-            row,
-            cache_dir=cache_dir,
-            use_cache=use_cache,
-            timeout_s=timeout_s,
-            retries=retries,
-            min_interval_s=min_interval_s,
-            session=session,
-            verbose=verbose,
-            trace_routes=trace_routes,
-            progress_label=f"{idx}/{total}",
-        )
-        rows.append(result)
-        n_processed = idx
-        text_len = int(result.get("text_len", 0) or 0)
-        if text_len >= success_min_chars:
-            n_success += 1
-        else:
-            n_failed += 1
-            category = _classify_failure(result)
-            failure_counts[category] = failure_counts.get(category, 0) + 1
-        type_summary_rows.append(
-            {
-                "celex_sector": str(result.get("celex_sector", "") or ""),
-                "celex_sector_label": str(result.get("celex_sector_label", "") or ""),
-                "celex_descriptor": str(result.get("celex_descriptor", "") or ""),
-                "celex_descriptor_label": str(result.get("celex_descriptor_label", "") or ""),
-                "celex_class": str(result.get("celex_class", "") or ""),
-                "success": int(text_len >= success_min_chars),
-                "failure_reason": "" if text_len >= success_min_chars else category,
-            }
-        )
+    # Parallelized 2026-07-28: this loop used to fetch one document at a
+    # time, each with its own min_interval_s (2.0s default) sleep before
+    # the live request - meaning EU's full-text stage, consistently the
+    # slowest jurisdiction in every live run, made zero use of the
+    # multiple CPU cores/threads available (unlike non-EU's
+    # add_full_texts_parallel, which already used a ThreadPoolExecutor).
+    # min_interval_s itself is UNCHANGED here and still enforced inside
+    # fetch_eurlex_fulltext_for_row exactly as before - each worker
+    # thread still waits its own min_interval_s between its own
+    # successive live fetches. What changes is that max_workers threads
+    # now do this concurrently and independently (no shared cross-thread
+    # lock, unlike non_eu.py's WAF-prone-host throttle), so the aggregate
+    # request rate to eur-lex.europa.eu scales with max_workers - e.g.
+    # max_workers=4 means roughly 4x the previous request rate, not the
+    # same rate arriving faster. Unlike the WAF-prone hosts in non_eu.py
+    # (empirically confirmed to need serialization after live AWS WAF
+    # Challenge blocks), there is no equivalent confirmed rate-limit
+    # incident for eur-lex.europa.eu's webservice/cellar endpoints, so
+    # max_workers defaults to a moderate 4 rather than something higher -
+    # raise it via source.settings.max_workers if a live run shows this
+    # is safely tolerated, or lower it back to 1 (fully sequential,
+    # matching the old behavior) if EUR-Lex ever starts responding with
+    # 429s or WAF-style challenges under concurrency.
+    #
+    # Results are collected via as_completed, so they arrive in
+    # completion order, not the original work_df row order - nothing
+    # downstream (the resulting DataFrame's merge back onto
+    # filtered_docs_df in eurlex_adapter.py) depends on row order, only
+    # on the celex_full/celex/celex_version merge keys. progress_label
+    # is assigned at *submission* time (this row's original position in
+    # work_df), not completion time, so "N/Total" stays a stable
+    # identifier for a given document even though the lines will
+    # interleave out of numeric order in the log - itself a visible sign
+    # that fetches are now running concurrently.
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                fetch_eurlex_fulltext_for_row,
+                row,
+                cache_dir=cache_dir,
+                use_cache=use_cache,
+                timeout_s=timeout_s,
+                retries=retries,
+                min_interval_s=min_interval_s,
+                session=session,
+                verbose=verbose,
+                trace_routes=trace_routes,
+                progress_label=f"{idx}/{total}",
+            )
+            for idx, (_, row) in enumerate(work_df.iterrows(), start=1)
+        ]
+        for completed_count, future in enumerate(as_completed(futures), start=1):
+            result = future.result()
+            rows.append(result)
+            n_processed = completed_count
+            text_len = int(result.get("text_len", 0) or 0)
+            if text_len >= success_min_chars:
+                n_success += 1
+            else:
+                n_failed += 1
+                category = _classify_failure(result)
+                failure_counts[category] = failure_counts.get(category, 0) + 1
+            type_summary_rows.append(
+                {
+                    "celex_sector": str(result.get("celex_sector", "") or ""),
+                    "celex_sector_label": str(result.get("celex_sector_label", "") or ""),
+                    "celex_descriptor": str(result.get("celex_descriptor", "") or ""),
+                    "celex_descriptor_label": str(result.get("celex_descriptor_label", "") or ""),
+                    "celex_class": str(result.get("celex_class", "") or ""),
+                    "success": int(text_len >= success_min_chars),
+                    "failure_reason": "" if text_len >= success_min_chars else category,
+                }
+            )
 
-        if cache_every > 0 and idx % cache_every == 0:
-            merge_and_save_fulltext_cache(cache_dir, rows)
+            if cache_every > 0 and completed_count % cache_every == 0:
+                merge_and_save_fulltext_cache(cache_dir, rows)
 
     if rows:
         merge_and_save_fulltext_cache(cache_dir, rows)

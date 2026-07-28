@@ -61,6 +61,19 @@ NON_EU_DEFAULT_MAX_PER_TERM = 500
 # throttled). 8 is a moderate default raise, not the full 12, to leave some
 # headroom under a run's memory/connection budget.
 NON_EU_DEFAULT_MAX_WORKERS = 8
+# EurlexAdapter's own equivalent: run_eurlex_query_pipeline's
+# batch_fetch_eurlex_fulltext call defaults source.settings.max_workers to
+# 4 when a source config doesn't set it explicitly (see
+# batch_fetch_eurlex_fulltext's own comment on why 4, not
+# NON_EU_DEFAULT_MAX_WORKERS's 8: there's no equivalent confirmed
+# rate-limit incident for eur-lex.europa.eu to calibrate a higher default
+# against, unlike the non-EU WAF-prone hosts). build_policy_corpus's EU
+# SourceConfig never set this key at all before 2026-07-28 (EU's full-text
+# fetch was a plain sequential loop until then), so this mirrors
+# NON_EU_DEFAULT_MAX_WORKERS's shape purely so it's configurable per-run
+# through the same CLI/Python API pattern, not because of a pre-existing
+# silent-cap bug.
+EU_DEFAULT_MAX_WORKERS = 4
 MAIN_DEDUPLICATION_FIELDS = ("document_id",)
 NIM_DEDUPLICATION_FIELDS = ("document_id",)
 FINAL_CORPUS_SUBDIR = "final"
@@ -189,6 +202,7 @@ class PolicyCorpusBuildResult:
     max_jurisdiction_workers: int
     non_eu_max_per_term: int
     non_eu_max_workers: int
+    eu_max_workers: int
     write_jurisdiction_logs: bool
     jurisdiction_results: tuple[JurisdictionBuildResult, ...]
     intermediate_paths: dict[str, Path]
@@ -222,6 +236,7 @@ class PolicyCorpusBuildResult:
             "max_jurisdiction_workers": self.max_jurisdiction_workers,
             "non_eu_max_per_term": self.non_eu_max_per_term,
             "non_eu_max_workers": self.non_eu_max_workers,
+            "eu_max_workers": self.eu_max_workers,
             "write_jurisdiction_logs": self.write_jurisdiction_logs,
             "jurisdictions": [item.to_dict() for item in self.jurisdiction_results],
             "per_jurisdiction_output_paths": {
@@ -277,6 +292,7 @@ def build_policy_corpus(
     max_jurisdiction_workers: int | None = None,
     non_eu_max_per_term: int | None = None,
     non_eu_max_workers: int | None = None,
+    eu_max_workers: int | None = None,
     write_jurisdiction_logs: bool = True,
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions.
@@ -319,6 +335,22 @@ def build_policy_corpus(
     non-EU SourceConfigs never used to set it either. Raising it mainly
     speeds up CA and US (see NON_EU_DEFAULT_MAX_WORKERS's comment for why
     UK/AUS don't benefit and NZ only partially does).
+
+    eu_max_workers caps how many EU full-text documents are fetched
+    concurrently per query term (defaults to EU_DEFAULT_MAX_WORKERS, 4).
+    EU's full-text fetch was a plain sequential loop until 2026-07-28 -
+    consistently the slowest jurisdiction in every live run - so this is a
+    new lever, not a silent-cap fix like the non_eu_max_workers one above.
+    4 is deliberately more conservative than non_eu_max_workers's 8: there
+    is no equivalent confirmed rate-limit incident for eur-lex.europa.eu
+    to calibrate a higher default against (see
+    batch_fetch_eurlex_fulltext's own comment). Raising this increases the
+    aggregate request rate to eur-lex.europa.eu roughly proportionally
+    (each worker thread still separately waits its own min_interval_s
+    between its own successive fetches - there is no cross-thread
+    throttle enforcing a single shared rate the way non_eu.py's
+    WAF-prone-host list does), so treat increases here as a real,
+    unverified risk trade-off rather than a free win.
     """
     if not isinstance(write_jurisdiction_logs, bool):
         raise CorpusBuildValidationError("write_jurisdiction_logs must be a boolean.")
@@ -335,6 +367,7 @@ def build_policy_corpus(
             max_jurisdiction_workers=max_jurisdiction_workers,
             non_eu_max_per_term=non_eu_max_per_term,
             non_eu_max_workers=non_eu_max_workers,
+            eu_max_workers=eu_max_workers,
             stdout_router=None,
         )
 
@@ -361,6 +394,7 @@ def build_policy_corpus(
             max_jurisdiction_workers=max_jurisdiction_workers,
             non_eu_max_per_term=non_eu_max_per_term,
             non_eu_max_workers=non_eu_max_workers,
+            eu_max_workers=eu_max_workers,
             stdout_router=stdout_router,
         )
     finally:
@@ -380,6 +414,7 @@ def _build_policy_corpus_impl(
     max_jurisdiction_workers: int | None,
     non_eu_max_per_term: int | None,
     non_eu_max_workers: int | None,
+    eu_max_workers: int | None,
     stdout_router: _JurisdictionLogRouter | None,
 ) -> PolicyCorpusBuildResult:
     _emit_progress("Starting build_policy_corpus: validating inputs.")
@@ -402,6 +437,9 @@ def _build_policy_corpus_impl(
     resolved_non_eu_max_workers = _clean_optional_positive_int(
         non_eu_max_workers, field_name="non_eu_max_workers"
     ) or NON_EU_DEFAULT_MAX_WORKERS
+    resolved_eu_max_workers = _clean_optional_positive_int(
+        eu_max_workers, field_name="eu_max_workers"
+    ) or EU_DEFAULT_MAX_WORKERS
 
     output_root = Path(outputs_path).expanduser().resolve()
     cache_root = output_root / CACHE_SUBDIR
@@ -477,6 +515,7 @@ def _build_policy_corpus_impl(
                     cache_root=cache_root,
                     non_eu_max_per_term=resolved_non_eu_max_per_term,
                     non_eu_max_workers=resolved_non_eu_max_workers,
+                    eu_max_workers=resolved_eu_max_workers,
                 )
         finally:
             if log_file is not None:
@@ -680,6 +719,7 @@ def _build_policy_corpus_impl(
         max_jurisdiction_workers=resolved_max_workers,
         non_eu_max_per_term=resolved_non_eu_max_per_term,
         non_eu_max_workers=resolved_non_eu_max_workers,
+        eu_max_workers=resolved_eu_max_workers,
         write_jurisdiction_logs=stdout_router is not None,
         jurisdiction_results=tuple(jurisdiction_results),
         intermediate_paths=dict(intermediate_paths),
@@ -716,6 +756,7 @@ def _build_policy_corpus_impl(
         max_jurisdiction_workers=result.max_jurisdiction_workers,
         non_eu_max_per_term=result.non_eu_max_per_term,
         non_eu_max_workers=result.non_eu_max_workers,
+        eu_max_workers=result.eu_max_workers,
         write_jurisdiction_logs=result.write_jurisdiction_logs,
         jurisdiction_results=result.jurisdiction_results,
         intermediate_paths=result.intermediate_paths,
@@ -751,6 +792,7 @@ def _run_jurisdiction(
     cache_root: Path,
     non_eu_max_per_term: int,
     non_eu_max_workers: int,
+    eu_max_workers: int,
 ) -> _CollectionResult:
     if jurisdiction == "EU":
         source = SourceConfig(
@@ -758,6 +800,7 @@ def _run_jurisdiction(
             adapter="eurlex",
             settings={
                 "cache_dir": str((cache_root / "eu").resolve()),
+                "max_workers": eu_max_workers,
             },
         )
         queries = list(_build_inline_queries(query_terms, origin="inline"))

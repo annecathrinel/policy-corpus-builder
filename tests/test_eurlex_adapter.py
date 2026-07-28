@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -308,6 +309,111 @@ class _FakePostSession:
 
     def post(self, *args, **kwargs):
         return self._response
+
+
+class BatchFetchEurlexFulltextConcurrencyTests(unittest.TestCase):
+    # Regression tests for a 2026-07-28 change: batch_fetch_eurlex_fulltext
+    # used to fetch one document at a time in a plain sequential loop -
+    # EU was consistently the slowest jurisdiction in every live run, and
+    # this loop made zero use of the multiple threads/cores available
+    # (unlike non-EU's add_full_texts_parallel, which already used a
+    # ThreadPoolExecutor). These tests confirm real concurrency is
+    # happening (not just that a max_workers parameter is silently
+    # ignored) and that results are collected correctly regardless of
+    # completion order.
+
+    def _row(self, celex: str) -> dict:
+        return {
+            "celex_full": celex,
+            "celex": celex,
+            "celex_version": "",
+            "title": f"Directive {celex}",
+            "url_fix": f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}",
+            "query_langs": '["en"]',
+        }
+
+    def test_batch_fetch_eurlex_fulltext_runs_fetches_concurrently(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        n_workers = 3
+        # A barrier with parties=n_workers only releases once n_workers
+        # threads have all called wait() - if batch_fetch_eurlex_fulltext
+        # were still sequential (or capped below n_workers), this would
+        # never reach n_workers simultaneous callers and the test would
+        # time out (barrier.wait raises BrokenBarrierError on timeout
+        # instead of hanging forever).
+        barrier = threading.Barrier(n_workers, timeout=5)
+
+        def fake_fetch(row, **kwargs):
+            barrier.wait()
+            celex = row["celex_full"]
+            return {
+                "celex": celex,
+                "celex_full": celex,
+                "celex_version": "",
+                "title": row["title"],
+                "url": row["url_fix"],
+                "text_source_url": "https://eur-lex.europa.eu/...",
+                "full_text_raw": "",
+                "full_text_clean": "Full text.",
+                "text_len": len("Full text."),
+                "retrieval_status": 200,
+                "retrieval_error": "",
+                "lang": "en",
+                "lang_source_fulltext": "",
+                "fetch_seconds": 0.01,
+                "fetched_from_cache": False,
+                "text_path": "",
+                "celex_variant_used": "",
+                "route_used": "cellar",
+                "content_type": "",
+                "attempt_trace": [],
+            }
+
+        with TemporaryDirectory() as cache_dir:
+            with patch.object(eurlex_supported_module, "fetch_eurlex_fulltext_for_row", side_effect=fake_fetch):
+                result = batch_fetch_eurlex_fulltext(
+                    pd.DataFrame([self._row(f"3201{i}L000{i}") for i in range(n_workers)]),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    resume=False,
+                    verbose=False,
+                    max_workers=n_workers,
+                )
+
+        self.assertEqual(len(result), n_workers)
+        self.assertEqual(
+            set(result["celex_full"]),
+            {f"3201{i}L000{i}" for i in range(n_workers)},
+        )
+
+    def test_batch_fetch_eurlex_fulltext_defaults_to_4_workers(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        captured_max_workers = []
+        original_executor = eurlex_supported_module.ThreadPoolExecutor
+
+        def capturing_executor(*args, **kwargs):
+            captured_max_workers.append(kwargs.get("max_workers", args[0] if args else None))
+            return original_executor(*args, **kwargs)
+
+        def fake_fetch(row, **kwargs):
+            return {**self._row(row["celex_full"]), "full_text_clean": "", "text_len": 0}
+
+        with TemporaryDirectory() as cache_dir:
+            with (
+                patch.object(eurlex_supported_module, "fetch_eurlex_fulltext_for_row", side_effect=fake_fetch),
+                patch.object(eurlex_supported_module, "ThreadPoolExecutor", side_effect=capturing_executor),
+            ):
+                batch_fetch_eurlex_fulltext(
+                    pd.DataFrame([self._row("32014L0089")]),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    resume=False,
+                    verbose=False,
+                )
+
+        self.assertEqual(captured_max_workers, [4])
 
 
 class EurlexTermLabelInSearchLogTests(unittest.TestCase):

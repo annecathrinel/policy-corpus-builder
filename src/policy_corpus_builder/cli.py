@@ -125,7 +125,25 @@ def build_parser() -> argparse.ArgumentParser:
             "AUS's full-text fetches hit a rate-limited host regardless of "
             "worker count, and NZ only partially benefits (its official API "
             "calls do, its browser-fallback path doesn't). Has no effect on "
-            "EU, whose full-text fetch is a separate, sequential pipeline."
+            "EU - see --eu-max-workers for that."
+        ),
+    )
+    build_corpus_parser.add_argument(
+        "--eu-max-workers",
+        type=int,
+        help=(
+            "Maximum concurrent full-text fetches for EU (EUR-Lex). "
+            "Defaults to 4; the underlying adapter itself falls back to 4 "
+            "when this isn't set explicitly. EU's full-text fetch was a "
+            "plain sequential loop until 2026-07-28 - consistently the "
+            "slowest jurisdiction in every live run - so this is a new "
+            "speed lever, not a silent-cap fix. Unlike --max-workers's "
+            "non-EU jurisdictions, there is no confirmed rate-limit "
+            "precedent for eur-lex.europa.eu to calibrate a higher default "
+            "against, and each worker thread paces itself independently "
+            "(no shared cross-thread throttle), so raising this increases "
+            "the aggregate request rate to EUR-Lex roughly proportionally. "
+            "Treat increases as a real, unverified risk trade-off."
         ),
     )
     jurisdiction_logs_group = build_corpus_parser.add_mutually_exclusive_group()
@@ -214,6 +232,7 @@ def main() -> int:
                 max_jurisdiction_workers=args.max_jurisdiction_workers,
                 non_eu_max_per_term=args.max_per_term,
                 non_eu_max_workers=args.max_workers,
+                eu_max_workers=args.eu_max_workers,
                 write_jurisdiction_logs=args.write_jurisdiction_logs,
             )
         except (

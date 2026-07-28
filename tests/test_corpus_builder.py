@@ -1107,6 +1107,79 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     non_eu_max_workers=0,
                 )
 
+    def test_eu_max_workers_defaults_to_4_and_is_configurable(self):
+        # EU's full-text fetch was parallelized 2026-07-28 (previously a
+        # plain sequential loop, consistently the slowest jurisdiction in
+        # every live run). eu_max_workers defaults to EU_DEFAULT_MAX_WORKERS
+        # (4, deliberately more conservative than non_eu_max_workers's 8 -
+        # there's no confirmed rate-limit precedent for eur-lex.europa.eu
+        # to calibrate a higher default against) and can be overridden.
+        captured_settings: dict[str, dict] = {}
+        tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
+
+        class _SettingsCapturingEurlexAdapter(_FakeAdapter):
+            name = "eurlex"
+
+            def __init__(self, tracker):
+                self._tracker = tracker
+
+            def collect(self, source, query, *, base_path, loaded_source=None):
+                captured_settings["EU"] = dict(source.settings)
+                return _FakeEurlexAdapter(self._tracker).collect(
+                    source, query, base_path=base_path, loaded_source=loaded_source
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_SettingsCapturingEurlexAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                )
+
+        self.assertEqual(captured_settings["EU"]["max_workers"], 4)
+        self.assertEqual(result.eu_max_workers, 4)
+        self.assertEqual(result.to_dict()["eu_max_workers"], 4)
+
+        captured_settings.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "corpus-output"
+            stdout = StringIO()
+            with patch(
+                "policy_corpus_builder.corpus_builder.get_adapter",
+                side_effect=self._build_custom_fake_get_adapter(
+                    tracker,
+                    eurlex_adapter_class=_SettingsCapturingEurlexAdapter,
+                ),
+            ), redirect_stdout(stdout):
+                result = build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["EU"],
+                    outputs_path=output_root,
+                    eu_max_workers=2,
+                )
+
+        self.assertEqual(captured_settings["EU"]["max_workers"], 2)
+        self.assertEqual(result.eu_max_workers, 2)
+
+    def test_invalid_eu_max_workers_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(CorpusBuildValidationError, "eu_max_workers"):
+                build_policy_corpus(
+                    query_terms=["marine biodiversity"],
+                    jurisdictions=["EU"],
+                    outputs_path=Path(tmpdir) / "corpus-output",
+                    eu_max_workers=0,
+                )
+
 
 class _PrintingNonEUAdapter(_FakeAdapter):
     """A fake non-EU adapter that prints its own internal diagnostic line,
