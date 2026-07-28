@@ -589,23 +589,24 @@ class NonEUCanadaTests(unittest.TestCase):
     def test_fetch_and_extract_canada_pdf_retries_once_after_archived_notice_and_succeeds(self) -> None:
         # A live run found EVERY CA "Electronic document" link - found
         # correctly via either the MARC XML 856 $u field or the
-        # HTML-scrape fallback - hit this notice instead of the PDF. The
-        # notice's own "Continue to publication" link points back at the
-        # identical URL, consistent with a cookie-gated "you've been
-        # warned" pattern, so this retries the same URL once more on the
-        # same session before giving up.
+        # HTML-scrape fallback - hit this notice instead of the PDF. A
+        # first fix attempt (plain retry on the same session, betting on
+        # a cookie) was tried live and disconfirmed - the notice came
+        # back identically on retry. This retries with a Referer header
+        # set to the notice page's own URL instead, mimicking what a
+        # real browser sends when it follows the notice's "Continue to
+        # publication" link.
         pdf_url = "https://publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf"
+        notice_url = "https://publications.gc.ca/site/archivee-archived.html?url=..."
         responses = [
-            _FakeResponse(
-                200,
-                "Information Archived on the Web",
-                url="https://publications.gc.ca/site/archivee-archived.html?url=...",
-            ),
+            _FakeResponse(200, "Information Archived on the Web", url=notice_url),
             _FakeResponse(200, "", content=b"%PDF-1.4 real", headers={"content-type": "application/pdf"}),
         ]
+        seen_headers = []
 
         class _QueuedSession:
             def get(self, url, **kwargs):
+                seen_headers.append(kwargs.get("headers", {}))
                 return responses.pop(0)
 
         with patch.object(non_eu, "_extract_pdf_text", return_value="Real document text."):
@@ -615,6 +616,9 @@ class NonEUCanadaTests(unittest.TestCase):
 
         self.assertEqual(text, "Real document text.")
         self.assertEqual(err, "")
+        # The retry (second .get call) should carry a Referer pointing
+        # at the notice page itself, not the plain original headers.
+        self.assertEqual(seen_headers[1].get("Referer"), notice_url)
 
     def test_fetch_and_extract_canada_pdf_gives_up_if_the_archived_notice_persists(self) -> None:
         pdf_url = "https://publications.gc.ca/collections/Collection/FA1-2-2005-3E.pdf"
