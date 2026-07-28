@@ -1366,8 +1366,21 @@ def fetch_eurlex_fulltext_for_row(
             text_path.read_text(encoding="utf-8", errors="replace")
         )
         if verbose:
+            # celex_full (not celex) here: a live 2026-07-28 run's log
+            # showed the same base CELEX (e.g. 02014R0808 or 02021R2115)
+            # printed 6-7 times in a row with different success lengths -
+            # looked exactly like the same document being wastefully
+            # re-fetched, when these are actually distinct consolidated
+            # versions of the same base act (each with its own
+            # "-YYYYMMDD" suffix in celex_full, dropped when celex alone
+            # is printed since split_celex_identifier strips it into
+            # celex_version). Printing celex_full makes each line's
+            # identifier unique and shows these are different documents,
+            # not repeats. Caching itself was never affected by this -
+            # text_path/html_path above already key off celex_full - this
+            # only fixes what the progress log displays.
             print(
-                f"[EURLEX TEXT] {progress_label} CELEX={celex} success length={len(text_clean)} source=CACHE",
+                f"[EURLEX TEXT] {progress_label} CELEX={celex_full} success length={len(text_clean)} source=CACHE",
                 flush=True,
             )
         return {
@@ -1419,16 +1432,20 @@ def fetch_eurlex_fulltext_for_row(
         # fast, uninteresting case, and live fetches are exactly what
         # someone watching logs/eu.log while EU is still running wants
         # to see progressing.
+        # celex_full, not celex - see the matching comment on the CACHE
+        # branch above for why: celex alone drops the consolidated-
+        # version suffix, making distinct document versions look like
+        # identical repeats in the log.
         fetched_len = len(str(multi_result.get("full_text_clean", "") or ""))
         if fetched_len > 0:
             print(
-                f"[EURLEX TEXT] {progress_label} CELEX={celex} success length={fetched_len} "
+                f"[EURLEX TEXT] {progress_label} CELEX={celex_full} success length={fetched_len} "
                 f"source=LIVE route={multi_result.get('route_used', 'cellar')}",
                 flush=True,
             )
         else:
             print(
-                f"[EURLEX TEXT] {progress_label} CELEX={celex} FAILED status={multi_result.get('status', 0)} "
+                f"[EURLEX TEXT] {progress_label} CELEX={celex_full} FAILED status={multi_result.get('status', 0)} "
                 f"error={multi_result.get('error', '') or 'empty_text'}",
                 flush=True,
             )

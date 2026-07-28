@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from policy_corpus_builder.adapters.base import AdapterConfigError  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_adapter import EurlexAdapter  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_supported import batch_fetch_eurlex_fulltext  # noqa: E402
+from policy_corpus_builder.adapters.eurlex_supported import _cache_path_for_celex  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_supported import fetch_eurlex_fulltext_for_row  # noqa: E402
 from policy_corpus_builder.adapters.eurlex_supported import merge_and_save_fulltext_cache  # noqa: E402
 from policy_corpus_builder.models import Query  # noqa: E402
@@ -381,6 +382,99 @@ class FetchEurlexFulltextForRowVerboseLiveFetchTests(unittest.TestCase):
 
         output = stdout.getvalue()
         self.assertIn("[EURLEX TEXT] 1/1 CELEX=32014L0089 FAILED status=404 error=not_found", output)
+
+    def test_verbose_prints_the_full_consolidated_version_suffix_not_just_the_base_celex(self) -> None:
+        # Regression test for a 2026-07-28 live report: logs/eu.log showed
+        # the same base CELEX (e.g. 02014R0808, 02021R2115) printed 6-7
+        # times in a row with different success lengths, which looked
+        # exactly like the same document being wastefully re-fetched over
+        # and over. It wasn't - each line was actually a distinct
+        # consolidated version of the same base act (EUR-Lex tracks each
+        # amendment date as its own document, with its own
+        # "-YYYYMMDD"-suffixed celex_full), but the log was printing
+        # celex (the base, with the version suffix already split off by
+        # split_celex_identifier) instead of celex_full, silently hiding
+        # exactly the detail that would have shown these were different
+        # documents. This uses a celex_full that actually has a version
+        # suffix (unlike self._row()'s unsuffixed fixture, which can't
+        # distinguish "prints celex" from "prints celex_full" since
+        # they're identical when there's no suffix).
+        row = pd.Series(
+            {
+                "celex_full": "02014R0808-20210101",
+                "celex": "02014R0808-20210101",
+                "celex_version": "",
+                "title": "Consolidated Regulation Example",
+                "url_fix": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:02014R0808-20210101",
+                "query_langs": '["en"]',
+            }
+        )
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>Full text.</html>",
+                "full_text_clean": "Full text.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "lang": "en",
+                "fetch_seconds": 0.4,
+                "attempt_trace": [],
+            }
+            stdout = StringIO()
+            with (
+                patch(
+                    "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                    return_value=fake_result,
+                ),
+                patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"),
+                redirect_stdout(stdout),
+            ):
+                fetch_eurlex_fulltext_for_row(
+                    row,
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=True,
+                    progress_label="1/1",
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("CELEX=02014R0808-20210101", output)
+        self.assertNotIn("CELEX=02014R0808 ", output)
+
+    def test_verbose_prints_the_full_consolidated_version_suffix_on_a_cache_hit_too(self) -> None:
+        # Same fix, same reasoning, for the cache-hit branch (which already
+        # printed per-document progress before this fix - only the label
+        # itself needed correcting from celex to celex_full).
+        row = pd.Series(
+            {
+                "celex_full": "02014R0808-20210101",
+                "celex": "02014R0808-20210101",
+                "celex_version": "",
+                "title": "Consolidated Regulation Example",
+                "url_fix": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:02014R0808-20210101",
+                "query_langs": '["en"]',
+            }
+        )
+        with TemporaryDirectory() as cache_dir:
+            text_cache_dir = Path(cache_dir) / "text_cache"
+            text_cache_dir.mkdir(parents=True, exist_ok=True)
+            cached_path = _cache_path_for_celex("02014R0808-20210101", text_cache_dir, "txt")
+            cached_path.write_text("Cached full text.", encoding="utf-8")
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                fetch_eurlex_fulltext_for_row(
+                    row,
+                    cache_dir=Path(cache_dir),
+                    use_cache=True,
+                    verbose=True,
+                    progress_label="1/1",
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("CELEX=02014R0808-20210101", output)
+        self.assertNotIn("CELEX=02014R0808 ", output)
 
     def test_verbose_false_suppresses_the_live_fetch_line(self) -> None:
         with TemporaryDirectory() as cache_dir:
