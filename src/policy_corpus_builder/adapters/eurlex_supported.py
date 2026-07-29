@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,13 @@ import requests
 from bs4 import BeautifulSoup
 
 from policy_corpus_builder.utils.celex import extract_celex_token, parse_celex_to_dict
+# Reused rather than duplicated: this checks whether any of a document's
+# matched query terms actually appear (word-for-word, case-insensitively)
+# in its own title/full_text - adapter-agnostic logic with no non-EU-
+# specific coupling, already covered by its own tests in non_eu.py. No
+# circular import risk: non_eu.py doesn't import anything from this
+# module or eurlex_adapter.py.
+from policy_corpus_builder.adapters.non_eu import _matched_terms_found_in_text
 
 EURLEX_WS_ENDPOINT = "https://eur-lex.europa.eu/EURLexWebService"
 EURLEX_CELLAR_BASE = "http://publications.europa.eu/resource"
@@ -362,6 +370,16 @@ def fetch_eurlex_job(
 
     groups = chunk_terms(terms, terms_per_query)
     if debug:
+        # A friendly banner matching every non-EU jurisdiction's own log
+        # (e.g. "========== UK retrieval ==========" /
+        # "terms: N | max_per_term: M" in fetch_uk_documents) - added
+        # 2026-07-28 alongside the [ERROR SUMMARY]/[RELEVANCE] additions
+        # below, tidying EU's log to look like the others rather than
+        # jumping straight into SOAP-webservice jargon (scope/fields).
+        # The more technical "=== JOB ... ===" line right after keeps
+        # that detail for anyone who needs it.
+        print("\n========== EU retrieval ==========")
+        print(f"terms: {len(terms)} | max_pages: {max_pages}")
         # terms=<list> (not just the count) so a reader tailing
         # logs/eu.log can see which query term this JOB block is for -
         # the CLI/build_policy_corpus always calls this with a single
@@ -503,6 +521,11 @@ def fetch_eurlex_job(
                 f"[EURLEX] term={term_group!r} group {group_index} could not complete across "
                 f"page_size candidates; continuing."
             )
+
+    if debug:
+        # Matches every non-EU jurisdiction's own closing summary line
+        # (e.g. "[UK] total rows kept: N" in fetch_uk_documents).
+        print(f"\n[EU] total rows kept: {len(final_out)}")
 
     return final_out
 
@@ -683,6 +706,34 @@ def _parse_lang_list(value: object) -> list[str]:
                 return [value.lower()]
         return [value.lower()]
     return [str(value).strip().lower()]
+
+
+def _parse_term_groups(value: object) -> list[str]:
+    """Parses a row's query_term_groups field (a JSON-encoded list, e.g.
+    '["nature-based solution"]' - see build_eu_doc_tables's
+    query_term_groups aggregation) into a plain list of term strings, for
+    passing to _matched_terms_found_in_text. Same shape as
+    _parse_lang_list but without lowercasing - _matched_terms_found_in_text
+    already lowercases internally when comparing to a document's text, so
+    case doesn't matter for correctness, but there's no reason to
+    needlessly discard it here.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            except Exception:
+                return [text]
+        return [text]
+    return [str(value).strip()]
 
 
 def _lang_candidates_from_doc_row(row: pd.Series) -> list[str]:
@@ -1259,6 +1310,11 @@ def _build_cached_resume_rows(
                 "celex_variant_used": "",
                 "route_used": "cache_resume",
                 "content_type": "",
+                "term_verified": _matched_terms_found_in_text(
+                    _parse_term_groups(row.get("query_term_groups")),
+                    str(row.get("title", "") or "").strip(),
+                    text_clean,
+                ),
                 **celex_meta,
             }
         )
@@ -1378,6 +1434,7 @@ def fetch_eurlex_fulltext_for_row(
     url = str(row.get("url_fix", "") or row.get("url", "") or "").strip()
     langs = lang_candidates_from_row(row)
     sess = session or SESSION
+    matched_term_groups = _parse_term_groups(row.get("query_term_groups"))
 
     html_cache_dir = cache_dir / "html_cache"
     text_cache_dir = cache_dir / "text_cache"
@@ -1424,6 +1481,7 @@ def fetch_eurlex_fulltext_for_row(
             "fetched_from_cache": True,
             "text_path": str(text_path),
             "content_type": "",
+            "term_verified": _matched_terms_found_in_text(matched_term_groups, title, text_clean),
             **celex_meta,
         }
     if min_interval_s > 0:
@@ -1493,6 +1551,9 @@ def fetch_eurlex_fulltext_for_row(
         "route_used": str(multi_result.get("route_used", "cellar") or "cellar"),
         "content_type": str(multi_result.get("content_type", "") or ""),
         "attempt_trace": attempt_trace,
+        "term_verified": _matched_terms_found_in_text(
+            matched_term_groups, title, str(multi_result.get("full_text_clean", "") or "")
+        ),
         **celex_meta,
     }
 
@@ -1571,6 +1632,21 @@ def batch_fetch_eurlex_fulltext(
     n_success = 0
     n_failed = 0
     failure_counts: dict[str, int] = {}
+    # term_checked/term_mismatches drive the [RELEVANCE] summary line
+    # below, matching non-EU's own add_full_texts_parallel - see
+    # _matched_terms_found_in_text's docstring for the reasoning (a
+    # document's own text not containing any word of the query term that
+    # matched it usually means a loose/docket-level upstream match, not
+    # necessarily a wrong fetch, so this is surfaced rather than acted on
+    # automatically).
+    term_checked = 0
+    term_mismatches = 0
+    for cached_row in cached_rows:
+        verified = cached_row.get("term_verified")
+        if verified is not None:
+            term_checked += 1
+            if not verified:
+                term_mismatches += 1
     # Parallelized 2026-07-28: this loop used to fetch one document at a
     # time, each with its own min_interval_s (2.0s default) sleep before
     # the live request - meaning EU's full-text stage, consistently the
@@ -1653,6 +1729,11 @@ def batch_fetch_eurlex_fulltext(
             result = future.result()
             rows.append(result)
             n_processed = completed_count
+            verified = result.get("term_verified")
+            if verified is not None:
+                term_checked += 1
+                if not verified:
+                    term_mismatches += 1
             text_len = int(result.get("text_len", 0) or 0)
             if text_len >= success_min_chars:
                 n_success += 1
@@ -1677,6 +1758,23 @@ def batch_fetch_eurlex_fulltext(
 
     if rows:
         merge_and_save_fulltext_cache(cache_dir, rows)
+
+    # Tidying 2026-07-28: EU's log was missing the [ERROR SUMMARY] and
+    # [RELEVANCE] roll-ups every non-EU jurisdiction's own full-text
+    # fetch already prints (see add_full_texts_parallel in non_eu.py).
+    # failure_counts was already being tallied above for
+    # celex_type_summary but never actually printed anywhere - this adds
+    # exactly the same "Nx label" format non-EU uses.
+    if failure_counts:
+        print("[ERROR SUMMARY]")
+        for label, count in Counter(failure_counts).most_common(15):
+            print(f"{count}x {label}")
+    if term_checked:
+        print(
+            f"[RELEVANCE] {term_mismatches}/{term_checked} fetched document(s) don't contain any of "
+            "their matched query term's words in title/full_text (term_verified=False) - likely a "
+            "docket-level or loose upstream search match rather than a wrong fetch"
+        )
 
     out_df = pd.DataFrame(cached_rows + rows)
     if not out_df.empty:

@@ -134,6 +134,7 @@ def run_eurlex_query_pipeline(
         "content_type",
         "celex_variant_used",
         "fulltext_support",
+        "term_verified",
     ]
     available_fulltext_columns = [
         column for column in fulltext_columns if column in fulltext_df.columns
@@ -512,6 +513,11 @@ def _build_raw_record(row: dict[str, object]) -> dict[str, object]:
         "url_fix": _optional_text(row.get("url_fix")),
         "date": _optional_text(row.get("date")),
         "query_text": _optional_text(row.get("query_text")),
+        # term_verified mirrors non_eu_adapter.py's _build_non_eu_raw_record
+        # addition of the same field - see _matched_terms_found_in_text's
+        # docstring in non_eu.py and batch_fetch_eurlex_fulltext's
+        # [RELEVANCE] summary line for what this flags and why.
+        "term_verified": row.get("term_verified"),
     }
     return {
         key: value

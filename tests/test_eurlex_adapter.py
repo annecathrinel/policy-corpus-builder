@@ -811,6 +811,239 @@ class FetchEurlexFulltextForRowVerboseLiveFetchTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
 
 
+class EurlexTermVerifiedAndLogTidyingTests(unittest.TestCase):
+    # Cat asked (2026-07-28) to tidy up EU's log to match the other
+    # jurisdictions' and to add a [RELEVANCE] line - the same mismatch
+    # check non_eu.py's add_full_texts_parallel already does (see
+    # _matched_terms_found_in_text's docstring there for the original
+    # 2026-07-28 US/AUS finding that motivated it). These tests cover:
+    # term_verified being computed correctly for EU documents (both the
+    # live-fetch and cache-hit branches of fetch_eurlex_fulltext_for_row,
+    # and _build_cached_resume_rows for EU's on-disk resume cache), and
+    # the new [ERROR SUMMARY]/[RELEVANCE] lines and
+    # "========== EU retrieval ==========" banner /
+    # "[EU] total rows kept: N" closing line in fetch_eurlex_job.
+
+    def _row(self, *, query_term_groups: str = '["nature-based solution"]') -> pd.Series:
+        return pd.Series(
+            {
+                "celex_full": "32014L0089",
+                "celex": "32014L0089",
+                "celex_version": "",
+                "title": "Directive Example",
+                "url_fix": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32014L0089",
+                "query_langs": '["en"]',
+                "query_term_groups": query_term_groups,
+            }
+        )
+
+    def test_live_fetch_sets_term_verified_true_when_the_term_appears_in_the_text(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>...</html>",
+                "full_text_clean": "This directive covers nature-based solution measures.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "lang": "en",
+                "fetch_seconds": 0.1,
+                "attempt_trace": [],
+            }
+            with patch(
+                "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                return_value=fake_result,
+            ), patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"):
+                result = fetch_eurlex_fulltext_for_row(
+                    self._row(),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=False,
+                )
+
+        self.assertTrue(result["term_verified"])
+
+    def test_live_fetch_sets_term_verified_false_when_the_term_is_absent_from_the_text(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>...</html>",
+                "full_text_clean": "Unrelated raw data export with no matching words at all.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "lang": "en",
+                "fetch_seconds": 0.1,
+                "attempt_trace": [],
+            }
+            with patch(
+                "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                return_value=fake_result,
+            ), patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"):
+                result = fetch_eurlex_fulltext_for_row(
+                    self._row(),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=False,
+                )
+
+        self.assertFalse(result["term_verified"])
+
+    def test_term_verified_is_none_when_there_are_no_matched_terms_to_check(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            fake_result = {
+                "full_text_raw": "<html>...</html>",
+                "full_text_clean": "Some text.",
+                "status": 200,
+                "error": "",
+                "final_url": "https://eur-lex.europa.eu/...",
+                "route_used": "cellar",
+                "lang": "en",
+                "fetch_seconds": 0.1,
+                "attempt_trace": [],
+            }
+            with patch(
+                "policy_corpus_builder.adapters.eurlex_supported.get_eurlex_text_multi",
+                return_value=fake_result,
+            ), patch("policy_corpus_builder.adapters.eurlex_supported.time.sleep"):
+                result = fetch_eurlex_fulltext_for_row(
+                    self._row(query_term_groups=""),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    verbose=False,
+                )
+
+        self.assertIsNone(result["term_verified"])
+
+    def test_cache_hit_branch_also_sets_term_verified(self) -> None:
+        with TemporaryDirectory() as cache_dir:
+            text_cache_dir = Path(cache_dir) / "text_cache"
+            text_cache_dir.mkdir(parents=True, exist_ok=True)
+            (text_cache_dir / "32014L0089.txt").write_text(
+                "Full text mentioning nature-based solution explicitly.", encoding="utf-8"
+            )
+            result = fetch_eurlex_fulltext_for_row(
+                self._row(),
+                cache_dir=Path(cache_dir),
+                use_cache=True,
+                verbose=False,
+            )
+
+        self.assertTrue(result["fetched_from_cache"])
+        self.assertTrue(result["term_verified"])
+
+    def test_batch_fetch_prints_relevance_and_error_summary_lines(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        def fake_fetch(row, **kwargs):
+            celex = row["celex_full"]
+            if celex == "32014L0089":
+                # matches its term
+                return {
+                    "celex": celex, "celex_full": celex, "celex_version": "",
+                    "title": row["title"], "url": row["url_fix"],
+                    "text_source_url": "", "full_text_raw": "",
+                    "full_text_clean": "Text about nature-based solution.",
+                    "text_len": 34, "retrieval_status": 200, "retrieval_error": "",
+                    "lang": "en", "lang_source_fulltext": "", "fetch_seconds": 0.1,
+                    "fetched_from_cache": False, "text_path": "", "celex_variant_used": "",
+                    "route_used": "cellar", "content_type": "", "attempt_trace": [],
+                    "term_verified": True,
+                }
+            if celex == "32014L0090":
+                # fetched fine, but the term never appears - a RELEVANCE mismatch
+                return {
+                    "celex": celex, "celex_full": celex, "celex_version": "",
+                    "title": row["title"], "url": row["url_fix"],
+                    "text_source_url": "", "full_text_raw": "",
+                    "full_text_clean": "Completely unrelated content.",
+                    "text_len": 30, "retrieval_status": 200, "retrieval_error": "",
+                    "lang": "en", "lang_source_fulltext": "", "fetch_seconds": 0.1,
+                    "fetched_from_cache": False, "text_path": "", "celex_variant_used": "",
+                    "route_used": "cellar", "content_type": "", "attempt_trace": [],
+                    "term_verified": False,
+                }
+            # celex == "32014L0091": a hard failure
+            return {
+                "celex": celex, "celex_full": celex, "celex_version": "",
+                "title": row["title"], "url": row["url_fix"],
+                "text_source_url": "", "full_text_raw": "", "full_text_clean": "",
+                "text_len": 0, "retrieval_status": 404, "retrieval_error": "HTTP 404",
+                "lang": "en", "lang_source_fulltext": "", "fetch_seconds": 0.1,
+                "fetched_from_cache": False, "text_path": "", "celex_variant_used": "",
+                "route_used": "cellar", "content_type": "", "attempt_trace": [],
+                "term_verified": None,
+            }
+
+        rows_in = [
+            self._row().to_dict(),
+            {**self._row().to_dict(), "celex_full": "32014L0090", "celex": "32014L0090"},
+            {**self._row().to_dict(), "celex_full": "32014L0091", "celex": "32014L0091"},
+        ]
+        stdout = StringIO()
+        with TemporaryDirectory() as cache_dir:
+            with (
+                patch.object(eurlex_supported_module, "fetch_eurlex_fulltext_for_row", side_effect=fake_fetch),
+                redirect_stdout(stdout),
+            ):
+                batch_fetch_eurlex_fulltext(
+                    pd.DataFrame(rows_in),
+                    cache_dir=Path(cache_dir),
+                    use_cache=False,
+                    resume=False,
+                    verbose=False,
+                    # Low on purpose: the fake fetch texts above are only
+                    # 30-34 chars, well under the real default of 500 -
+                    # without lowering this, both the "matched" and
+                    # "mismatched" fake documents would be classified as
+                    # failures (text_len < success_min_chars), muddying
+                    # what this test is actually checking.
+                    success_min_chars=10,
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("[ERROR SUMMARY]", output)
+        self.assertIn("1x 404_not_found", output)
+        self.assertIn(
+            "[RELEVANCE] 1/2 fetched document(s) don't contain any of "
+            "their matched query term's words in title/full_text (term_verified=False) - likely a "
+            "docket-level or loose upstream search match rather than a wrong fetch",
+            output,
+        )
+
+    def test_fetch_eurlex_job_prints_a_retrieval_banner_and_total_rows_kept(self) -> None:
+        import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
+
+        stdout = StringIO()
+        with (
+            patch.object(
+                eurlex_supported_module,
+                "post_eurlex_ws",
+                return_value=("<xml/>", 200, "<xml/>"),
+            ),
+            patch.object(
+                eurlex_supported_module,
+                "parse_searchresults",
+                return_value=(0, 0, [], 0),
+            ),
+            redirect_stdout(stdout),
+        ):
+            eurlex_supported_module.fetch_eurlex_job(
+                {
+                    "scope": "ALL_ALL",
+                    "expert_scope": "TI_TE",
+                    "lang": "en",
+                    "terms": ["nature-based solution"],
+                },
+                debug=True,
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("========== EU retrieval ==========", output)
+        self.assertIn("terms: 1", output)
+        self.assertIn("[EU] total rows kept: 0", output)
+
+
 class EurlexQueryPipelineVerbosityDefaultsTests(unittest.TestCase):
     def test_run_eurlex_query_pipeline_requests_verbose_search_and_fulltext_logging(self) -> None:
         # Regression test: fetch_eurlex_job's debug and
