@@ -103,7 +103,8 @@ Examples and notebooks are user guidance, not stable import surfaces.
 
 ### EUR-Lex full-text recovery
 
-EU full-text retrieval tries Cellar, then the EUR-Lex HTML and PDF endpoints
+EU full-text retrieval tries encoded HTTPS Cellar URLs for XHTML and PDF,
+then the EUR-Lex HTML and PDF endpoints
 for each identifier/language. Parenthesized CELEX suffixes are preserved and
 URL-encoded. PDFs use the existing pypdf dependency; scanned PDFs without
 extractable text remain failures. Browser-verification responses and unavailable
@@ -115,7 +116,36 @@ are not national legislation. A failed full-text fetch still retains the measure
 metadata, with no full text. National sites requiring JavaScript may remain unavailable.
 
 Rerun the existing build to retry failed EU texts and refresh old NIM text caches.
-NIM text files without a `.validated-v2` sidecar are fetched again once; validated
+NIM text files without a `.validated-v3` sidecar are fetched again once; validated
 cache hits are included in resumed results. Existing cache files are retained.
 Restart an active notebook kernel or Python process before rerunning to load these
 changes. Previously exported corpora must be rebuilt to replace false successes.
+
+### NIM overview before full text
+
+`build_policy_corpus` discovers NIM metadata for **all** eligible CELEX seeds
+before starting any NIM full-text downloads. It saves the following files under
+`<outputs_path>/nim/overview/`:
+
+- `nim_by_act_country.csv`: distinct NIM counts for each CELEX and country,
+  including zero counts for EU countries with no discovered measures.
+- `nim_by_act_country_year.csv`: distinct NIM counts by CELEX, country and NIM
+  document year. Missing/invalid dates are `unknown`; absent combinations are omitted.
+- `nim_by_act.csv`: act totals and discovery status/error. Failed discovery has
+  blank counts rather than zero; a configured metadata page limit is flagged.
+- `nim_inventory.csv`: the metadata records underlying the counts.
+- `overview.json`: counting definitions and file names.
+
+The year comes from `nim_date` (the national measure's document date), not the
+EU act year, notification year, or full-text retrieval year. Counts deduplicate
+national measure IDs within each CELEX/country and precede `nim_max_rows` limits.
+The same measure implementing multiple EU acts counts once for each act.
+The overview remains on disk if text retrieval is interrupted and is also created
+with `include_nim_fulltext=False`. Direct single-query adapter calls save their
+query overview in the adapter cache's `overview/` directory.
+
+NIM retrieval follows offered document downloads before accepting national
+landing-page text. It no longer tries EUR-Lex metadata pages as full-text fallbacks:
+missing national links, short text and national-site HTTP failures are reported
+directly. The v3 cache marker refreshes older landing-page results once. Sites
+requiring JavaScript or blocking requests can still fail.

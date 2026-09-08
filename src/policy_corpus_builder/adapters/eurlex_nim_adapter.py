@@ -109,8 +109,36 @@ class EurlexNIMAdapter:
     ) -> list[AdapterResult]:
         self.validate_source_config(source, base_path=base_path)
         self._activate_webservice_credentials(source.settings)
-        rows = run_eurlex_nim_query_pipeline(query.text, source=source, base_path=base_path)
+        kwargs = {"prepared": loaded_source[query.query_id]} if loaded_source is not None else {}
+        rows = run_eurlex_nim_query_pipeline(query.text, source=source, base_path=base_path, **kwargs)
         return [self._row_to_result(row) for row in rows]
+
+    def prepare_queries(self, source: SourceConfig, queries: tuple[Query, ...], *, base_path: Path) -> dict:
+        """Discover every seed before collecting any full text."""
+        from policy_corpus_builder.adapters.eurlex_nim_supported.workflow import _resolve_seed_acts, _retrieve_nim_rows
+        from policy_corpus_builder.adapters.eurlex_nim_supported.overview import write_nim_overview
+        import pandas as pd
+
+        self.validate_source_config(source, base_path=base_path)
+        self._activate_webservice_credentials(source.settings)
+        prepared, act_frames, measure_frames, statuses = {}, [], [], []
+        overview_dir = Path(source.settings.get("overview_dir", resolve_cache_dir(source, base_path=base_path) / "overview"))
+        if not overview_dir.is_absolute():
+            overview_dir = base_path / overview_dir
+        for query in queries:
+            acts = _resolve_seed_acts(query.text, source.settings)
+            measures = _retrieve_nim_rows(acts, source.settings)
+            prepared[query.query_id] = (acts, measures)
+            act_frames.append(acts)
+            statuses.extend(measures.attrs.get("discovery_statuses", []))
+            copy = measures.copy()
+            copy.attrs = {}
+            measure_frames.append(copy)
+        all_acts = pd.concat(act_frames, ignore_index=True) if act_frames else pd.DataFrame()
+        all_measures = pd.concat(measure_frames, ignore_index=True) if measure_frames else pd.DataFrame()
+        all_measures.attrs["discovery_statuses"] = statuses
+        write_nim_overview(all_acts, all_measures, overview_dir)
+        return prepared
 
     def _activate_webservice_credentials(self, settings: dict[str, Any]) -> None:
         user_env = _resolve_credentials_env_name(

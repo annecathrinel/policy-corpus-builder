@@ -36,7 +36,7 @@ class RetrievalRegressions(unittest.TestCase):
         session.get.side_effect = get
         result = eu.get_eurlex_text_multi(pd.Series({"celex": "32023H0901(22)"}), session=session, retries=0)
         self.assertEqual(result["route_used"], "eurlex_html")
-        self.assertEqual(len(result["attempt_trace"]), 2)
+        self.assertEqual(len(result["attempt_trace"]), 3)
         self.assertGreater(len(result["full_text_clean"]), 150)
 
     def test_pdf_fallback_extracts_bytes(self):
@@ -47,7 +47,23 @@ class RetrievalRegressions(unittest.TestCase):
             result = eu.get_eurlex_text_multi(pd.Series({"celex": "32024M11475"}), session=session, retries=0)
         self.assertEqual(result["route_used"], "eurlex_pdf")
         self.assertIn("Commission decision", result["full_text_clean"])
-        self.assertEqual(len(result["attempt_trace"]), 3)
+        self.assertEqual(len(result["attempt_trace"]), 4)
+
+    def test_cellar_pdf_recovers_without_visiting_eurlex(self):
+        session = Mock()
+        def get(url, **kwargs):
+            self.assertTrue(url.startswith("https://publications.europa.eu/"))
+            self.assertIn("%2822%29", url)
+            if kwargs["headers"]["Accept"] == "application/pdf":
+                return response(url, body=b"%PDF-fixture", content_type="application/pdf")
+            return response(url, 404)
+        session.get.side_effect = get
+        with patch("pypdf.PdfReader") as reader:
+            reader.return_value.pages = [Mock(extract_text=Mock(return_value="Council recommendation. " * 30))]
+            result = eu.get_eurlex_text_multi(pd.Series({"celex": "32023H0901(22)"}), session=session, retries=0)
+        self.assertEqual(result["route_used"], "cellar_pdf")
+        self.assertEqual(session.get.call_count, 2)
+        self.assertGreater(len(result["full_text_clean"]), 150)
 
     def test_pdf_parse_error_and_challenge_are_not_fulltext(self):
         for body, ctype in ((b"%PDF-broken", "application/pdf"), (b"<html>JavaScript is disabled. " * 30, "text/html")):

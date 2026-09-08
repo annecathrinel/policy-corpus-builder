@@ -38,16 +38,20 @@ def run_eurlex_nim_query_pipeline(
     *,
     source: SourceConfig,
     base_path: Path,
+    prepared: tuple[pd.DataFrame, pd.DataFrame] | None = None,
 ) -> list[dict[str, object]]:
     settings = source.settings
     progress = _require_bool(settings, "progress", default=False)
-    acts_df = _resolve_seed_acts(query_text, settings)
+    acts_df = prepared[0] if prepared is not None else _resolve_seed_acts(query_text, settings)
     if acts_df.empty:
         _emit_nim_progress(progress, f"No eligible EU legal acts found for NIM seed: {query_text}.")
         return []
     _emit_nim_progress(progress, f"NIM seed {query_text}: {len(acts_df)} eligible EU act(s).")
 
-    nim_df = _retrieve_nim_rows(acts_df, settings)
+    nim_df = prepared[1] if prepared is not None else _retrieve_nim_rows(acts_df, settings)
+    if prepared is None:
+        from .overview import write_nim_overview
+        write_nim_overview(acts_df, nim_df, resolve_cache_dir(source, base_path=base_path) / "overview")
     if nim_df.empty:
         _emit_nim_progress(progress, f"NIM seed {query_text}: no national measures found.")
         return []
@@ -246,11 +250,13 @@ def _resolve_seed_acts(query_text: str, settings: dict[str, Any]) -> pd.DataFram
 
 def _retrieve_nim_rows(acts_df: pd.DataFrame, settings: dict[str, Any]) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
+    statuses: list[dict[str, object]] = []
     progress = _require_bool(settings, "progress", default=False)
     for row in acts_df.to_dict(orient="records"):
         celex = normalize_legal_act_celex(row.get("celex"))
         if not celex:
             continue
+        _emit_nim_progress(progress, f"NIM seed {celex}: discovering national measures (metadata only).")
         try:
             page_df = get_national_transpositions_by_celex_ws(
                 celex,
@@ -271,7 +277,9 @@ def _retrieve_nim_rows(acts_df: pd.DataFrame, settings: dict[str, Any]) -> pd.Da
                 True,
                 f"NIM seed {celex}: skipping after retrieval error ({type(exc).__name__}: {exc}).",
             )
+            statuses.append({"celex": celex, "discovery_status": "failed", "discovery_error": str(exc)})
             continue
+        statuses.append({"celex": celex, "discovery_status": "page_limited" if settings.get("nim_max_pages") else "complete", "discovery_error": ""})
         if page_df.empty:
             continue
         page_df = _normalize_nim_merge_frame(page_df)
@@ -279,10 +287,10 @@ def _retrieve_nim_rows(acts_df: pd.DataFrame, settings: dict[str, Any]) -> pd.Da
         page_df["eu_act_type"] = _stringify(row.get("eu_act_type"))
         page_df["year"] = row.get("year")
         frames.append(page_df)
-    if not frames:
-        return pd.DataFrame()
-    combined = _normalize_nim_merge_frame(pd.concat(frames, ignore_index=True, sort=False))
-    return enrich_nim_metadata(combined)
+    combined = _normalize_nim_merge_frame(pd.concat(frames, ignore_index=True, sort=False)) if frames else pd.DataFrame()
+    combined = enrich_nim_metadata(combined)
+    combined.attrs["discovery_statuses"] = statuses
+    return combined
 
 
 def _normalize_nim_merge_frame(df: pd.DataFrame) -> pd.DataFrame:

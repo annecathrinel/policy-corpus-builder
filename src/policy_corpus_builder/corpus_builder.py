@@ -862,6 +862,7 @@ def _run_eu_nim(
         adapter="eurlex-nim",
         settings={
             "cache_dir": str((cache_root / "nim").resolve()),
+            "overview_dir": str((output_root / NIM_SUBDIR / "overview").resolve()),
             "fetch_full_text": include_nim_fulltext,
             "nim_max_rows": nim_max_rows,
             "progress": True,
@@ -886,6 +887,8 @@ def _collect_normalized_documents(
     loaded_source = None
     if getattr(adapter, "execution_mode", "query-aware") == "query-agnostic":
         loaded_source = adapter.load_source(source, base_path=base_path)
+    elif callable(getattr(adapter, "prepare_queries", None)):
+        loaded_source = adapter.prepare_queries(source, queries, base_path=base_path)
 
     for query in queries:
         raw_results = adapter.collect(

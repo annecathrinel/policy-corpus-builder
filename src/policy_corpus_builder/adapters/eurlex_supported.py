@@ -30,7 +30,7 @@ from policy_corpus_builder.utils.celex import extract_celex_token, parse_celex_t
 from policy_corpus_builder.adapters.non_eu import _matched_terms_found_in_text
 
 EURLEX_WS_ENDPOINT = "https://eur-lex.europa.eu/EURLexWebService"
-EURLEX_CELLAR_BASE = "http://publications.europa.eu/resource"
+EURLEX_CELLAR_BASE = "https://publications.europa.eu/resource"
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -682,8 +682,10 @@ def _lang_to_iso639_3(lang: str | None) -> str:
 
 def _route_headers(route_name: str, *, lang: str = "en") -> dict[str, str]:
     headers = dict(DEFAULT_HEADERS)
-    if route_name == "cellar":
+    if route_name in {"cellar", "cellar_pdf"}:
         headers.update(ROUTE_HEADERS["cellar"])
+        if route_name == "cellar_pdf":
+            headers["Accept"] = "application/pdf"
         headers["Accept-Language"] = _lang_to_iso639_3(lang)
     else:
         headers.update(ROUTE_HEADERS["default_text"])
@@ -756,7 +758,7 @@ def lang_candidates_from_row(row: pd.Series) -> list[str]:
 
 
 def cellar_celex_url(celex: str) -> str:
-    safe_celex = quote(str(celex or "").strip(), safe="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._()")
+    safe_celex = quote(str(celex or "").strip(), safe="")
     return f"{EURLEX_CELLAR_BASE}/celex/{safe_celex}"
 
 
@@ -848,7 +850,7 @@ def get_eurlex_text(
     trace_routes: bool = False,
     route_name: str = "cellar",
 ) -> dict:
-    url = cellar_celex_url(celex) if route_name == "cellar" else (
+    url = cellar_celex_url(celex) if route_name in {"cellar", "cellar_pdf"} else (
         f"https://eur-lex.europa.eu/legal-content/{lang.upper()}/TXT/"
         f"{route_name.removeprefix('eurlex_').upper()}/?uri={quote('CELEX:' + celex, safe='')}"
     )
@@ -949,7 +951,7 @@ def get_eurlex_text_multi(
     saw_202 = False
     for lang in langs:
         for variant in celex_variants(celex_full):
-            for route_name in ("cellar", "eurlex_html", "eurlex_pdf"):
+            for route_name in ("cellar", "cellar_pdf", "eurlex_html", "eurlex_pdf"):
                 if trace_routes:
                     print(f"[EURLEX TEXT] TRACE CELEX={celex_full} variant={variant} lang={lang.upper()} route={route_name}", flush=True)
                 result = get_eurlex_text(

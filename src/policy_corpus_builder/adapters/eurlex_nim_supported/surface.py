@@ -1401,6 +1401,15 @@ def fetch_nim_document_text(
                         },
                     )
         text = str(candidate_result.get("text", "") or "")
+        downloads = [link for link in candidate_result.get("extra_links", [])
+                     if link.get("link_type", "").startswith("direct_text_") and link.get("url") not in seen_urls]
+        if html and downloads:
+            # A national landing page can exceed the length threshold without
+            # containing the act. Fetch its offered document before accepting it.
+            last_meta["error"] = "document_download_pending"
+            continue
+        if not candidate_result.get("error") and len(text) < success_min_chars:
+            last_meta["error"] = "short_text" if text else "empty_text"
         if text and not candidate_result.get("error") and len(text) >= success_min_chars:
             final_lang = str((candidate.get("lang", "") or (try_langs2[0] if try_langs2 else ""))).lower()
             last_meta["lang_used"] = final_lang
@@ -1408,60 +1417,13 @@ def fetch_nim_document_text(
         if candidate_result.get("status") == 202:
             continue
 
-    for lang2 in try_langs2:
-        for route_name, url in candidate_urls_for_nim_legal(nim_celex, lang=lang2, eurlex_url=eurlex_url):
-            if trace_routes:
-                print(f"[NIM TEXT] CELEX={nim_celex} route=fallback_generic/{route_name} lang={lang2}", flush=True)
-            if min_interval_s > 0:
-                time.sleep(min_interval_s)
-            headers = _nim_headers(route_name, lang2)
-            response = None
-            error_text = ""
-            for attempt in range(retries + 1):
-                try:
-                    response = sess.get(url, headers=headers, allow_redirects=True, timeout=timeout)
-                    status = response.status_code
-                    if status in (429, 500, 502, 503, 504):
-                        if verbose:
-                            print(f"[NIM TEXT] retry {attempt + 1} CELEX={nim_celex} route={route_name} after HTTP {status}", flush=True)
-                        time.sleep(1.7 ** attempt)
-                        continue
-                    break
-                except requests.RequestException as exc:
-                    error_text = str(exc)
-                    if attempt < retries:
-                        time.sleep(1.7 ** attempt)
-                        continue
-                    response = None
-                    break
-            if response is None:
-                route_token = f"fallback_generic/{route_name}"
-                last_meta.update({"fetch_status": 0, "url_fetch": url, "error": error_text or "request_failed", "lang_used": lang2.lower(), "route_used": route_token, "text_route_used": route_token, "fetch_seconds": round(time.time() - t0, 2)})
-                continue
-            status = int(response.status_code)
-            final_url = str(response.url)
-            content_type = str(response.headers.get("Content-Type", ""))
-            html = response.text or ""
-            route_token = f"fallback_generic/{route_name}"
-            last_meta.update({"fetch_status": status, "url_fetch": final_url, "lang_used": lang2.lower(), "route_used": route_token, "text_route_used": route_token, "content_type": content_type, "fetch_seconds": round(time.time() - t0, 2)})
-            if status != 200:
-                last_meta["error"] = f"HTTP {status}"
-                if status == 202:
-                    continue
-                continue
-            if _looks_like_not_available(html):
-                last_meta.update({"error": "not_available", "full_text_raw": html})
-                continue
-            metadata_reason = _nim_content_error(html, url=final_url, content_type=content_type)
-            if metadata_reason:
-                last_meta.update({"error": metadata_reason, "full_text_raw": html})
-                continue
-            text = _html_to_text_basic(html)
-            if len(text) < success_min_chars:
-                last_meta.update({"error": "empty_text" if not text else "short_text", "full_text_raw": html})
-                continue
-            last_meta.update({"error": "", "full_text_raw": html})
-            return text, last_meta
+    # EUR-Lex sector-7 HTML pages contain NIM metadata, not national full text.
+    # Trying them after a national-site failure used to hide its actual cause
+    # behind the final EUR-Lex HTTP 202 response.
+    if not seen_urls:
+        last_meta["error"] = last_meta["error"] or "no_national_document_link"
+    elif not last_meta["error"]:
+        last_meta["error"] = "national_document_text_unavailable"
 
     last_meta.setdefault("fetch_seconds", round(time.time() - t0, 2))
     return "", last_meta
@@ -1495,7 +1457,7 @@ def fetch_nim_fulltext_for_row(
     nim_celex = str(row.get("nim_celex", "") or "").strip()
     national_measure_id = str(row.get("national_measure_id", "") or "").strip()
     fallback_title = _clean_optional_text(row.get("nim_title", ""))
-    validation_path = text_path.with_suffix(".validated-v2")
+    validation_path = text_path.with_suffix(".validated-v3")
     if use_cache and validation_path.exists() and text_path.exists() and text_path.stat().st_size > 0:
         text_clean = text_path.read_text(encoding="utf-8", errors="replace")
         return {
@@ -1557,7 +1519,7 @@ def fetch_nim_fulltext_for_row(
         html_path.write_text(full_text_raw, encoding="utf-8", errors="replace")
     if text:
         text_path.write_text(text, encoding="utf-8", errors="replace")
-        validation_path.write_text("2", encoding="utf-8")
+        validation_path.write_text("3", encoding="utf-8")
     elif validation_path.exists():
         validation_path.unlink()
 
@@ -1686,7 +1648,7 @@ def rebuild_nim_fulltext_cache_state_from_files(cache_dir: Path) -> pd.DataFrame
             text = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             text = ""
-        rows.append({"cache_key": path.stem, "file_text_len": len(text) if path.with_suffix(".validated-v2").exists() else 0, "text_path": str(path), "file_exists": True})
+        rows.append({"cache_key": path.stem, "file_text_len": len(text) if path.with_suffix(".validated-v3").exists() else 0, "text_path": str(path), "file_exists": True})
     return pd.DataFrame(rows, columns=["cache_key", "file_text_len", "text_path", "file_exists"])
 
 
