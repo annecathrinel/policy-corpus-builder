@@ -395,7 +395,7 @@ def _resolve_full_text(row: dict[str, object]) -> str | None:
     cleaned_text = _optional_text(row.get("full_text_clean"))
     if cleaned_text:
         return cleaned_text
-    return _optional_text(row.get("full_text_raw")) or _optional_text(row.get("full_text"))
+    return None  # Raw responses can be metadata, challenge or error pages.
 
 
 def _resolve_download_url(row: dict[str, object]) -> str | None:

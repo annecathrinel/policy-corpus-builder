@@ -100,3 +100,22 @@ Examples and notebooks are user guidance, not stable import surfaces.
 - `examples/eu_nim.toml`
 
 `examples/minimal.toml` and the notebook directory are retained for internal structure, smoke coverage, and documentation, but they should not be read as expanding the supported workflow surface.
+
+### EUR-Lex full-text recovery
+
+EU full-text retrieval tries Cellar, then the EUR-Lex HTML and PDF endpoints
+for each identifier/language. Parenthesized CELEX suffixes are preserved and
+URL-encoded. PDFs use the existing pypdf dependency; scanned PDFs without
+extractable text remain failures. Browser-verification responses and unavailable
+representations are not exported as text.
+
+NIM retrieval reads national document links from RDF link predicates, ignoring
+schema/datatype URLs and unrelated navigation links. EUR-Lex NIM metadata pages
+are not national legislation. A failed full-text fetch still retains the measure's
+metadata, with no full text. National sites requiring JavaScript may remain unavailable.
+
+Rerun the existing build to retry failed EU texts and refresh old NIM text caches.
+NIM text files without a `.validated-v2` sidecar are fetched again once; validated
+cache hits are included in resumed results. Existing cache files are retained.
+Restart an active notebook kernel or Python process before rerunning to load these
+changes. Previously exported corpora must be rebuilt to replace false successes.

@@ -646,7 +646,7 @@ def _extract_text_candidate(content: str, *, content_type: str = "") -> tuple[st
     lowered_type = str(content_type or "").lower()
     if not content:
         return "", "empty_text"
-    if lowered_type.startswith("text/plain"):
+    if lowered_type.startswith(("text/plain", "application/pdf")):
         text = " ".join(str(content).split()).strip()
         return text, "" if text else "empty_text"
     text = _html_to_text(content)
@@ -662,6 +662,8 @@ def _looks_like_valid_fulltext(text: str, *, min_chars: int = 300) -> tuple[bool
     if len(clean) < min_chars:
         return False, "short_text"
     lowered = clean.lower()
+    if any(token in lowered for token in ("verify that you're not a robot", "javascript is disabled", "the html format is unavailable", "document does not exist")):
+        return False, "unavailable_or_challenge_page"
     namespace_hits = sum(lowered.count(token) for token in ["xmlns:", "rdf:", "skos:", "dcterms:", "owl:"])
     uri_hits = lowered.count("http://") + lowered.count("https://")
     if namespace_hits >= 2:
@@ -802,6 +804,15 @@ def _fetch_text_with_retries(
             final_url = response.url
             content_type = _response_content_type(response)
             if response.status_code == 200:
+                if "application/pdf" in content_type.lower() or response.content.startswith(b"%PDF-"):
+                    from io import BytesIO
+                    from pypdf import PdfReader
+
+                    try:
+                        text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(response.content)).pages)
+                    except Exception as exc:
+                        return 200, None, f"pdf_parse_error: {type(exc).__name__}", elapsed, final_url, content_type
+                    return 200, text, "", elapsed, final_url, "application/pdf"
                 return 200, response.text, "", elapsed, final_url, content_type
             if response.status_code == 202:
                 last_error = "HTTP 202"
@@ -835,13 +846,17 @@ def get_eurlex_text(
     timeout_s: int = 45,
     retries: int = 4,
     trace_routes: bool = False,
+    route_name: str = "cellar",
 ) -> dict:
-    url = cellar_celex_url(celex)
-    headers = _route_headers("cellar", lang=lang)
+    url = cellar_celex_url(celex) if route_name == "cellar" else (
+        f"https://eur-lex.europa.eu/legal-content/{lang.upper()}/TXT/"
+        f"{route_name.removeprefix('eurlex_').upper()}/?uri={quote('CELEX:' + celex, safe='')}"
+    )
+    headers = _route_headers(route_name, lang=lang)
     status, html, err, elapsed, final_url, content_type = _fetch_text_with_retries(
         url,
         celex=celex,
-        route_name="cellar",
+        route_name=route_name,
         variant=celex,
         headers=headers,
         timeout_s=timeout_s,
@@ -934,42 +949,44 @@ def get_eurlex_text_multi(
     saw_202 = False
     for lang in langs:
         for variant in celex_variants(celex_full):
-            if trace_routes:
-                print(f"[EURLEX TEXT] TRACE CELEX={celex_full} variant={variant} lang={lang.upper()} route=cellar", flush=True)
-            result = get_eurlex_text(
-                variant,
-                lang=lang,
-                session=session,
-                timeout_s=timeout_s,
-                retries=retries,
-                trace_routes=trace_routes,
-            )
-            attempt_trace.append(
-                {
-                    "celex_full": celex_full,
-                    "celex": celex,
-                    "celex_variant": variant,
-                    "lang": lang,
-                    "route_name": "cellar",
-                    "final_url": result.get("final_url", ""),
-                    "status": result.get("status", 0),
-                    "error": result.get("error", ""),
-                    "content_type": result.get("content_type", ""),
-                    "text_len": len(result.get("full_text_clean", "") or ""),
-                }
-            )
-            last_result = dict(result)
-            if int(result.get("status", 0) or 0) == 202:
-                saw_202 = True
-            if len(result.get("full_text_clean", "") or "") >= 150:
-                last_result["lang"] = lang
-                last_result["celex_variant_used"] = variant
-                last_result["route_used"] = "cellar"
-                last_result["attempt_trace"] = attempt_trace
-                return last_result
+            for route_name in ("cellar", "eurlex_html", "eurlex_pdf"):
+                if trace_routes:
+                    print(f"[EURLEX TEXT] TRACE CELEX={celex_full} variant={variant} lang={lang.upper()} route={route_name}", flush=True)
+                result = get_eurlex_text(
+                    variant,
+                    route_name=route_name,
+                    lang=lang,
+                    session=session,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                    trace_routes=trace_routes,
+                )
+                attempt_trace.append(
+                    {
+                        "celex_full": celex_full,
+                        "celex": celex,
+                        "celex_variant": variant,
+                        "lang": lang,
+                        "route_name": route_name,
+                        "final_url": result.get("final_url", ""),
+                        "status": result.get("status", 0),
+                        "error": result.get("error", ""),
+                        "content_type": result.get("content_type", ""),
+                        "text_len": len(result.get("full_text_clean", "") or ""),
+                    }
+                )
+                last_result = dict(result)
+                if int(result.get("status", 0) or 0) == 202:
+                    saw_202 = True
+                if len(result.get("full_text_clean", "") or "") >= 150:
+                    last_result["lang"] = lang
+                    last_result["celex_variant_used"] = variant
+                    last_result["route_used"] = route_name
+                    last_result["attempt_trace"] = attempt_trace
+                    return last_result
     last_result["lang"] = langs[0] if langs else "en"
     last_result["celex_variant_used"] = attempt_trace[-1]["celex_variant"] if attempt_trace else ""
-    last_result["route_used"] = "cellar"
+    last_result["route_used"] = attempt_trace[-1]["route_name"] if attempt_trace else "cellar"
     last_result["attempt_trace"] = attempt_trace
     if saw_202 and str(last_result.get("error", "")).lower() in {"http 202", "", "no_attempt"}:
         last_result["error"] = "route_exhausted_after_202"

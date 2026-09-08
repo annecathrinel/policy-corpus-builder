@@ -339,7 +339,8 @@ def _resolve_full_text(row: dict[str, object]) -> str | None:
     cleaned_text = _optional_text(row.get("full_text_clean"))
     if cleaned_text:
         return cleaned_text
-    return _optional_text(row.get("full_text_raw")) or _optional_text(row.get("full_text"))
+    # Raw responses may be metadata or error pages; only validated text is exportable.
+    return None
 
 
 def _coalesce_merge_artifacts(row: dict[str, object]) -> dict[str, object]:

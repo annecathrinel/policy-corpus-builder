@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import requests
@@ -941,13 +941,21 @@ def extract_nim_page_links(rdf_text: str) -> dict[str, Any]:
             xml_lang = _xml_lang_to_lang2(elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", ""))
         if ln in {"title", "work_title"} and text_value:
             title_candidates.append((text_value, xml_lang))
+        # Only document-link predicates carry retrieval targets. RDF datatype,
+        # subject and ontology URIs are metadata, even when they resolve to HTML.
+        if not any(token in ln.lower() for token in ("website", "sameas", "url", "manifestation", "download", "fulltext", "eli", "id_local", "identifier")):
+            continue
         urls = []
         if text_value.startswith("http://") or text_value.startswith("https://"):
             urls.append(text_value)
-        for attr_value in getattr(elem, "attrib", {}).values():
+        for attr_name, attr_value in getattr(elem, "attrib", {}).items():
+            if _localname(attr_name) not in {"resource", "href"}:
+                continue
             if isinstance(attr_value, str) and attr_value.startswith(("http://", "https://")):
                 urls.append(attr_value)
         for url in _uniq_keep_order(urls):
+            if not _is_document_link(url):
+                continue
             lower_url = url.lower()
             link_type = "other"
             source_format = "html"
@@ -988,6 +996,30 @@ def extract_nim_page_links(rdf_text: str) -> dict[str, Any]:
     return out
 
 
+def _is_document_link(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and bool(host) and not any(
+        host == domain or host.endswith("." + domain)
+        for domain in ("w3.org", "w3c.org", "userway.org", "publications.europa.eu", "eur-lex.europa.eu")
+    )
+
+
+def _nim_content_error(content: str, url: str = "", content_type: str = "") -> str:
+    reason = _looks_like_metadata_response(content, final_url=url, content_type=content_type)
+    if reason:
+        return reason
+    text = _html_to_text_basic(content).lower()
+    if any(token in text for token in ("related resources for xml schema", "userway |", "verify that you're not a robot", "javascript is disabled")):
+        return "non_document_page"
+    host = (urlparse(url).hostname or "").lower()
+    if host == "eur-lex.europa.eu" or ("eur-lex" in text and ("national transposition" in text or "national implementing" in text)):
+        return "nim_metadata_page"
+    if any(re.search(pattern, content, re.I) for pattern in _NOT_AVAILABLE_PATTERNS):
+        return "not_available"
+    return ""
+
+
 def extract_nim_direct_access_links(html_text: str, base_url: str) -> list[dict[str, str]]:
     soup = BeautifulSoup(html_text or "", "html.parser")
     links: list[dict[str, str]] = []
@@ -996,6 +1028,8 @@ def extract_nim_direct_access_links(html_text: str, base_url: str) -> list[dict[
     for a in soup.find_all("a", href=True):
         href = urljoin(base_url, a.get("href"))
         label = a.get_text(" ", strip=True)
+        if not _is_document_link(href):
+            continue
         lower = href.lower()
         if lower.endswith(".pdf"):
             link_type = "direct_text_pdf"
@@ -1016,8 +1050,7 @@ def extract_nim_direct_access_links(html_text: str, base_url: str) -> list[dict[
             link_type = "machine_translation"
             source_format = "html"
         else:
-            link_type = "national_website"
-            source_format = "html"
+            continue
         links.append(
             {
                 "url": href,
@@ -1131,9 +1164,10 @@ def _fetch_text_from_candidate(
                 return {"status": status, "error": f"{source_format}_downloaded_not_extracted", "url": str(response.url), "route": route_name, "text": "", "content_type": content_type, "source_format": source_format}
 
             html = response.text or ""
-            text = _html_to_text_basic(html)
+            error = _nim_content_error(html, str(response.url), content_type)
+            text = "" if error else _html_to_text_basic(html)
             extra_links = extract_nim_direct_access_links(html, str(response.url))
-            return {"status": status, "error": "" if text else "empty_text", "url": str(response.url), "route": route_name, "text": text, "content_type": content_type, "source_format": source_format, "html": html, "extra_links": extra_links}
+            return {"status": status, "error": error or ("" if text else "empty_text"), "url": str(response.url), "route": route_name, "text": text, "content_type": content_type, "source_format": source_format, "html": html, "extra_links": extra_links}
         except requests.RequestException as exc:
             last_error = str(exc)
             if attempt < retries:
@@ -1264,6 +1298,7 @@ def fetch_nim_document_text(
     verbose: bool = False,
     trace_routes: bool = False,
     success_min_chars: int = 500,
+    file_cache_dir: Path | None = None,
 ) -> tuple[str, dict[str, Any]]:
     sess = session or requests.Session()
     last_meta: dict[str, Any] = {
@@ -1288,15 +1323,19 @@ def fetch_nim_document_text(
     }
     t0 = time.time()
 
-    page_meta = fetch_nim_page_metadata(
-        pd.Series({
-            "nim_celex": nim_celex,
-            "national_measure_id": re.sub(r"^.*_", "", nim_celex) if "_" in nim_celex else "",
-            "eurlex_url": eurlex_url,
-        }),
-        session=sess,
-        timeout_s=timeout[1] if isinstance(timeout, tuple) else int(timeout),
-    )
+    try:
+        page_meta = fetch_nim_page_metadata(
+            pd.Series({
+                "nim_celex": nim_celex,
+                "national_measure_id": re.sub(r"^.*_", "", nim_celex) if "_" in nim_celex else "",
+                "eurlex_url": eurlex_url,
+            }),
+            session=sess,
+            timeout_s=timeout[1] if isinstance(timeout, tuple) else int(timeout),
+        )
+    except requests.RequestException as exc:
+        page_meta = {}
+        last_meta["error"] = str(exc)
     last_meta.update(
         {
             "available_languages": page_meta.get("available_languages", []),
@@ -1310,10 +1349,10 @@ def fetch_nim_document_text(
         }
     )
 
-    file_cache_dir = _ensure_dir(Path("outputs/nim_fulltext_cache/file_cache"))
+    file_cache_dir = _ensure_dir(file_cache_dir or Path("outputs/nim_fulltext_cache/file_cache"))
     route_candidates = _build_nim_route_candidates(page_meta)
     seen_urls: set[str] = set()
-    while route_candidates:
+    while route_candidates and len(seen_urls) < 20:
         candidate = route_candidates.pop(0)
         if candidate["url"] in seen_urls:
             continue
@@ -1362,7 +1401,7 @@ def fetch_nim_document_text(
                         },
                     )
         text = str(candidate_result.get("text", "") or "")
-        if len(text) >= success_min_chars:
+        if text and not candidate_result.get("error") and len(text) >= success_min_chars:
             final_lang = str((candidate.get("lang", "") or (try_langs2[0] if try_langs2 else ""))).lower()
             last_meta["lang_used"] = final_lang
             return text, last_meta
@@ -1413,7 +1452,7 @@ def fetch_nim_document_text(
             if _looks_like_not_available(html):
                 last_meta.update({"error": "not_available", "full_text_raw": html})
                 continue
-            metadata_reason = _looks_like_metadata_response(html, final_url=final_url, content_type=content_type)
+            metadata_reason = _nim_content_error(html, url=final_url, content_type=content_type)
             if metadata_reason:
                 last_meta.update({"error": metadata_reason, "full_text_raw": html})
                 continue
@@ -1456,7 +1495,8 @@ def fetch_nim_fulltext_for_row(
     nim_celex = str(row.get("nim_celex", "") or "").strip()
     national_measure_id = str(row.get("national_measure_id", "") or "").strip()
     fallback_title = _clean_optional_text(row.get("nim_title", ""))
-    if use_cache and text_path.exists() and text_path.stat().st_size > 0:
+    validation_path = text_path.with_suffix(".validated-v2")
+    if use_cache and validation_path.exists() and text_path.exists() and text_path.stat().st_size > 0:
         text_clean = text_path.read_text(encoding="utf-8", errors="replace")
         return {
             "celex": str(row.get("celex", "") or ""),
@@ -1506,6 +1546,7 @@ def fetch_nim_fulltext_for_row(
         verbose=verbose,
         trace_routes=trace_routes,
         success_min_chars=success_min_chars,
+        file_cache_dir=cache_dir / "file_cache",
     )
 
     full_text_raw = str(meta.get("full_text_raw", "") or "")
@@ -1516,6 +1557,9 @@ def fetch_nim_fulltext_for_row(
         html_path.write_text(full_text_raw, encoding="utf-8", errors="replace")
     if text:
         text_path.write_text(text, encoding="utf-8", errors="replace")
+        validation_path.write_text("2", encoding="utf-8")
+    elif validation_path.exists():
+        validation_path.unlink()
 
     result = {
         "celex": str(row.get("celex", "") or ""),
@@ -1642,7 +1686,7 @@ def rebuild_nim_fulltext_cache_state_from_files(cache_dir: Path) -> pd.DataFrame
             text = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             text = ""
-        rows.append({"cache_key": path.stem, "file_text_len": len(text), "text_path": str(path), "file_exists": True})
+        rows.append({"cache_key": path.stem, "file_text_len": len(text) if path.with_suffix(".validated-v2").exists() else 0, "text_path": str(path), "file_exists": True})
     return pd.DataFrame(rows, columns=["cache_key", "file_text_len", "text_path", "file_exists"])
 
 
@@ -1681,7 +1725,6 @@ def summarize_nim_fulltext_cache_state(
     merged["retrieval_error"] = merged.get("retrieval_error", "").fillna("").astype(str)
     merged["cache_state"] = "pending"
     merged.loc[merged["file_exists"] & merged["file_text_len"].ge(success_min_chars), "cache_state"] = "successful"
-    merged.loc[merged["cache_state"].eq("pending") & merged["text_len"].ge(success_min_chars), "cache_state"] = "successful"
     merged.loc[merged["cache_state"].eq("pending") & (merged["retrieval_status"].gt(0) | merged["retrieval_error"].ne("")), "cache_state"] = "failed"
     return merged, cache_df
 
@@ -1715,8 +1758,10 @@ def batch_fetch_nim_fulltext(
     if resume:
         successful_keys = set(cache_state_df.loc[cache_state_df["cache_state"].eq("successful"), "cache_key"].astype(str))
         failed_keys = set(cache_state_df.loc[cache_state_df["cache_state"].eq("failed"), "cache_key"].astype(str))
-        keep_mask = ~work_df["cache_key"].astype(str).isin(successful_keys)
-        if not retry_failures:
+        # Keep validated cache hits in the returned corpus; the row fetcher
+        # reads them locally. Previously resume silently omitted these rows.
+        keep_mask = pd.Series(True, index=work_df.index)
+        if use_cache and not retry_failures:
             keep_mask &= ~work_df["cache_key"].astype(str).isin(failed_keys)
         work_df = work_df.loc[keep_mask].copy()
 

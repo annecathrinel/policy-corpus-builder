@@ -33,7 +33,7 @@ class EurlexAdapterTests(unittest.TestCase):
             "policy_corpus_builder.adapters.eurlex_supported",
         )
 
-    def test_full_text_resolution_prefers_cleaned_then_raw(self) -> None:
+    def test_full_text_resolution_only_exports_validated_text(self) -> None:
         import policy_corpus_builder.adapters.eurlex_adapter as eurlex_adapter_module
 
         self.assertEqual(
@@ -46,7 +46,7 @@ class EurlexAdapterTests(unittest.TestCase):
             eurlex_adapter_module._resolve_full_text(
                 {"full_text_clean": "", "full_text_raw": "<html>Raw text</html>"}
             ),
-            "<html>Raw text</html>",
+            None,
         )
 
     def test_cached_clean_text_normalizes_stale_xml_header_artifacts(self) -> None:

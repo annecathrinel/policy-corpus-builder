@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
+from urllib.parse import unquote
 from typing import Any
 
 SECTOR_LABELS = {
@@ -144,7 +145,7 @@ GENERIC_DESCRIPTOR_LABELS = {
 }
 
 MAIN_RE = re.compile(
-    r"^(?P<sector>[0-9CE])(?P<year>\d{4})(?P<descriptor>[A-Z]{1,4})(?P<doc_number>[A-Z0-9/.-]+?)(?P<tail>R\(\d{2}\))?$",
+    r"^(?P<sector>[0-9CE])(?P<year>\d{4})(?P<descriptor>[A-Z]{1,4})(?P<doc_number>[A-Z0-9/.-]+?)(?P<tail>R?\(\d{2}\))?$",
     re.I,
 )
 
@@ -161,7 +162,7 @@ CONSOL_RE = re.compile(
 )
 
 CELEX_TOKEN_RE = re.compile(
-    r"(?<![A-Z0-9])(?P<celex>[0-9CE]\d{4}[A-Z]{1,2}[A-Z0-9/.-]+(?:R\(\d{2}\))?)(?![A-Z0-9])",
+    r"(?<![A-Z0-9])(?P<celex>[0-9CE]\d{4}[A-Z]{1,2}[A-Z0-9/.-]+(?:R?\(\d{2}\))?)(?![A-Z0-9])",
     re.I,
 )
 
@@ -188,7 +189,7 @@ class CelexInfo:
 def _normalize(value: str | None) -> str:
     if value is None:
         return ""
-    return re.sub(r"\s+", "", str(value).upper())
+    return re.sub(r"\s+", "", unquote(str(value)).upper())
 
 def extract_celex_token(value: str | None) -> str | None:
     """Extract the first CELEX-like token from arbitrary text."""
