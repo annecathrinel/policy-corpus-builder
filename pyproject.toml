@@ -35,6 +35,7 @@ dependencies = [
   "beautifulsoup4",
   "certifi",
   "curl_cffi",
+  "fonttools",
   "numpy",
   "pandas",
   "pypdf",
