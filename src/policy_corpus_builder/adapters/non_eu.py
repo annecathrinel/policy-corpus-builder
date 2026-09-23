@@ -318,18 +318,10 @@ def build_aus_search_url(term: str) -> str:
 
 
 def nz_search_url(base: str, term: str, page: int = 1) -> str:
-    # legislation.govt.nz's search (both the website box and this API,
-    # which the developer docs say has "functionality equivalent to the
-    # search function on this website") treats unquoted multi-word input
-    # as a fuzzy/OR-style match over the individual words, not a phrase.
-    # `"..."` is the documented operator for an exact word/phrase match
-    # (confirmed on /advanced_search/'s "Search operators and examples").
-    # Without it, a term like "marine biodiversity" was being searched as
-    # "marine" OR "biodiversity" rather than the actual phrase - the same
-    # quoting fetch_uk_documents and fetch_us_documents already do for
-    # their multi-word terms.
+    # Quote phrases and hyphenated terms, preserving explicit caller quotes.
     term = term.strip()
-    query_term = f'"{term}"' if " " in term else term
+    already_quoted = len(term) >= 2 and term.startswith('"') and term.endswith('"')
+    query_term = f'"{term}"' if not already_quoted and ("-" in term or any(c.isspace() for c in term)) else term
     query = "&".join(
         [
             f"search_term={quote(query_term)}",
@@ -384,7 +376,7 @@ def _derive_nz_pdf_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, new_path, "", "", ""))
 
 
-def _extract_nz_api_rows(term: str, payload: dict, *, max_per_term: int) -> list[dict]:
+def _extract_nz_api_rows(term: str, payload: dict, *, max_per_term: int | None) -> list[dict]:
     results = payload.get("results") or []
     if not isinstance(results, list):
         return []
@@ -424,7 +416,7 @@ def _extract_nz_api_rows(term: str, payload: dict, *, max_per_term: int) -> list
                 "xml_url": xml_url,
             }
         )
-        if len(rows) >= max_per_term:
+        if max_per_term is not None and len(rows) >= max_per_term:
             break
     return rows
 
@@ -965,7 +957,7 @@ def _normalize_raw_rows(rows: list[dict]) -> pd.DataFrame:
 def fetch_uk_documents(
     search_terms: list[str],
     *,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
@@ -977,14 +969,14 @@ def fetch_uk_documents(
     rows: list[dict] = []
     if verbose:
         print("\n========== UK retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'}")
     for term in search_terms:
         kept = 0
         page = 1
         seen_urls: set[str] = set()
         if verbose:
             print(f"\n[UK] term='{term}' START")
-        while kept < max_per_term:
+        while max_per_term is None or kept < max_per_term:
             q = f'"{term}"' if " " in term else term
             url = f"{UK_BASE}/all?text={quote(q)}"
             if page > 1:
@@ -1017,7 +1009,7 @@ def fetch_uk_documents(
                     print(f"[UK] term='{term}' page={page} -> no new urls (all duplicates); stopping")
                 break
             for doc_url in new_urls:
-                if kept >= max_per_term:
+                if max_per_term is not None and kept >= max_per_term:
                     break
                 seen_urls.add(doc_url)
                 rows.append(
@@ -1046,7 +1038,7 @@ def fetch_uk_documents(
 def fetch_aus_documents(
     search_terms: list[str],
     *,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
@@ -1063,7 +1055,7 @@ def fetch_aus_documents(
     rows: list[dict] = []
     if verbose:
         print("\n========== AUS retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'}")
         print("[AUS] note: search results are a single unpaginated page per term; every")
         print("[AUS] term below is queried exactly once as an exact-phrase match.")
     for term in search_terms:
@@ -1109,7 +1101,7 @@ def fetch_aus_documents(
             print(f"[AUS] term='{term}' status={response.status_code} -> candidates={len(deduped)}")
         kept = 0
         for href, title in deduped:
-            if kept >= max_per_term:
+            if max_per_term is not None and kept >= max_per_term:
                 break
             doc_url = urljoin(AUS_BASE, href)
             rows.append(
@@ -1191,7 +1183,7 @@ def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]
 def fetch_canada_documents(
     search_terms: list[str],
     *,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify_ssl_with_certifi: bool = True,
@@ -1203,7 +1195,7 @@ def fetch_canada_documents(
 
     if verbose:
         print("\n========== CA retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'}")
         print("[CA] note: publications.gc.ca's search results are a single")
         print("[CA] unpaginated page per term, same as AUS.")
 
@@ -1227,7 +1219,7 @@ def fetch_canada_documents(
 
         kept = 0
         for doc_url, title in candidates:
-            if kept >= max_per_term:
+            if max_per_term is not None and kept >= max_per_term:
                 break
             rows.append(
                 {
@@ -1254,7 +1246,7 @@ def fetch_nz_documents(
     search_terms: list[str],
     *,
     api_key: str | None = None,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
     verify: bool | str | None = None,
@@ -1278,7 +1270,7 @@ def fetch_nz_documents(
     diagnostics: list[dict] = []
     if verbose:
         print("\n========== NZ retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'}")
         print("[NZ] Using official API: api.legislation.govt.nz/v0/works")
     for term in search_terms:
         kept = 0
@@ -1292,7 +1284,7 @@ def fetch_nz_documents(
         # that's at most 400 documents per term, always short of the
         # per-term budget every other jurisdiction gets to use in full.
         page = 1
-        while kept < max_per_term:
+        while max_per_term is None or kept < max_per_term:
             request_url = nz_search_url(NZ_API_BASE, term, page=page)
             if verbose:
                 print(f"[NZ] term='{term}' page={page} -> {request_url}")
@@ -1364,7 +1356,7 @@ def fetch_nz_documents(
             total_results = payload.get("total")
             response_page = payload.get("page", page)
             response_per_page = payload.get("per_page", len(payload.get("results") or []))
-            page_rows = _extract_nz_api_rows(term, payload, max_per_term=max_per_term - kept)
+            page_rows = _extract_nz_api_rows(term, payload, max_per_term=None if max_per_term is None else max_per_term - kept)
             if not page_rows:
                 if verbose:
                     print(f"[NZ] term='{term}' page={page} -> no candidates; stopping")
@@ -1385,7 +1377,7 @@ def fetch_nz_documents(
                 break
             new_kept = 0
             for row in page_rows:
-                if kept >= max_per_term:
+                if max_per_term is not None and kept >= max_per_term:
                     break
                 rows.append(row)
                 kept += 1
@@ -1399,16 +1391,16 @@ def fetch_nz_documents(
                     "candidates_found": len(page_rows),
                     "new_urls_kept": new_kept,
                     "kept_total": kept,
-                    "stop_reason": "continue" if kept < max_per_term else "max_per_term_reached",
+                    "stop_reason": "continue" if max_per_term is None or kept < max_per_term else "max_per_term_reached",
                     "request_url": request_url,
                     "mode": "api",
                 }
             )
             if verbose:
                 print(f"[NZ] term='{term}' page={page} -> candidates={len(page_rows)} new_kept={new_kept} kept_total={kept}")
-            if kept >= max_per_term:
+            if max_per_term is not None and kept >= max_per_term:
                 if verbose:
-                    print(f"[NZ] term='{term}' reached max_per_term={max_per_term}; stopping")
+                    print(f"[NZ] term='{term}' reached max_per_term={max_per_term if max_per_term is not None else 'unlimited'}; stopping")
                 break
             if (
                 isinstance(total_results, int)
@@ -1435,7 +1427,7 @@ def fetch_us_documents(
     search_terms: list[str],
     *,
     api_key: str | None = None,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     page_size: int = 250,
     session: requests.Session | None = None,
     sleep_s: float = 0.25,
@@ -1468,14 +1460,14 @@ def fetch_us_documents(
     rows: list[dict] = []
     if verbose:
         print("\n========== US retrieval ==========")
-        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term} | page_size: {page_size}")
+        print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'} | page_size: {page_size}")
     for term in search_terms:
         kept = 0
         page = 1
         if verbose:
             print(f"\n[US] term='{term}' START")
-        while kept < max_per_term:
-            request_page_size = max(5, min(page_size, max_per_term - kept))
+        while max_per_term is None or kept < max_per_term:
+            request_page_size = page_size if max_per_term is None else max(5, min(page_size, max_per_term - kept))
             search_term = f'"{term}"' if " " in term else term
             params = {
                 "filter[searchTerm]": search_term,
@@ -1508,7 +1500,7 @@ def fetch_us_documents(
                 break
             page_kept = 0
             for item in data:
-                if kept >= max_per_term:
+                if max_per_term is not None and kept >= max_per_term:
                     break
                 attrs = item.get("attributes", {}) or {}
                 doc_id = item.get("id", "") or ""
@@ -1555,7 +1547,7 @@ def fetch_non_eu_all(
     sources: tuple[str, ...] = ("UK", "AUS", "NZ", "CA", "US"),
     nz_api_key: str | None = None,
     us_api_key: str | None = None,
-    max_per_term: int = 500,
+    max_per_term: int | None = None,
     user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     session = build_session()
@@ -2983,7 +2975,7 @@ def run_non_eu_query_pipeline(
     countries: tuple[str, ...] = ("UK",),
     nz_api_key: str | None = None,
     us_api_key: str | None = None,
-    max_per_term: int = 100,
+    max_per_term: int | None = None,
     max_workers: int = 4,
     progress_every: int = 0,
     obey_robots: bool = True,

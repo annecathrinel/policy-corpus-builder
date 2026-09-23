@@ -542,9 +542,12 @@ There are two independent levels of concurrency in a `build_policy_corpus(...)` 
 
 **Per-term document cap for non-EU jurisdictions** (how many documents each of UK, AUS, CA, NZ, and US keeps per query term): controlled by `non_eu_max_per_term` (`--max-per-term` on the CLI).
 
-- Default (`non_eu_max_per_term=None`): `build_policy_corpus` resolves this to **500**. This exists because `NonEUAdapter.validate_source_config` itself defaults `source.settings.max_per_term` to only **100** when a source config doesn't set it explicitly, and `build-corpus`'s non-EU `SourceConfig`s never used to set it - so every non-EU jurisdiction run through `build_policy_corpus` (CLI or Python API), not just any one of them, was silently capped at 100 documents per term with no way to raise it short of writing a TOML config for the lower-level `run` command. `build_policy_corpus` now sets `max_per_term` explicitly on every non-EU jurisdiction's `SourceConfig`, at 500 by default.
-- Pass an explicit value (e.g. `--max-per-term 1000`) to raise or lower it further. This applies uniformly to every non-EU jurisdiction in the run - there's one setting, not one per jurisdiction.
-- If you're using the lower-level `run` CLI command with a TOML config instead of `build-corpus`, this is `source.settings.max_per_term` directly (see `examples/non_eu_new_zealand.toml`), and the adapter's own 100 default still applies there if you omit it.
+- Default (`non_eu_max_per_term=None`): no per-term document cap. Paginated adapters continue until their upstream results are exhausted; this does not add pagination to single-page adapters.
+- Pass a positive value (e.g. `--max-per-term 1000`) to cap results per term in each non-EU jurisdiction.
+- For the lower-level `run` command, omit `source.settings.max_per_term` in TOML for unlimited retrieval. Existing explicit limits still apply.
+
+EU full-text retrieval reuses successful files from the shared cache directory across terms and subsequent runs, reporting the number reused. Missing cached text is fetched again. Set `use_cache = false` to force fresh retrieval.
+NZ search quotes hyphenated terms such as `nature-based` as well as multi-word phrases, preserving existing outer quotes.
 
 **Full-text-fetch concurrency within a jurisdiction** (how many documents' full text a single jurisdiction fetches at once): implemented for every jurisdiction as of 2026-07-28, via a `ThreadPoolExecutor` in each of `non_eu.py`'s `add_full_texts_parallel` and `eurlex_supported.py`'s `batch_fetch_eurlex_fulltext`. Two separate settings, since the two paths have very different risk profiles:
 

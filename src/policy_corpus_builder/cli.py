@@ -115,9 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help=(
             "Maximum documents kept per query term for non-EU jurisdictions "
-            "(UK, AUS, CA, NZ, US). Defaults to 500. The underlying adapter "
-            "itself falls back to 100 when this isn't set explicitly, so "
-            "omitting this flag no longer means 'unlimited' - it means 500."
+            "(UK, AUS, CA, NZ, US). Defaults to unlimited; supply a positive integer to cap results."
         ),
     )
     build_corpus_parser.add_argument(

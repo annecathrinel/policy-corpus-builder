@@ -69,7 +69,7 @@ class NonEUAdapter:
                 f"{', '.join(invalid_countries)}. Allowed values: {allowed}."
             )
 
-        self._require_positive_int(settings, "max_per_term", default=100)
+        self._resolve_max_per_term(settings)
         self._require_positive_int(settings, "max_workers", default=4)
         self._require_non_negative_int(settings, "progress_every", default=0)
         self._require_bool(settings, "obey_robots", default=True)
@@ -111,7 +111,7 @@ class NonEUAdapter:
             countries=self._resolve_countries(settings),
             nz_api_key=self._resolve_nz_api_key(settings),
             us_api_key=self._resolve_us_api_key(settings),
-            max_per_term=self._require_positive_int(settings, "max_per_term", default=100),
+            max_per_term=self._resolve_max_per_term(settings),
             max_workers=self._require_positive_int(settings, "max_workers", default=4),
             progress_every=self._require_non_negative_int(settings, "progress_every", default=0),
             obey_robots=self._require_bool(settings, "obey_robots", default=True),
@@ -268,6 +268,11 @@ class NonEUAdapter:
                 f"non-eu adapter source.settings.{key} must be a positive integer."
             )
         return raw_value
+
+    def _resolve_max_per_term(self, settings: dict[str, Any]) -> int | None:
+        if settings.get("max_per_term") is None:
+            return None
+        return self._require_positive_int(settings, "max_per_term", default=1)
 
     def _require_non_negative_int(
         self,

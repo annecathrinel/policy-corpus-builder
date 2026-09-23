@@ -89,6 +89,37 @@ class EurlexAdapterTests(unittest.TestCase):
             if original_legacy_pass is not None:
                 os.environ["EURLEX_WEB_PASS"] = original_legacy_pass
 
+    def test_cross_term_cache_reuses_text_and_refetches_missing_files(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        from policy_corpus_builder.adapters import eurlex_supported as eu
+
+        text = "Biodiversity protection. " * 40
+        response = {"full_text_clean": text, "status": 200, "error": "", "lang": "en"}
+        docs = pd.DataFrame([{
+            "celex_full": "32014L0089", "title": "Directive", "query_langs": '["en"]',
+            "query_term_groups": '["biodiversity"]',
+        }])
+        with TemporaryDirectory() as tmp, patch.object(eu, "get_eurlex_text_multi", return_value=response) as fetch:
+            cache = Path(tmp)
+            first = eu.batch_fetch_eurlex_fulltext(docs, cache_dir=cache, min_interval_s=0)
+            self.assertEqual(fetch.call_count, 1)
+            docs["query_term_groups"] = '["unrelated"]'
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                second = eu.batch_fetch_eurlex_fulltext(docs, cache_dir=cache, min_interval_s=0)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertTrue(second.iloc[0]["fetched_from_cache"])
+            self.assertFalse(second.iloc[0]["term_verified"])
+            self.assertIn("reused 1 already-fetched document(s)", stdout.getvalue())
+            Path(first.iloc[0]["text_path"]).unlink()
+            recovered = eu.batch_fetch_eurlex_fulltext(docs, cache_dir=cache, min_interval_s=0)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(recovered.iloc[0]["full_text_clean"], text)
+            eu.batch_fetch_eurlex_fulltext(docs, cache_dir=cache, use_cache=False, min_interval_s=0)
+            self.assertEqual(fetch.call_count, 3)
+
     def test_batch_fetch_rehydrates_successful_cached_rows_on_resume(self) -> None:
         import policy_corpus_builder.adapters.eurlex_supported as eurlex_supported_module
 

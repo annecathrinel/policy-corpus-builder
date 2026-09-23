@@ -32,16 +32,8 @@ from policy_corpus_builder.postprocess import (
 from policy_corpus_builder.schemas import NormalizationConfig, SourceConfig
 
 SUPPORTED_JURISDICTIONS = ("EU", "UK", "CA", "AUS", "NZ", "US")
-# NonEUAdapter.validate_source_config defaults source.settings.max_per_term
-# to 100 when a source config doesn't set it explicitly. build-corpus (both
-# the Python API and the CLI) builds non-EU SourceConfigs itself and never
-# set this key, so every non-EU jurisdiction run through build_policy_corpus
-# was silently capped at 100 documents per term - not just NZ, all of UK/
-# AUS/CA/US too. 500 matches the documented example TOML
-# (examples/non_eu_new_zealand.toml) and every non_eu.py fetch_* function's
-# own max_per_term default, so this restores that as build-corpus's default
-# instead of the adapter's much lower internal fallback.
-NON_EU_DEFAULT_MAX_PER_TERM = 500
+# None means no per-term retrieval cap. Explicit positive limits remain supported.
+NON_EU_DEFAULT_MAX_PER_TERM = None
 # Same shape of bug as NON_EU_DEFAULT_MAX_PER_TERM above, for a different
 # setting: NonEUAdapter.collect (via run_non_eu_query_pipeline ->
 # add_full_texts_parallel) defaults source.settings.max_workers to only 4
@@ -224,7 +216,7 @@ class PolicyCorpusBuildResult:
     include_nim_fulltext: bool
     nim_max_rows: int | None
     max_jurisdiction_workers: int
-    non_eu_max_per_term: int
+    non_eu_max_per_term: int | None
     non_eu_max_workers: int
     eu_max_workers: int
     write_jurisdiction_logs: bool
@@ -369,16 +361,9 @@ def build_policy_corpus(
     to the main job output, e.g. for interactively debugging one
     jurisdiction.
 
-    non_eu_max_per_term caps how many documents each non-EU jurisdiction
-    (UK, AUS, CA, NZ, US) keeps per query term. It defaults to
-    NON_EU_DEFAULT_MAX_PER_TERM (500) here - the underlying NonEUAdapter
-    itself defaults to only 100 when a source config doesn't set
-    max_per_term explicitly, and build_policy_corpus's own non-EU
-    SourceConfigs never used to set it, so every non-EU jurisdiction run
-    through this function (CLI or Python API) was silently capped at 100
-    documents per term regardless of what max_per_term looked like on any
-    individual fetch_* function. Pass an explicit value to raise or lower
-    that per-run.
+    non_eu_max_per_term optionally caps documents kept per query term for
+    non-EU jurisdictions. None (the default) means unlimited; an explicit
+    positive integer sets a cap.
 
     non_eu_max_workers caps how many full-text documents each non-EU
     jurisdiction fetches concurrently per query term. It defaults to
@@ -537,7 +522,7 @@ def _build_policy_corpus_impl(
     )
     resolved_non_eu_max_per_term = _clean_optional_positive_int(
         non_eu_max_per_term, field_name="non_eu_max_per_term"
-    ) or NON_EU_DEFAULT_MAX_PER_TERM
+    )
     resolved_non_eu_max_workers = _clean_optional_positive_int(
         non_eu_max_workers, field_name="non_eu_max_workers"
     ) or NON_EU_DEFAULT_MAX_WORKERS
@@ -883,7 +868,7 @@ def _run_jurisdiction(
     include_translations: bool,
     output_root: Path,
     cache_root: Path,
-    non_eu_max_per_term: int,
+    non_eu_max_per_term: int | None,
     non_eu_max_workers: int,
     eu_max_workers: int,
     include_case_law: bool = False,

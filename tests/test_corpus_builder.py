@@ -901,8 +901,8 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
         # way it briefly did - every non-EU jurisdiction, NZ included, now
         # gets the exact same settings shape: {"countries": [...],
         # "max_per_term": ..., "max_workers": ...}. max_per_term defaults to
-        # NON_EU_DEFAULT_MAX_PER_TERM (500) here - see
-        # test_non_eu_max_per_term_defaults_to_500_and_is_configurable for
+        # None (unlimited) here - see
+        # test_non_eu_max_per_term_defaults_to_unlimited_and_is_configurable for
         # the regression test covering why that default exists at all
         # (NonEUAdapter itself silently falls back to 100 when a source
         # config doesn't set this). max_workers defaults to
@@ -943,21 +943,15 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
 
         self.assertEqual(
             captured_settings["NZ"],
-            {"countries": ["NZ"], "max_per_term": 500, "max_workers": 8},
+            {"countries": ["NZ"], "max_per_term": None, "max_workers": 8},
         )
         self.assertEqual(
             captured_settings["UK"],
-            {"countries": ["UK"], "max_per_term": 500, "max_workers": 8},
+            {"countries": ["UK"], "max_per_term": None, "max_workers": 8},
         )
 
-    def test_non_eu_max_per_term_defaults_to_500_and_is_configurable(self):
-        # Regression test: NonEUAdapter.validate_source_config defaults
-        # source.settings.max_per_term to 100 when it isn't set explicitly.
-        # build_policy_corpus's non-EU SourceConfigs never set this key, so
-        # every non-EU jurisdiction run through the CLI or Python API - not
-        # just NZ - was silently capped at 100 documents per query term.
-        # non_eu_max_per_term now defaults to 500 (NON_EU_DEFAULT_MAX_PER_TERM,
-        # matching the documented example TOML) and can be overridden.
+    def test_non_eu_max_per_term_defaults_to_unlimited_and_is_configurable(self):
+        # Omitted limits must reach every adapter as unlimited.
         captured_settings: dict[str, dict] = {}
         tracker = {"eu_queries": [], "non_eu_queries": [], "nim_queries": []}
 
@@ -991,9 +985,9 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                     outputs_path=output_root,
                 )
 
-        self.assertEqual(captured_settings["NZ"]["max_per_term"], 500)
-        self.assertEqual(result.non_eu_max_per_term, 500)
-        self.assertEqual(result.to_dict()["non_eu_max_per_term"], 500)
+        self.assertEqual(captured_settings["NZ"]["max_per_term"], None)
+        self.assertEqual(result.non_eu_max_per_term, None)
+        self.assertEqual(result.to_dict()["non_eu_max_per_term"], None)
 
         captured_settings.clear()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1029,7 +1023,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
 
     def test_non_eu_max_workers_defaults_to_8_and_is_configurable(self):
         # Same shape of regression test as
-        # test_non_eu_max_per_term_defaults_to_500_and_is_configurable, for
+        # test_non_eu_max_per_term_defaults_to_unlimited_and_is_configurable, for
         # max_workers: NonEUAdapter.validate_source_config defaults
         # source.settings.max_workers to only 4 concurrent full-text
         # fetches per query term when it isn't set explicitly, and

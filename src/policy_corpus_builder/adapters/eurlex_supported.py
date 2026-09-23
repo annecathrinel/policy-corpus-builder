@@ -1630,7 +1630,7 @@ def batch_fetch_eurlex_fulltext(
         success_min_chars=success_min_chars,
     )
     cached_rows: list[dict] = []
-    if resume:
+    if resume and use_cache:
         if "celex_full" not in work_df.columns and "celex" in work_df.columns:
             work_df["celex_full"] = work_df["celex"]
         work_df["celex_full"] = work_df["celex_full"].fillna("").astype(str)
@@ -1638,10 +1638,19 @@ def batch_fetch_eurlex_fulltext(
         failed_celex = set(cache_state_df.loc[cache_state_df["cache_state"].eq("failed"), "celex_full"].astype(str))
         cached_docs_df = work_df.loc[work_df["celex_full"].isin(successful_celex)].copy()
         cached_rows = _build_cached_resume_rows(cached_docs_df, cache_state_df)
-        keep_mask = ~work_df["celex_full"].astype(str).isin(successful_celex)
+        # Only skip documents whose text was actually recovered. A CSV entry
+        # can outlive its text file; those documents must be fetched again.
+        recovered_celex = {row["celex_full"] for row in cached_rows}
+        keep_mask = ~work_df["celex_full"].astype(str).isin(recovered_celex)
         if not retry_failures:
             keep_mask &= ~work_df["celex_full"].astype(str).isin(failed_celex)
         work_df = work_df.loc[keep_mask].copy()
+
+    if cached_rows and verbose:
+        print(
+            f"[FULLTEXT] cross-term cache: reused {len(cached_rows)} already-fetched document(s), skipping their fetch",
+            flush=True,
+        )
 
     rows: list[dict] = []
     type_summary_rows: list[dict] = []

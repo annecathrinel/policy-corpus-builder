@@ -92,6 +92,14 @@ class NonEUNewZealandTests(unittest.TestCase):
 
         self.assertIn("search_term=%22marine%20biodiversity%22", url)
 
+    def test_nz_search_url_quotes_hyphens_without_double_quoting(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+        for term in ('nature-based', '"nature-based"', '"nature based"'):
+            with self.subTest(term=term):
+                url = non_eu.nz_search_url(non_eu.NZ_API_BASE, term)
+                self.assertEqual(parse_qs(urlparse(url).query)["search_term"],
+                                 ['"' + term.strip('"') + '"'])
+
     def test_nz_search_url_does_not_quote_a_single_word_term(self) -> None:
         url = non_eu.nz_search_url(non_eu.NZ_API_BASE, "biodiversity", page=1)
 
@@ -184,6 +192,47 @@ class NonEUNewZealandTests(unittest.TestCase):
                 ["biodiversity"],
                 api_key="nz-test-key",
                 max_per_term=total_results,
+                verbose=False,
+            )
+
+        self.assertEqual(len(df), total_results)
+        self.assertEqual(max(requested_pages), total_results)
+        self.assertGreater(max(requested_pages), 20)
+
+    def test_fetch_nz_documents_has_no_default_500_document_cap(self) -> None:
+        total_results = 501
+        requested_pages: list[int] = []
+
+        def fake_safe_get(url: str, **kwargs) -> _FakeResponse:
+            page = int(url.split("page=")[1].split("&")[0])
+            requested_pages.append(page)
+            payload = {
+                "results": [
+                    {
+                        "work_id": f"act_public_2024_{page}",
+                        "latest_matching_version": {
+                            "title": f"Act {page}",
+                            "version_id": f"act_public_2024_{page}_en_latest",
+                            "formats": [
+                                {
+                                    "type": "xml",
+                                    "url": f"https://www.legislation.govt.nz/act/public/2024/{page}/en/latest.xml",
+                                },
+                            ],
+                        },
+                    }
+                ],
+                "page": page,
+                "per_page": 1,
+                "total": total_results,
+            }
+            return _FakeResponse(200, json.dumps(payload))
+
+        with patch.object(non_eu, "safe_get", side_effect=fake_safe_get):
+            df = non_eu.fetch_nz_documents(
+                ["biodiversity"],
+                api_key="nz-test-key",
+                sleep_s=0,
                 verbose=False,
             )
 
