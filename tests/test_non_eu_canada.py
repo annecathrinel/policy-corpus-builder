@@ -86,11 +86,11 @@ class NonEUCanadaTests(unittest.TestCase):
     def test_build_canada_publications_search_url_matches_current_live_route_shape(self) -> None:
         self.assertEqual(
             non_eu.build_canada_publications_search_url("biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?sLF=eng&text=%22biodiversity%22&cnst=&adof=on",
+            "https://www.publications.gc.ca/site/eng/search/search.html?ast=%22biodiversity%22&cnst=&language=eng&adof=on",
         )
         self.assertEqual(
             non_eu.build_canada_publications_search_url("soil biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?sLF=eng&text=%22soil%20biodiversity%22&cnst=&adof=on",
+            "https://www.publications.gc.ca/site/eng/search/search.html?ast=%22soil%20biodiversity%22&cnst=&language=eng&adof=on",
         )
 
     def test_extract_canada_publications_result_links_filters_search_furniture(self) -> None:
