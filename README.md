@@ -24,6 +24,10 @@ build_policy_corpus(
     include_nim: bool = False,
     include_nim_fulltext: bool = True,
     nim_max_rows: int | None = None,
+    # Other existing worker/log options remain available.
+    include_case_law: bool = False,
+    case_law_fulltext: bool = False,
+    nim_min_valid_year: int = 1950,
 ) -> PolicyCorpusBuildResult
 ```
 
@@ -80,6 +84,91 @@ policy-corpus-builder build-corpus \
 ```
 
 This command calls `build_policy_corpus(...)` directly. It prints the same progress output, writes the same cache, jurisdiction corpora, final corpus, optional NIM corpus, and run manifest, then prints the final corpus and manifest paths.
+
+## Conservative case-law outputs and NIM summaries
+
+```python
+result = build_policy_corpus(
+    query_terms=["marine biodiversity"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/example-case-law",
+    include_case_law=True,
+    case_law_fulltext=False,
+    include_nim=True,
+    include_nim_fulltext=False,
+    nim_min_valid_year=1950,
+)
+print(result.case_law_status)
+print(result.case_law_corpus_path)
+print(result.nim_overview_paths)
+```
+
+CLI equivalents are `--include-case-law`, `--case-law-fulltext`, and
+`--nim-min-valid-year 1950`. Case-law outputs are opt-in; existing calls keep
+their retrieval defaults. The document-type cleanup always fixes misleading
+`Tribunal case` labels using authoritative CELEX metadata.
+
+Case law means **case law found in the ordinary policy-query result surface**,
+not a targeted or comprehensive court search. Sector 6 is `eu_case_law`, including
+judgments, orders and Advocate General opinions. Sector 8 is the separate,
+experimental `national_case_law_eu_reference` category. Any sector 0/1 evidence
+rejects a record, as do treaty/accession/annex/protocol/consolidated instrument
+titles and conflicting sectors. Generic labels or title keywords alone never
+establish case law. UK, CA, AUS, NZ and US case-law retrieval is currently
+unsupported: their adapters expose no verified court-decision signal.
+
+An enabled run writes these files under `case_law/`:
+
+- `documents.jsonl`: accepted normalized records, deduplicated by `document_id`.
+- `case_law_counts_by_jurisdiction_year.csv`: observed groups, including an
+  `unknown` year for absent/invalid normalized publication dates.
+- `case_law_counts_by_document_type.csv`: counts by normalized document type/category.
+- `case_law_overview.json`: evidence rules, support, rejections, deduplication,
+  missing years, full-text availability, warnings and output paths.
+
+Counts are source documents, not distinct proceedings. An opinion and judgment
+in one proceeding count separately. Unsupported jurisdictions get warnings and
+no synthetic zero rows. `unique_source_document_count` uses source name plus
+source document ID, falling back to document ID. Sector 8 rows use jurisdiction
+`EU` for the reference surface; they do not infer a national court country.
+`case_law_fulltext=True` requires `include_case_law=True` and requests ordinary
+EUR-Lex text retrieval. Missing text does not remove metadata. With the default
+`False`, case-law text fetching is skipped in the enabled run, and the separate
+case-law corpus omits full text and content paths. Ordinary non-case-law text
+retrieval is unchanged.
+
+NIM retains all existing overview files and adds `nim/overview/nim_by_country.csv`
+and `nim_country_x_act.csv`; `nim_by_act_country.csv` gains first/last dates and
+`implementation_update_span_days`. The wide table includes every current EU
+country, stable seed CELEX columns and `TOTAL` (plus observed other/unknown
+countries where present). Counts deduplicate measure identifiers within each
+act/country. Country totals sum those combinations: a measure implementing two
+acts counts twice. `act_count` counts acts with observed measures. Successful
+empty discovery is zero; failed discovery is blank. If any seed fails, country
+totals, act counts, timing and wide `TOTAL` are blank; successful act cells remain
+available. Page-limited discovery stays marked and counts are lower bounds.
+Yearly tables contain observed combinations only.
+
+Timing accepts valid calendar dates from `nim_min_valid_year` (default 1950)
+through the current calendar year. Missing dates and invalid/implausible dates,
+such as `1001-01-01`, are excluded only from first/last/span calculations; raw
+`nim_date` and measure counts are preserved. `overview.json` records the rule,
+excluded nonempty date count and warnings. These metadata summaries are written
+before `nim_max_rows` and full-text processing, so text failures do not erase them.
+
+Result and run-manifest schema **1.1** add `nim_overview_paths`, case-law status,
+document count, corpus/overview/table paths, supported/unsupported jurisdictions
+and warnings. Existing fields remain available. States are `not_requested`
+(count `null`), `written`, `written_empty` (ordinary results empty),
+`no_reliable_records` (results exist but none accepted), and
+`unsupported_jurisdictions` (no selected jurisdiction supports case law).
+Zero counts describe exported records only, never jurisdiction-wide absence.
+Mixed runs retain unsupported warnings even when EU records are written.
+An enabled build that raises writes `case_law_status=failed` with a null count
+in the run manifest and re-raises; old artifacts must not be interpreted as a
+successful new run. Input validation errors still raise before execution.
+
+See [supported surface](docs/supported-surface.md) for adapter limitations.
 
 For faster NIM inspection runs, skip NIM full-text retrieval or cap the number of NIM rows processed per eligible EU legal-act seed:
 

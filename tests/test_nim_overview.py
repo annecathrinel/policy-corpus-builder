@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch, Mock
@@ -12,6 +13,43 @@ from policy_corpus_builder.schemas import SourceConfig
 
 
 class OverviewTests(unittest.TestCase):
+    def test_country_wide_totals_timing_placeholders_and_page_limits(self):
+        acts = pd.DataFrame({"celex": ["32020L0001", "32020L0002", "32020L0003"]})
+        rows = pd.DataFrame([
+            {"celex": c, "national_measure_id": ident, "member_state_iso3": "DNK", "nim_date": d}
+            for c, ident, d in [("32020L0001", "1", "2000-01-01"), ("32020L0001", "2", "2000-01-11"),
+                               ("32020L0001", "2", "2000-01-11"), ("32020L0001", "3", "1001-01-01"),
+                               ("32020L0002", "1", "2001-01-01")]])
+        rows.attrs["discovery_statuses"] = [{"celex": "32020L0002", "discovery_status": "page_limited", "discovery_error": ""}]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            write_nim_overview(acts, rows, out)
+            wide = pd.read_csv(out / "nim_country_x_act.csv").set_index("member_state_iso3")
+            self.assertEqual(set(wide.index), set(surface.EU_ISO3_TO_NAME) - {"GBR"})
+            self.assertEqual(wide.loc["DNK", "TOTAL"], 4)
+            self.assertEqual(wide.loc["DNK", "32020L0003"], 0)
+            country = pd.read_csv(out / "nim_by_country.csv").set_index("member_state_iso3")
+            self.assertEqual(country.loc["DNK", "act_count"], 2)
+            self.assertEqual(country.loc["DNK", "nim_count"], 4)
+            timing = pd.read_csv(out / "nim_by_act_country.csv")
+            row = timing.query("celex == '32020L0001' and member_state_iso3 == 'DNK'").iloc[0]
+            self.assertEqual(row.first_nim_date, "2000-01-01")
+            self.assertEqual(row.last_nim_date, "2000-01-11")
+            self.assertEqual(row.implementation_update_span_days, 10)
+            self.assertIn("1001-01-01", (out / "nim_inventory.csv").read_text(encoding="utf-8-sig"))
+            overview = json.loads((out / "overview.json").read_text())
+            self.assertEqual(overview["date_rule"]["excluded_date_count"], 1)
+            self.assertTrue(any("Page-limited" in w for w in overview["warnings"]))
+            write_nim_overview(acts, rows, out, min_valid_year=2001)
+            overview = json.loads((out / "overview.json").read_text())
+            self.assertEqual(overview["date_rule"]["excluded_date_count"], 3)
+            rows.attrs["discovery_statuses"].append({"celex": "32020L0003", "discovery_status": "failed", "discovery_error": "error"})
+            write_nim_overview(acts, rows, out)
+            wide = pd.read_csv(out / "nim_country_x_act.csv")
+            self.assertTrue(wide.TOTAL.isna().all())
+            self.assertTrue(wide["32020L0003"].isna().all())
+            self.assertEqual(wide["32020L0001"].sum(), 3)
+
     def test_counts_deduplicate_keep_unknown_year_and_distinguish_failure(self):
         acts = pd.DataFrame({"celex": ["32014L0089", "32023L0958", "32018L2001"]})
         rows = pd.DataFrame([

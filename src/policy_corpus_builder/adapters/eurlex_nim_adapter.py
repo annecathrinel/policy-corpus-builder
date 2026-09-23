@@ -56,6 +56,11 @@ class EurlexNIMAdapter:
 
     def validate_source_config(self, source: SourceConfig, *, base_path: Path) -> None:
         settings = source.settings
+        from policy_corpus_builder.adapters.eurlex_nim_supported.overview import validate_min_year
+        try:
+            validate_min_year(settings.get("nim_min_valid_year", 1950))
+        except ValueError as exc:
+            raise AdapterConfigError(str(exc)) from exc
         _resolve_search_language(settings)
         _resolve_search_fields(settings)
         _resolve_expert_scope(settings)
@@ -137,7 +142,8 @@ class EurlexNIMAdapter:
         all_acts = pd.concat(act_frames, ignore_index=True) if act_frames else pd.DataFrame()
         all_measures = pd.concat(measure_frames, ignore_index=True) if measure_frames else pd.DataFrame()
         all_measures.attrs["discovery_statuses"] = statuses
-        write_nim_overview(all_acts, all_measures, overview_dir)
+        write_nim_overview(all_acts, all_measures, overview_dir,
+                           min_valid_year=source.settings.get("nim_min_valid_year", 1950))
         return prepared
 
     def _activate_webservice_credentials(self, settings: dict[str, Any]) -> None:

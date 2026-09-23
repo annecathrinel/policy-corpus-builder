@@ -378,7 +378,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result.duplicate_groups_summary_json_path, duplicate_groups_summary_json)
             self.assertEqual(result.nim_corpus_path, nim_corpus)
             self.assertEqual(result.manifest_path, manifest_path)
-            self.assertEqual(result.schema_version, "1.0")
+            self.assertEqual(result.schema_version, "1.1")
             self.assertEqual(result.query_terms, ("marine spatial planning",))
             self.assertEqual(result.selected_jurisdictions, ("EU", "UK"))
             self.assertEqual(result.include_translations, True)
@@ -436,7 +436,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             result_payload = result.to_dict()
-            self.assertEqual(result_payload["schema_version"], "1.0")
+            self.assertEqual(result_payload["schema_version"], "1.1")
             self.assertEqual(result_payload["query_terms"], ["marine spatial planning"])
             self.assertEqual(result_payload["selected_jurisdictions"], ["EU", "UK"])
             self.assertEqual(result_payload["include_translations"], True)
@@ -594,7 +594,7 @@ class PolicyCorpusBuilderTests(unittest.TestCase):
                 )
 
         payload = result.to_dict()
-        self.assertEqual(payload["schema_version"], "1.0")
+        self.assertEqual(payload["schema_version"], "1.1")
         self.assertEqual(payload["query_terms"], ["resilience"])
         self.assertEqual(payload["selected_jurisdictions"], ["US"])
         self.assertEqual(payload["include_translations"], False)

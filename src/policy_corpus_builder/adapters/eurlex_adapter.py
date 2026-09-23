@@ -84,6 +84,11 @@ def run_eurlex_query_pipeline(
         docs_df,
         mode=_resolve_fulltext_mode(settings),
     )
+    if _require_bool(settings, "include_case_law", default=False):
+        # Metadata inclusion must not depend on full-text support (notably sector 8).
+        all_docs = filter_celex_types_for_fulltext(docs_df, mode="all")
+        case_docs = all_docs.loc[all_docs["celex_sector"].isin(["6", "8"])]
+        filtered_docs_df = pd.concat([filtered_docs_df, case_docs], ignore_index=True).drop_duplicates("celex_full")
     if filtered_docs_df.empty:
         return []
 
@@ -97,8 +102,11 @@ def run_eurlex_query_pipeline(
     # that omission unambiguous instead of requiring a scroll back up to
     # the last "=== JOB ===" header.
     print(f"[EURLEX] term={query_text!r} starting full-text fetch for {len(filtered_docs_df)} document(s).", flush=True)
+    text_candidates = filtered_docs_df
+    if settings.get("include_case_law") and not settings.get("case_law_fulltext", False):
+        text_candidates = filtered_docs_df.loc[~filtered_docs_df["celex_sector"].isin(["6", "8"])]
     fulltext_df = batch_fetch_eurlex_fulltext(
-        filtered_docs_df,
+        text_candidates,
         cache_dir=_resolve_cache_dir(source, base_path=base_path),
         use_cache=_require_bool(settings, "use_cache", default=True),
         timeout_s=_require_positive_int(settings, "timeout_s", default=45),
@@ -139,7 +147,7 @@ def run_eurlex_query_pipeline(
     available_fulltext_columns = [
         column for column in fulltext_columns if column in fulltext_df.columns
     ]
-    merged_df = filtered_docs_df.merge(
+    merged_df = filtered_docs_df.copy() if fulltext_df.empty else filtered_docs_df.merge(
         fulltext_df[available_fulltext_columns],
         on=["celex_full", "celex", "celex_version"],
         how="left",
@@ -184,6 +192,8 @@ class EurlexAdapter:
         _resolve_search_fields(settings)
         _resolve_expert_scope(settings)
         _resolve_fulltext_mode(settings)
+        _require_bool(settings, "include_case_law", default=False)
+        _require_bool(settings, "case_law_fulltext", default=False)
         _require_positive_int(settings, "page_size", default=100)
         _require_positive_int(settings, "max_pages", default=20)
         _require_positive_int(settings, "timeout_s", default=45)

@@ -51,7 +51,8 @@ def run_eurlex_nim_query_pipeline(
     nim_df = prepared[1] if prepared is not None else _retrieve_nim_rows(acts_df, settings)
     if prepared is None:
         from .overview import write_nim_overview
-        write_nim_overview(acts_df, nim_df, resolve_cache_dir(source, base_path=base_path) / "overview")
+        write_nim_overview(acts_df, nim_df, resolve_cache_dir(source, base_path=base_path) / "overview",
+                           min_valid_year=settings.get("nim_min_valid_year", 1950))
     if nim_df.empty:
         _emit_nim_progress(progress, f"NIM seed {query_text}: no national measures found.")
         return []

@@ -74,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run EUR-Lex NIM for eligible EU legal-act CELEX seeds.",
     )
+    build_corpus_parser.add_argument("--include-case-law", action="store_true",
+                                     help="Export reliable CELEX sector 6 and separate experimental sector 8 records from ordinary query results; not a targeted case-law search.")
+    build_corpus_parser.add_argument("--case-law-fulltext", action="store_true",
+                                     help="Request case-law full text (requires --include-case-law); failed text retrieval retains metadata.")
+    build_corpus_parser.add_argument("--nim-min-valid-year", type=int, default=1950,
+                                     help="Minimum NIM year for first/last/span summaries only (default: 1950). Raw dates and counts remain unchanged.")
     nim_fulltext_group = build_corpus_parser.add_mutually_exclusive_group()
     nim_fulltext_group.add_argument(
         "--include-nim-fulltext",
@@ -234,6 +240,9 @@ def main() -> int:
                 non_eu_max_workers=args.max_workers,
                 eu_max_workers=args.eu_max_workers,
                 write_jurisdiction_logs=args.write_jurisdiction_logs,
+                include_case_law=args.include_case_law,
+                case_law_fulltext=args.case_law_fulltext,
+                nim_min_valid_year=args.nim_min_valid_year,
             )
         except (
             AdapterError,
@@ -252,6 +261,17 @@ def main() -> int:
         print(f"Final documents: {result.final_document_count}")
         if result.nim_corpus_path is not None:
             print(f"NIM corpus: {result.nim_corpus_path}")
+        if getattr(result, "nim_overview_paths", {}):
+            print(f"NIM overview: {result.nim_overview_paths.get('overview')}")
+        print(f"Case-law status: {getattr(result, 'case_law_status', 'not_requested')}")
+        if args.include_case_law:
+            print(f"Case-law documents: {result.case_law_document_count}")
+            print(f"Case-law corpus: {result.case_law_corpus_path}")
+            print(f"Case-law overview: {result.case_law_overview_path}")
+            for name, path in result.case_law_count_table_paths.items():
+                print(f"Case-law {name}: {path}")
+            for warning in result.case_law_warnings:
+                print(f"Warning: {warning}")
         if result.jurisdiction_log_paths:
             print(f"Jurisdiction logs: {result.outputs_path / 'logs'}")
         return 0

@@ -28,6 +28,53 @@ Treat non-EU retrieval as supported but more externally fragile. These workflows
 
 ## Supported Public Entry Points
 
+`build_policy_corpus` also accepts `include_case_law=False`,
+`case_law_fulltext=False`, and `nim_min_valid_year=1950`. Matching `build-corpus`
+flags are `--include-case-law`, `--case-law-fulltext`, and `--nim-min-valid-year`.
+The pure `classification.classify_case_law(NormalizedDocument)` function returns
+an immutable decision with `is_case_law`, `category`, `basis`, and `warning`.
+New provider support belongs in explicit source-specific rules, not generic title matching.
+
+### Case-law support
+
+| Jurisdiction/category | Support | Evidence/surface |
+| --- | --- | --- |
+| EU court case law | Supported classification | CELEX sector 6 from ordinary policy-query results |
+| National case law relating to EU law | Experimental, separate category | CELEX sector 8; national court country is not inferred |
+| UK | Unsupported | Existing legislation.gov.uk search supplies legislation |
+| CA | Unsupported | Existing publications.gc.ca search supplies publications |
+| AUS | Unsupported | Existing legislation.gov.au search supplies legislation |
+| NZ | Unsupported | Existing legislation search supplies legislation |
+| US | Unsupported | Existing regulations.gov endpoint supplies regulatory documents |
+
+Sectors 0 and 1, including contradictory authoritative fields inside
+`raw_metadata.raw_record`, always exclude case law. Instrument title exclusions
+cover treaties, accession acts/annexes, protocols, treaty amendments and
+consolidated treaty texts. `Tribunal case` or similar generic descriptors alone
+are insufficient. Sector 6 judgments, orders and Advocate General opinions are
+accepted; sector 8 is never merged into `eu_case_law`.
+
+The enabled workflow retains sector 6/8 metadata independently of full-text
+filtering and exports accepted records only. It uses ordinary search results,
+**not targeted retrieval or comprehensive coverage**. Search/pagination limits
+and upstream failures remain limitations; empty output never proves absence.
+Full text is optional, and a failed text fetch retains discovered metadata.
+
+`case_law/documents.jsonl` uses existing normalized document records and stable
+`document_id` deduplication. The two CSV tables group observed records by
+jurisdiction/year/category/basis or jurisdiction/document type/category. Missing
+publication years use `unknown`. Counts measure source documents, not proceedings;
+unique-source counts use `(source_name, source_document_id)` with document ID
+fallback. Unsupported jurisdictions have no zero rows. The overview JSON records
+support, criteria, accepted/rejected input counts, rejection reasons, deduplicated
+count, missing years, warnings and all paths.
+
+The result/manifest schema is 1.1 (additive fields). It exposes NIM overview paths
+and case-law status/count/paths/support/warnings. States distinguish not requested,
+written, written empty ordinary results, no reliable records, unsupported-only
+runs, and failed builds. Failed enabled builds write a failure manifest and raise;
+they do not return a successful result. See the README for exact status strings.
+
 Supported adapter entry points:
 
 - `get_adapter` in `src/policy_corpus_builder/adapters/__init__.py`
@@ -135,6 +182,25 @@ before starting any NIM full-text downloads. It saves the following files under
   blank counts rather than zero; a configured metadata page limit is flagged.
 - `nim_inventory.csv`: the metadata records underlying the counts.
 - `overview.json`: counting definitions and file names.
+- `nim_by_country.csv`: sum of distinct act/country/measure combinations,
+  number of seed acts with measures, first/last valid dates and span in days.
+- `nim_country_x_act.csv`: every current EU country (and observed other/unknown
+  countries), one column per seed CELEX and a `TOTAL` column.
+
+`nim_by_act_country.csv` additionally includes `first_nim_date`, `last_nim_date`
+and `implementation_update_span_days`. The same national measure implementing
+multiple acts counts once per act. Failed discovery leaves cells blank; if any
+act failed, aggregate country counts, act counts, timing and wide totals are
+unknown/blank. Successful act cells still show counts. Page-limited counts and
+timing remain partial and explicitly marked. A successful zero-measure seed is
+retained with zero counts.
+
+`nim_min_valid_year` can also be set in the `eurlex-nim` adapter's source settings.
+Timing excludes missing/unparseable dates, dates before this minimum (1950 by
+default), and future calendar years. No raw NIM date is rewritten. Counts and
+existing yearly table semantics are unchanged. The overview's `date_rule`
+records minimum/maximum year and the number of excluded nonempty dates after
+measure deduplication; warnings describe exclusions, failed and limited discovery.
 
 The year comes from `nim_date` (the national measure's document date), not the
 EU act year, notification year, or full-text retrieval year. Counts deduplicate

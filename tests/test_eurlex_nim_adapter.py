@@ -193,6 +193,13 @@ class FetchTextFromCandidateRetryTests(unittest.TestCase):
 
 
 class EurlexNIMAdapterTests(unittest.TestCase):
+    def setUp(self):
+        # Each adapter test owns its overview/cache files; avoid shared checkout
+        # artifacts and Windows/OneDrive replacement locks between test runs.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base_path = Path(temporary.name)
+
     def test_retrieve_nim_rows_normalizes_act_celex_into_celex(self) -> None:
         import policy_corpus_builder.adapters.eurlex_nim_supported.surface as nim_surface_module
         import policy_corpus_builder.adapters.eurlex_nim_supported.workflow as nim_workflow_module
@@ -306,7 +313,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
                 AdapterConfigError,
                 "eurlex-nim adapter requires EUR-Lex WebService credentials",
             ):
-                adapter.validate_source_config(source, base_path=Path("."))
+                adapter.validate_source_config(source, base_path=self.base_path)
         finally:
             if original_user is not None:
                 os.environ["EURLEX_WS_USER"] = original_user
@@ -391,7 +398,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
             result = adapter.collect(
                 source,
                 query=Query(text="32014L0089", query_id="inline-001", origin="inline"),
-                base_path=Path("."),
+                base_path=self.base_path,
             )
         finally:
             nim_workflow_module._retrieve_nim_rows = original_retrieve
@@ -467,7 +474,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
             result = adapter.collect(
                 source,
                 query=Query(text="32014L0089", query_id="inline-001", origin="inline"),
-                base_path=Path("."),
+                base_path=self.base_path,
             )
         finally:
             nim_workflow_module._retrieve_nim_rows = original_retrieve
@@ -570,7 +577,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
             result = adapter.collect(
                 source,
                 query=Query(text="marine spatial planning", query_id="inline-001", origin="inline"),
-                base_path=Path("."),
+                base_path=self.base_path,
             )
         finally:
             nim_workflow_module.fetch_eurlex_job = original_fetch
@@ -646,7 +653,7 @@ class EurlexNIMAdapterTests(unittest.TestCase):
             result = adapter.collect(
                 source,
                 query=Query(text="32014L0089", query_id="inline-001", origin="inline"),
-                base_path=Path("."),
+                base_path=self.base_path,
             )
         finally:
             nim_workflow_module._retrieve_nim_rows = original_retrieve

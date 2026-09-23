@@ -8,6 +8,7 @@ from datetime import datetime
 
 from policy_corpus_builder.models import NormalizedDocument
 from policy_corpus_builder.schemas import NormalizationConfig
+from policy_corpus_builder.classification import classify_case_law
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +59,6 @@ DOCUMENT_TYPE_ALIASES = {
     "opinion": "eu_opinion",
     "policy_document": "policy_document",
     "regulation": "eu_regulation",
-    "tribunal case": "eu_case_law",
     "unknown descriptor": "eu_document",
 }
 
@@ -90,6 +90,13 @@ def clean_document_for_downstream_analysis(
     cleaned_title = _clean_title(document.title)
     cleaned_summary = _clean_optional_text(document.summary)
     cleaned_document_type = _harmonize_document_type(document.document_type)
+    decision = classify_case_law(document)
+    if decision.is_case_law:
+        cleaned_document_type = decision.category
+        raw_metadata["case_law_category"] = decision.category
+        raw_metadata["case_law_basis"] = decision.basis
+    elif cleaned_document_type in {"eu_case_law", "national_case_law_eu_reference", "tribunal_case", "court_case"}:
+        cleaned_document_type = "eu_document"
     cleaned_language = _normalize_language(document.language)
     cleaned_jurisdiction = _normalize_jurisdiction(
         document.jurisdiction,

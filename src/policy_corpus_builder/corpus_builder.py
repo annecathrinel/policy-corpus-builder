@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -83,8 +83,8 @@ CACHE_SUBDIR = "cache"
 AUDIT_SUBDIR = "audit"
 LOGS_SUBDIR = "logs"
 RUN_MANIFEST_FILENAME = "run-manifest.json"
-RESULT_SCHEMA_VERSION = "1.0"
-MANIFEST_SCHEMA_VERSION = "1.0"
+RESULT_SCHEMA_VERSION = "1.1"
+MANIFEST_SCHEMA_VERSION = "1.1"
 
 JURISDICTION_LABELS = {
     "EU": "European Union",
@@ -245,6 +245,18 @@ class PolicyCorpusBuildResult:
     nim_seed_count: int
     nim_eligible_seed_count: int
     nim_document_count: int
+    nim_overview_paths: dict[str, Path] = field(default_factory=dict)
+    nim_min_valid_year: int = 1950
+    include_case_law: bool = False
+    case_law_fulltext: bool = False
+    case_law_status: str = "not_requested"
+    case_law_document_count: int | None = None
+    case_law_corpus_path: Path | None = None
+    case_law_count_table_paths: dict[str, Path] = field(default_factory=dict)
+    case_law_overview_path: Path | None = None
+    case_law_supported_jurisdictions: tuple[str, ...] = ()
+    case_law_unsupported_jurisdictions: tuple[str, ...] = ()
+    case_law_warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -285,10 +297,23 @@ class PolicyCorpusBuildResult:
             "nim_seed_count": self.nim_seed_count,
             "nim_eligible_seed_count": self.nim_eligible_seed_count,
             "nim_document_count": self.nim_document_count,
+            "nim_overview_paths": {k: str(v) for k, v in self.nim_overview_paths.items()},
+            "nim_min_valid_year": self.nim_min_valid_year,
+            "include_case_law": self.include_case_law,
+            "case_law_fulltext": self.case_law_fulltext,
+            "case_law_status": self.case_law_status,
+            "case_law_document_count": self.case_law_document_count,
+            "case_law_corpus_path": str(self.case_law_corpus_path) if self.case_law_corpus_path else None,
+            "case_law_count_table_paths": {k: str(v) for k, v in self.case_law_count_table_paths.items()},
+            "case_law_overview_path": str(self.case_law_overview_path) if self.case_law_overview_path else None,
+            "case_law_supported_jurisdictions": list(self.case_law_supported_jurisdictions),
+            "case_law_unsupported_jurisdictions": list(self.case_law_unsupported_jurisdictions),
+            "case_law_warnings": list(self.case_law_warnings),
         }
 
     def to_manifest_dict(self) -> dict[str, object]:
         payload = self.to_dict()
+        payload["build_status"] = "completed"
         payload["manifest_schema_version"] = MANIFEST_SCHEMA_VERSION
         payload["timestamp_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         payload["output_layout"] = {
@@ -297,6 +322,7 @@ class PolicyCorpusBuildResult:
             "final": str((self.outputs_path / FINAL_CORPUS_SUBDIR).resolve()),
             "audit": str((self.outputs_path / AUDIT_SUBDIR).resolve()),
             "nim": str((self.outputs_path / NIM_SUBDIR).resolve()),
+            "case_law": str((self.outputs_path / "case_law").resolve()) if self.include_case_law else None,
             "logs": str((self.outputs_path / LOGS_SUBDIR).resolve()) if self.write_jurisdiction_logs else None,
         }
         payload["tool_version"] = TOOL_VERSION
@@ -318,6 +344,9 @@ def build_policy_corpus(
     non_eu_max_workers: int | None = None,
     eu_max_workers: int | None = None,
     write_jurisdiction_logs: bool = True,
+    include_case_law: bool = False,
+    case_law_fulltext: bool = False,
+    nim_min_valid_year: int = 1950,
 ) -> PolicyCorpusBuildResult:
     """Build one normalized policy corpus across supported jurisdictions.
 
@@ -376,10 +405,20 @@ def build_policy_corpus(
     WAF-prone-host list does), so treat increases here as a real,
     unverified risk trade-off rather than a free win.
     """
+    for name, value in (("include_case_law", include_case_law), ("case_law_fulltext", case_law_fulltext)):
+        if not isinstance(value, bool):
+            raise CorpusBuildValidationError(f"{name} must be a boolean.")
+    if case_law_fulltext and not include_case_law:
+        raise CorpusBuildValidationError("case_law_fulltext requires include_case_law=True.")
+    from policy_corpus_builder.adapters.eurlex_nim_supported.overview import validate_min_year
+    try:
+        validate_min_year(nim_min_valid_year)
+    except ValueError as exc:
+        raise CorpusBuildValidationError(str(exc)) from exc
     if not isinstance(write_jurisdiction_logs, bool):
         raise CorpusBuildValidationError("write_jurisdiction_logs must be a boolean.")
     if not write_jurisdiction_logs:
-        return _build_policy_corpus_impl(
+        return _build_with_failure_manifest(
             query_terms,
             jurisdictions,
             outputs_path,
@@ -392,6 +431,9 @@ def build_policy_corpus(
             non_eu_max_per_term=non_eu_max_per_term,
             non_eu_max_workers=non_eu_max_workers,
             eu_max_workers=eu_max_workers,
+            include_case_law=include_case_law,
+            case_law_fulltext=case_law_fulltext,
+            nim_min_valid_year=nim_min_valid_year,
             stdout_router=None,
         )
 
@@ -406,7 +448,7 @@ def build_policy_corpus(
     stdout_router = _JurisdictionLogRouter(previous_stdout)
     sys.stdout = stdout_router
     try:
-        return _build_policy_corpus_impl(
+        return _build_with_failure_manifest(
             query_terms,
             jurisdictions,
             outputs_path,
@@ -419,10 +461,45 @@ def build_policy_corpus(
             non_eu_max_per_term=non_eu_max_per_term,
             non_eu_max_workers=non_eu_max_workers,
             eu_max_workers=eu_max_workers,
+            include_case_law=include_case_law,
+            case_law_fulltext=case_law_fulltext,
+            nim_min_valid_year=nim_min_valid_year,
             stdout_router=stdout_router,
         )
     finally:
         sys.stdout = previous_stdout
+
+
+def _nim_overview_paths(output_root: Path) -> dict[str, Path]:
+    root = output_root / NIM_SUBDIR / "overview"
+    names = ("nim_inventory.csv", "nim_by_act.csv", "nim_by_act_country.csv",
+             "nim_by_act_country_year.csv", "nim_by_country.csv", "nim_country_x_act.csv", "overview.json")
+    return {Path(name).stem: root / name for name in names if (root / name).is_file()}
+
+
+def _build_with_failure_manifest(query_terms, jurisdictions, outputs_path, **kwargs):
+    try:
+        return _build_policy_corpus_impl(query_terms, jurisdictions, outputs_path, **kwargs)
+    except CorpusBuildValidationError:
+        raise
+    except Exception as exc:
+        # Preserve the exception contract; never turn failed retrieval into a successful empty corpus.
+        if kwargs["include_case_law"]:
+            output_root = Path(outputs_path).resolve()
+            export_run_manifest({
+                "manifest_schema_version": MANIFEST_SCHEMA_VERSION, "schema_version": RESULT_SCHEMA_VERSION,
+                "pipeline": "build_policy_corpus", "build_status": "failed",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "include_case_law": True, "case_law_fulltext": kwargs["case_law_fulltext"],
+                "case_law_supported_jurisdictions": [j for j in jurisdictions if j.upper() == "EU"],
+                "case_law_unsupported_jurisdictions": [j for j in jurisdictions if j.upper() != "EU"],
+                "case_law_status": "failed", "case_law_document_count": None,
+                "case_law_corpus_path": None, "case_law_count_table_paths": {},
+                "case_law_warnings": ["Build failed; existing output artifacts may belong to an earlier run."],
+                "nim_overview_paths": {k: str(v) for k,v in _nim_overview_paths(output_root).items()} if kwargs["include_nim"] else {},
+                "error": f"{type(exc).__name__}: {exc}",
+            }, output_dir=output_root)
+        raise
 
 
 def _build_policy_corpus_impl(
@@ -439,6 +516,9 @@ def _build_policy_corpus_impl(
     non_eu_max_per_term: int | None,
     non_eu_max_workers: int | None,
     eu_max_workers: int | None,
+    include_case_law: bool,
+    case_law_fulltext: bool,
+    nim_min_valid_year: int,
     stdout_router: _JurisdictionLogRouter | None,
 ) -> PolicyCorpusBuildResult:
     _emit_progress("Starting build_policy_corpus: validating inputs.")
@@ -540,6 +620,8 @@ def _build_policy_corpus_impl(
                     non_eu_max_per_term=resolved_non_eu_max_per_term,
                     non_eu_max_workers=resolved_non_eu_max_workers,
                     eu_max_workers=resolved_eu_max_workers,
+                    include_case_law=include_case_law,
+                    case_law_fulltext=case_law_fulltext,
                 )
         finally:
             if log_file is not None:
@@ -701,6 +783,7 @@ def _build_policy_corpus_impl(
                         cache_root=cache_root,
                         include_nim_fulltext=include_nim_fulltext,
                         nim_max_rows=cleaned_nim_max_rows,
+                        nim_min_valid_year=nim_min_valid_year,
                     )
             finally:
                 if nim_log_file is not None:
@@ -729,6 +812,12 @@ def _build_policy_corpus_impl(
         nim_status = "skipped_eu_not_selected"
         _emit_progress("Skipping NIM: EU was not selected.")
 
+    case_result = None
+    if include_case_law:
+        from policy_corpus_builder.exporters.analysis_tables import export_case_law
+        case_result = export_case_law(merged_documents, output_dir=output_root / "case_law",
+                                     jurisdictions=cleaned_jurisdictions, fulltext=case_law_fulltext)
+    nim_overview_paths = _nim_overview_paths(output_root) if nim_status == "ran" else {}
     _emit_progress("Writing final outputs and manifest.")
     result = PolicyCorpusBuildResult(
         schema_version=RESULT_SCHEMA_VERSION,
@@ -762,44 +851,24 @@ def _build_policy_corpus_impl(
         nim_seed_count=nim_seed_count,
         nim_eligible_seed_count=nim_eligible_seed_count,
         nim_document_count=nim_document_count,
+        nim_overview_paths=nim_overview_paths,
+        nim_min_valid_year=nim_min_valid_year,
+        include_case_law=include_case_law,
+        case_law_fulltext=case_law_fulltext,
+        case_law_status=case_result.status if case_result else "not_requested",
+        case_law_document_count=case_result.document_count if case_result else None,
+        case_law_corpus_path=case_result.corpus_path if case_result else None,
+        case_law_count_table_paths=case_result.count_table_paths if case_result else {},
+        case_law_overview_path=case_result.overview_path if case_result else None,
+        case_law_supported_jurisdictions=case_result.supported_jurisdictions if case_result else (),
+        case_law_unsupported_jurisdictions=case_result.unsupported_jurisdictions if case_result else (),
+        case_law_warnings=case_result.warnings if case_result else (),
     )
     manifest_path = export_run_manifest(
         result.to_manifest_dict(),
         output_dir=output_root,
     )
-    result = PolicyCorpusBuildResult(
-        schema_version=result.schema_version,
-        outputs_path=result.outputs_path,
-        query_terms=result.query_terms,
-        selected_jurisdictions=result.selected_jurisdictions,
-        include_translations=result.include_translations,
-        translated_terms=result.translated_terms,
-        include_nim=result.include_nim,
-        include_nim_fulltext=result.include_nim_fulltext,
-        nim_max_rows=result.nim_max_rows,
-        max_jurisdiction_workers=result.max_jurisdiction_workers,
-        non_eu_max_per_term=result.non_eu_max_per_term,
-        non_eu_max_workers=result.non_eu_max_workers,
-        eu_max_workers=result.eu_max_workers,
-        write_jurisdiction_logs=result.write_jurisdiction_logs,
-        jurisdiction_results=result.jurisdiction_results,
-        intermediate_paths=result.intermediate_paths,
-        jurisdiction_log_paths=result.jurisdiction_log_paths,
-        final_corpus_path=result.final_corpus_path,
-        duplicate_audit_csv_path=result.duplicate_audit_csv_path,
-        duplicate_audit_jsonl_path=result.duplicate_audit_jsonl_path,
-        duplicate_groups_summary_csv_path=result.duplicate_groups_summary_csv_path,
-        duplicate_groups_summary_json_path=result.duplicate_groups_summary_json_path,
-        nim_corpus_path=result.nim_corpus_path,
-        manifest_path=manifest_path,
-        merged_document_count=result.merged_document_count,
-        final_document_count=result.final_document_count,
-        duplicates_removed=result.duplicates_removed,
-        nim_status=result.nim_status,
-        nim_seed_count=result.nim_seed_count,
-        nim_eligible_seed_count=result.nim_eligible_seed_count,
-        nim_document_count=result.nim_document_count,
-    )
+    result = replace(result, manifest_path=manifest_path)
     _emit_progress(
         f"Completed build_policy_corpus: {result.final_document_count} final documents written."
     )
@@ -817,6 +886,8 @@ def _run_jurisdiction(
     non_eu_max_per_term: int,
     non_eu_max_workers: int,
     eu_max_workers: int,
+    include_case_law: bool = False,
+    case_law_fulltext: bool = False,
 ) -> _CollectionResult:
     if jurisdiction == "EU":
         source = SourceConfig(
@@ -825,6 +896,7 @@ def _run_jurisdiction(
             settings={
                 "cache_dir": str((cache_root / "eu").resolve()),
                 "max_workers": eu_max_workers,
+                **({"include_case_law": True, "case_law_fulltext": case_law_fulltext} if include_case_law else {}),
             },
         )
         queries = list(_build_inline_queries(query_terms, origin="inline"))
@@ -852,6 +924,7 @@ def _run_eu_nim(
     cache_root: Path,
     include_nim_fulltext: bool,
     nim_max_rows: int | None,
+    nim_min_valid_year: int = 1950,
 ) -> tuple[NormalizedDocument, ...]:
     runtime_safe_celex_seeds = _defensively_filter_nim_runtime_celex_seeds(celex_seeds)
     if not runtime_safe_celex_seeds:
@@ -865,6 +938,7 @@ def _run_eu_nim(
             "overview_dir": str((output_root / NIM_SUBDIR / "overview").resolve()),
             "fetch_full_text": include_nim_fulltext,
             "nim_max_rows": nim_max_rows,
+            "nim_min_valid_year": nim_min_valid_year,
             "progress": True,
             "progress_every": 10,
         },

@@ -83,6 +83,9 @@ class BuildCorpusCliTests(unittest.TestCase):
             non_eu_max_workers=None,
             eu_max_workers=None,
             write_jurisdiction_logs=True,
+            include_case_law=False,
+            case_law_fulltext=False,
+            nim_min_valid_year=1950,
         )
         self.assertIn("Corpus build completed successfully.", stdout.getvalue())
         # Use str(Path(...)) rather than a hardcoded separator so this assertion
