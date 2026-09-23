@@ -1,913 +1,176 @@
 # policy-corpus-builder
 
-`policy-corpus-builder` is a Python toolkit for building clean policy document corpora across supported jurisdictions. It is first and foremost built around EUR-Lex / EU retrieval: the ordinary EUR-Lex workflow is currently the most stable, best-supported, and most robust live retrieval surface in the repository.
+Build normalized policy-document corpora from EUR-Lex and supported government sources. The toolkit handles discovery, full-text retrieval, normalization, deduplication, and JSONL export. Project-specific analysis stays outside this repository.
 
-The main happy-path public entry point is:
-
-`build_policy_corpus(...)`
-
-Use that function first when you want one final normalized corpus written to disk from a simple top-level call. The lower-level adapter and config surfaces are still available, but they are now secondary to the top-level builder workflow.
-
-Non-EU retrieval workflows are supported where listed below, but live legal and policy retrieval always depends on upstream systems outside this package. Government websites, public APIs, search endpoints, page structures, access controls, robots policies, and anti-bot systems can change without notice, causing retrieval behavior to degrade or stop working until the relevant adapter is updated.
-
-## Main Happy Path
-
-The main user-facing function is:
-
-```python
-build_policy_corpus(
-    query_terms: list[str],
-    jurisdictions: list[str],
-    outputs_path: str | Path,
-    include_translations: bool = False,
-    translated_terms: list[str] | None = None,
-    include_nim: bool = False,
-    include_nim_fulltext: bool = True,
-    nim_max_rows: int | None = None,
-    # Other existing worker/log options remain available.
-    include_case_law: bool = False,
-    case_law_fulltext: bool = False,
-    nim_min_valid_year: int = 1950,
-) -> PolicyCorpusBuildResult
-```
-
-It is available directly from the package root:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-```
-
-## Copy-Paste Example
-
-```python
-from pathlib import Path
-
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=[
-        "marine spatial planning",
-        "offshore renewable energy",
-    ],
-    jurisdictions=["EU", "UK", "CA"],
-    outputs_path=Path("outputs/policy-corpus-demo"),
-    include_translations=True,
-    translated_terms=[
-        "planification de l'espace maritime",
-        "energie renouvelable en mer",
-    ],
-    include_nim=True,
-    include_nim_fulltext=True,
-    nim_max_rows=None,
-)
-
-print(result.final_corpus_path)
-print(result.manifest_path)
-print(result.final_document_count)
-```
-
-`build_policy_corpus(...)` prints a lightweight progress stream while it runs, writes intermediate and final corpus artifacts to disk, and returns a stable `PolicyCorpusBuildResult` object for programmatic use.
-
-## CLI Happy Path
-
-The same top-level workflow is available from the terminal:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" "offshore renewable energy" \
-  --jurisdictions EU UK CA \
-  --outputs-path outputs/policy-corpus-demo \
-  --include-translations \
-  --translated-terms "planification de l'espace maritime" "energie renouvelable en mer" \
-  --include-nim \
-  --include-nim-fulltext
-```
-
-This command calls `build_policy_corpus(...)` directly. It prints the same progress output, writes the same cache, jurisdiction corpora, final corpus, optional NIM corpus, and run manifest, then prints the final corpus and manifest paths.
-
-## Conservative case-law outputs and NIM summaries
-
-```python
-result = build_policy_corpus(
-    query_terms=["marine biodiversity"],
-    jurisdictions=["EU"],
-    outputs_path="outputs/example-case-law",
-    include_case_law=True,
-    case_law_fulltext=False,
-    include_nim=True,
-    include_nim_fulltext=False,
-    nim_min_valid_year=1950,
-)
-print(result.case_law_status)
-print(result.case_law_corpus_path)
-print(result.nim_overview_paths)
-```
-
-CLI equivalents are `--include-case-law`, `--case-law-fulltext`, and
-`--nim-min-valid-year 1950`. Case-law outputs are opt-in; existing calls keep
-their retrieval defaults. The document-type cleanup always fixes misleading
-`Tribunal case` labels using authoritative CELEX metadata.
-
-Case law means **case law found in the ordinary policy-query result surface**,
-not a targeted or comprehensive court search. Sector 6 is `eu_case_law`, including
-judgments, orders and Advocate General opinions. Sector 8 is the separate,
-experimental `national_case_law_eu_reference` category. Any sector 0/1 evidence
-rejects a record, as do treaty/accession/annex/protocol/consolidated instrument
-titles and conflicting sectors. Generic labels or title keywords alone never
-establish case law. UK, CA, AUS, NZ and US case-law retrieval is currently
-unsupported: their adapters expose no verified court-decision signal.
-
-An enabled run writes these files under `case_law/`:
-
-- `documents.jsonl`: accepted normalized records, deduplicated by `document_id`.
-- `case_law_counts_by_jurisdiction_year.csv`: observed groups, including an
-  `unknown` year for absent/invalid normalized publication dates.
-- `case_law_counts_by_document_type.csv`: counts by normalized document type/category.
-- `case_law_overview.json`: evidence rules, support, rejections, deduplication,
-  missing years, full-text availability, warnings and output paths.
-
-Counts are source documents, not distinct proceedings. An opinion and judgment
-in one proceeding count separately. Unsupported jurisdictions get warnings and
-no synthetic zero rows. `unique_source_document_count` uses source name plus
-source document ID, falling back to document ID. Sector 8 rows use jurisdiction
-`EU` for the reference surface; they do not infer a national court country.
-`case_law_fulltext=True` requires `include_case_law=True` and requests ordinary
-EUR-Lex text retrieval. Missing text does not remove metadata. With the default
-`False`, case-law text fetching is skipped in the enabled run, and the separate
-case-law corpus omits full text and content paths. Ordinary non-case-law text
-retrieval is unchanged.
-
-NIM retains all existing overview files and adds `nim/overview/nim_by_country.csv`
-and `nim_country_x_act.csv`; `nim_by_act_country.csv` gains first/last dates and
-`implementation_update_span_days`. The wide table includes every current EU
-country, stable seed CELEX columns and `TOTAL` (plus observed other/unknown
-countries where present). Counts deduplicate measure identifiers within each
-act/country. Country totals sum those combinations: a measure implementing two
-acts counts twice. `act_count` counts acts with observed measures. Successful
-empty discovery is zero; failed discovery is blank. If any seed fails, country
-totals, act counts, timing and wide `TOTAL` are blank; successful act cells remain
-available. Page-limited discovery stays marked and counts are lower bounds.
-Yearly tables contain observed combinations only.
-
-Timing accepts valid calendar dates from `nim_min_valid_year` (default 1950)
-through the current calendar year. Missing dates and invalid/implausible dates,
-such as `1001-01-01`, are excluded only from first/last/span calculations; raw
-`nim_date` and measure counts are preserved. `overview.json` records the rule,
-excluded nonempty date count and warnings. These metadata summaries are written
-before `nim_max_rows` and full-text processing, so text failures do not erase them.
-
-Result and run-manifest schema **1.1** add `nim_overview_paths`, case-law status,
-document count, corpus/overview/table paths, supported/unsupported jurisdictions
-and warnings. Existing fields remain available. States are `not_requested`
-(count `null`), `written`, `written_empty` (ordinary results empty),
-`no_reliable_records` (results exist but none accepted), and
-`unsupported_jurisdictions` (no selected jurisdiction supports case law).
-Zero counts describe exported records only, never jurisdiction-wide absence.
-Mixed runs retain unsupported warnings even when EU records are written.
-An enabled build that raises writes `case_law_status=failed` with a null count
-in the run manifest and re-raises; old artifacts must not be interpreted as a
-successful new run. Input validation errors still raise before execution.
-
-See [supported surface](docs/supported-surface.md) for adapter limitations.
-
-For faster NIM inspection runs, skip NIM full-text retrieval or cap the number of NIM rows processed per eligible EU legal-act seed:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU \
-  --outputs-path outputs/policy-corpus-demo \
-  --include-nim \
-  --no-nim-fulltext \
-  --nim-max-rows 100
-```
-
-CLI options map directly to the public Python function:
-
-- `--query-terms` maps to `query_terms`
-- `--jurisdictions` maps to `jurisdictions`
-- `--outputs-path` maps to `outputs_path`
-- `--include-translations` maps to `include_translations`
-- `--translated-terms` maps to `translated_terms`
-- `--include-nim` maps to `include_nim`
-- `--include-nim-fulltext` and `--no-nim-fulltext` map to `include_nim_fulltext`
-- `--nim-max-rows` maps to `nim_max_rows`
-
-## Cookbook
-
-Short copy-pasteable examples for common runs.
-
-### EU Only
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["marine spatial planning"],
-    jurisdictions=["EU"],
-    outputs_path="outputs/eu-only",
-)
-print(result.final_corpus_path)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU \
-  --outputs-path outputs/eu-only
-```
-
-### EU + NIM Metadata Only
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["marine spatial planning"],
-    jurisdictions=["EU"],
-    outputs_path="outputs/eu-nim-metadata",
-    include_nim=True,
-    include_nim_fulltext=False,
-)
-print(result.nim_corpus_path)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU \
-  --outputs-path outputs/eu-nim-metadata \
-  --include-nim \
-  --no-nim-fulltext
-```
-
-### EU + NIM Full Text
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["marine spatial planning"],
-    jurisdictions=["EU"],
-    outputs_path="outputs/eu-nim-fulltext",
-    include_nim=True,
-    include_nim_fulltext=True,
-)
-print(result.nim_corpus_path)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU \
-  --outputs-path outputs/eu-nim-fulltext \
-  --include-nim \
-  --include-nim-fulltext
-```
-
-### Multi-Jurisdiction Without NIM
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["offshore renewable energy", "marine spatial planning"],
-    jurisdictions=["EU", "UK", "CA", "AUS", "NZ", "US"],
-    outputs_path="outputs/multi-jurisdiction",
-)
-print(result.final_document_count)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "offshore renewable energy" "marine spatial planning" \
-  --jurisdictions EU UK CA AUS NZ US \
-  --outputs-path outputs/multi-jurisdiction
-```
-
-### Multi-Jurisdiction With Limited NIM Rows
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["marine spatial planning"],
-    jurisdictions=["EU", "UK", "CA"],
-    outputs_path="outputs/multi-jurisdiction-nim-limited",
-    include_nim=True,
-    nim_max_rows=100,
-)
-print(result.nim_document_count)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU UK CA \
-  --outputs-path outputs/multi-jurisdiction-nim-limited \
-  --include-nim \
-  --nim-max-rows 100
-```
-
-### Translated EU Query Usage
-
-Python:
-
-```python
-from policy_corpus_builder import build_policy_corpus
-
-result = build_policy_corpus(
-    query_terms=["marine spatial planning"],
-    jurisdictions=["EU"],
-    outputs_path="outputs/eu-translated",
-    include_translations=True,
-    translated_terms=[
-        "planification de l'espace maritime",
-        "maritime Raumordnung",
-    ],
-)
-print(result.final_corpus_path)
-```
-
-CLI:
-
-```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU \
-  --outputs-path outputs/eu-translated \
-  --include-translations \
-  --translated-terms "planification de l'espace maritime" "maritime Raumordnung"
-```
-
-## What It Writes To Disk
-
-Given `outputs_path="outputs/policy-corpus-demo"`, the top-level builder writes:
-
-- `outputs/policy-corpus-demo/cache/`
-- `outputs/policy-corpus-demo/jurisdictions/eu/documents.jsonl`
-- `outputs/policy-corpus-demo/jurisdictions/uk/documents.jsonl`
-- `outputs/policy-corpus-demo/jurisdictions/ca/documents.jsonl`
-- `outputs/policy-corpus-demo/jurisdictions/aus/documents.jsonl` when selected
-- `outputs/policy-corpus-demo/jurisdictions/nz/documents.jsonl` when selected
-- `outputs/policy-corpus-demo/jurisdictions/us/documents.jsonl` when selected
-- `outputs/policy-corpus-demo/final/documents.jsonl`
-- `outputs/policy-corpus-demo/audit/likely_duplicates.csv`
-- `outputs/policy-corpus-demo/audit/likely_duplicates.jsonl`
-- `outputs/policy-corpus-demo/audit/duplicate_groups_summary.csv`
-- `outputs/policy-corpus-demo/audit/duplicate_groups_summary.json`
-- `outputs/policy-corpus-demo/nim/documents.jsonl` when `include_nim=True` and NIM results are produced
-- `outputs/policy-corpus-demo/logs/<jurisdiction>.log` for each selected jurisdiction, plus `logs/nim.log` when NIM ran - written by default (`write_jurisdiction_logs=True`); see [Progress Output](#progress-output)
-- `outputs/policy-corpus-demo/run-manifest.json`
-
-The final merged corpus is always written to `final/documents.jsonl`.
-
-## Final Corpus Cleaning
-
-Before jurisdiction-level outputs and the final merged corpus are written, the top-level builder applies a conservative shared cleanup pass to normalized records. Retrieval behavior and adapter internals are unchanged.
-
-The cleanup pass standardizes:
-
-- title and summary whitespace
-- language casing
-- selected jurisdiction labels for top-level builds
-- publication and effective dates to `YYYY-MM-DD` when the input is an obvious year, month, day, slash date, or dotted date
-- common document type labels into stable analysis-friendly values such as `eu_directive`, `eu_regulation`, `eu_decision`, `eu_proposal`, `eu_staff_working_document`, `eu_communication`, `national_implementation_measure`, and `policy_document`
-- obvious full-text boilerplate such as EUR-Lex consolidated-text documentation headers and schema placeholder text
-
-When a field is changed, the original value is preserved in `raw_metadata` using `_original_*` keys where practical. Year-only and month-only dates also include date precision metadata such as `_publication_date_precision`.
-
-## Duplicate Audit
-
-The top-level builder preserves the current exact deduplication behavior and also writes an observational duplicate audit for the final corpus:
-
-- `audit/likely_duplicates.csv`
-- `audit/likely_duplicates.jsonl`
-- `audit/duplicate_groups_summary.csv`
-- `audit/duplicate_groups_summary.json`
-
-These files do not control retrieval, merging, or deduplication. They are inspection artifacts only.
-
-The audit uses conservative exact grouping signals:
-
-- normalized `document_id`
-- normalized `source_document_id`
-- extracted CELEX-like identifier from document IDs, URLs, and common raw EUR-Lex metadata fields
-- normalized URL with lowercased host, stripped fragment, sorted query parameters, and trimmed trailing slash
-- normalized title after whitespace folding and case normalization, only when the normalized title is at least 16 characters
-
-Each row represents one document in one likely duplicate group and includes `duplicate_group_id`, `signal`, `group_size`, `representative_value`, document identifiers, title, normalized title, URL, normalized URL, CELEX, jurisdiction, and publication date. A document may appear in more than one group if more than one transparent signal matches.
-
-The grouped summary files are intended for faster manual review. `duplicate_groups_summary.csv` has one row per likely duplicate group, sorted by a review-interest rank. It includes the triggering signal, group size, representative value, jurisdictions, source names, publication date range, cross-jurisdiction/source flags, document IDs, and a simple review-interest reason string. `duplicate_groups_summary.json` adds aggregate counts for total groups and involved documents, groups by signal, individual jurisdiction/source involvement, jurisdiction/source combinations, the largest groups, and the top review candidates.
-
-## How `include_translations` Works
-
-`include_translations` only affects the EU path.
-
-- If `include_translations=False`, the EU branch runs only `query_terms`.
-- If `include_translations=True`, the EU branch runs both `query_terms` and `translated_terms`.
-- Non-EU jurisdictions continue to run only `query_terms`.
-
-This keeps the top-level API simple while preserving the current supported workflow boundary.
-
-## How `include_nim` Works
-
-`include_nim` only does anything when `EU` is included in `jurisdictions`.
-
-- The main EU corpus is built first through the ordinary EUR-Lex path.
-- CELEX identifiers are extracted from the EU results.
-- Those CELEX identifiers are filtered to eligible EU legal acts only.
-- Only eligible legal-act CELEXs compatible with the supported NIM path are used to seed the existing EUR-Lex NIM workflow.
-- In practice, NIM seeds must normalize to sector-3 legal acts with descriptor `L`, `R`, or `D`.
-- NIM results are written to a separate corpus under `nim/documents.jsonl`.
-
-NIM is not merged into the main final corpus. The main final corpus remains the merged, deduplicated jurisdiction corpus only.
-
-If the EU result set contains no eligible legal-act CELEXs, NIM is skipped cleanly. In that case the top-level builder still succeeds, reports the skip in progress output and the run manifest, and does not write a NIM corpus file.
-
-NIM runtime can be controlled with two optional top-level arguments:
-
-- `include_nim_fulltext=True` preserves the default behavior and retrieves NIM full text.
-- `include_nim_fulltext=False` still retrieves and writes normalized NIM measure records, but skips the slower NIM full-text retrieval stage.
-- `nim_max_rows=None` preserves the default behavior and processes all NIM measure rows returned by the supported workflow.
-- `nim_max_rows=100` limits NIM processing to the first 100 national measure rows per NIM seed, which is useful for quick inspection runs.
-
-## Public Result Object
-
-`build_policy_corpus(...)` returns a stable `PolicyCorpusBuildResult` object. It includes:
-
-- selected jurisdictions
-- query terms
-- whether EU translations were included
-- whether NIM was included
-- per-jurisdiction output paths and document counts
-- per-jurisdiction (and NIM) log file paths, and whether log-splitting was on for this run (`jurisdiction_log_paths`, `write_jurisdiction_logs`)
-- final corpus path
-- NIM corpus path when produced
-- duplicate-audit CSV and JSONL paths
-- merged document count before final deduplication
-- final document count
-- duplicates removed
-- manifest path
-
-For programmatic consumption, `PolicyCorpusBuildResult.to_dict()` returns a stable summary payload, and the run manifest on disk mirrors that same top-level contract.
-
-## Progress Output
-
-The builder emits lightweight progress messages directly from `build_policy_corpus(...)`, all prefixed `[policy-corpus-builder]`. At minimum it reports:
-
-- pipeline start and input validation
-- each selected jurisdiction starting
-- each selected jurisdiction's raw hit count, as `Collected jurisdiction <X>. Total hits: N.` - despite sitting between "Starting" and "Finished" in the log, this does **not** mean the jurisdiction is midway through; it only prints once search *and* full-text retrieval have both already completed for every query term (renamed from "Running jurisdiction ..." on 2026-07-28, since that phrasing implied an in-progress heartbeat it never actually was - a real report found this made a slow jurisdiction like EU or US look stuck for hours with no signal at all, when it was just genuinely slow). For real in-progress visibility while a jurisdiction is still working, tail its own `logs/<jurisdiction>.log` instead (see below) - the "Starting"/"Collected"/"Finished" trio in the main log only ever tells you before-and-after, never during.
-- each selected jurisdiction finishing with normalized and full-text document counts
-- whether NIM is running or skipped
-- NIM seed candidate and eligible seed counts
-- final merge and deduplication
-- duplicates removed, final document count, final output write, and completion
-
-That is the *only* thing that prints to the main job output by default. Every source adapter - `EU` (`[EURLEX] group N/M ...`, `[EURLEX] POST ...`, `[EURLEX TEXT] TRACE ...`) included, not just the non-EU ones - also does its own, much noisier internal diagnostic/progress printing: per-term (and, for UK/CA/NZ/US, per-page) lines such as `[NZ] term=... page=...`, `[AUS] term=...`, `[UK] term=... page=...`, `[CA] term=... page=...`, and `[US] term=... page=...`, plus NIM's per-document full-text log (`[NIM TEXT] ...` plus `=== NIM FULLTEXT RESUME/SUMMARY ===` blocks). Each of these lines reports the request made, its HTTP status, how many candidates/results came back, how many were newly kept, and why a term stopped (max reached, no more candidates, a non-200 response, or a failed request) - this is deliberately verbose enough to tell a real zero-hit term apart from one that silently failed (see `verbose=True`, the default, on `fetch_uk_documents`, `fetch_aus_documents`, `fetch_canada_documents`, `fetch_nz_documents`, and `fetch_us_documents`; pass `verbose=False` to any of them to suppress it). By default (`write_jurisdiction_logs=True`, the default for both the Python API and the `build-corpus` CLI command) that internal output is captured per-jurisdiction into `outputs_path/logs/<jurisdiction>.log`, and NIM's into `outputs_path/logs/nim.log`, instead of interleaving into the main job output above. This is what keeps a full multi-jurisdiction run's main log down to just the summary lines listed above, one block per jurisdiction, in the order jurisdictions finish (jurisdictions run concurrently - see [Parallel Processing](#parallel-processing) - so that order isn't necessarily the order you passed to `--jurisdictions`).
-
-`[EURLEX TEXT]` lines print `CELEX=<celex_full>`, the complete identifier including any consolidated-version date suffix (e.g. `02014R0808-20210101`), not just the base act number - fixed 2026-07-28 after a live log showed the same base CELEX (e.g. `02014R0808`, `02021R2115`) printed 6-7 times in a row with different success lengths, which looked exactly like the same document being wastefully re-fetched. It wasn't: EUR-Lex tracks each amendment date of a consolidated act as its own distinct document (each with genuinely different, growing full text), but the log had been printing `celex` - the base act number with the version suffix already split off - hiding the one detail that would have shown these were different documents. Full-text caching itself was never affected by this (the cache always keyed off the complete `celex_full`); this only fixes what the progress log displays.
-
-EU's full-text fetch being parallelized (see [Parallel Processing](#parallel-processing)) introduced, then immediately fixed, a log-routing regression: a live 2026-07-28 run right after parallelizing found `[EURLEX TEXT]` lines leaking into the *main* job output instead of staying in `logs/eu.log`. Cause: `_JurisdictionLogRouter` (the mechanism described above) routes a jurisdiction's prints via a `threading.local()` target set on the one worker thread that calls into that jurisdiction's `collect()` - but new threads that thread spawns itself (`batch_fetch_eurlex_fulltext`'s own `ThreadPoolExecutor` workers, one per concurrent full-text fetch) each start with their own fresh, empty `threading.local()`, so their writes fell back to the real stdout. Fixed by having each worker thread explicitly propagate the calling thread's current log target to itself before fetching (via a small `current_target()`/`redirect_to()` duck-typed handshake, so `eurlex_supported.py` doesn't need to import `_JurisdictionLogRouter` directly, and the fetch still works normally when no router is installed at all).
-
-EU's search-phase log (`[EURLEX] ...`, from `fetch_eurlex_job`/`post_eurlex_ws`) now also repeats `term='...'` on every debug line - the `=== JOB ===` header, `group N/M`, `trying page_size=...`, `POST ...`, and `page=N ...` lines all show which query term they belong to, matching how every non-EU jurisdiction's own log already worked (`[NZ] term=... page=...`, `[UK] term=... page=...`, etc. - added 2026-07-28, EU had been the one exception). A single `[EURLEX] term='...' starting full-text fetch for N document(s).` marker line prints right before the `[EURLEX TEXT]` lines for that term begin; the per-document `[EURLEX TEXT]` lines themselves don't repeat the term, matching the same asymmetry every non-EU jurisdiction already has (their own full-text-fetch stage doesn't repeat term either - only each jurisdiction's search phase does).
-
-A further 2026-07-28 pass tidied EU's log to match the other jurisdictions' more closely, and added two summary lines every non-EU jurisdiction's own full-text fetch already had but EU was missing:
-
-- `fetch_eurlex_job` now opens with a friendly `========== EU retrieval ==========` / `terms: N | max_pages: M` banner (matching e.g. `fetch_uk_documents`'s `========== UK retrieval ==========` / `terms: N | max_per_term: M`) before the more technical `=== JOB scope=... ===` line, and closes with `[EU] total rows kept: N` (matching e.g. `[UK] total rows kept: N`).
-- `[ERROR SUMMARY]` - `batch_fetch_eurlex_fulltext` was already tallying failure categories per document (`_classify_failure`, used for the `celex_type_summary` export attribute) but never actually printed the tally anywhere. It now prints the same `Nx label` roll-up non-EU's `add_full_texts_parallel` does, so a scroll to the end of a term's full-text block shows e.g. `12x 404_not_found` instead of needing to count individual `FAILED` lines by hand.
-- `[RELEVANCE]` - EU documents now get a `term_verified` field (`True`/`False`/`None` for "nothing to check against"), computed the exact same way non-EU's does: `_matched_terms_found_in_text` (reused directly from `non_eu.py` rather than reimplemented - it's adapter-agnostic logic with its own existing tests) checks whether any word of the query term(s) that matched a document (`query_term_groups`) literally appears in that document's own title/full_text. A mismatch doesn't drop the record - EUR-Lex's search can match at a looser level than "this exact term appears in this exact document" too, same as regulations.gov/AustLII did for US/AUS - it's flagged (`term_verified=False` in the output, and rolled up into a `[RELEVANCE] M/N fetched document(s) don't contain any of their matched query term's words in title/full_text (term_verified=False) - likely a docket-level or loose upstream search match rather than a wrong fetch` line) so it's visible and filterable downstream instead of silently trusted.
-
-These per-jurisdiction log files are line-buffered (fixed 2026-07-28), so they're safe to tail while a jurisdiction is still running. Before that fix, a real report found `logs/eu.log` and `logs/us.log` - the two slowest jurisdictions in that run, each taking hours - showed completely empty for their *entire* runtime despite both adapters printing plenty of internal progress: the file only got flushed to disk once the jurisdiction's whole collection finished and the file was closed, at which point it stopped being useful to check.
-
-Set `write_jurisdiction_logs=False` (`--no-jurisdiction-logs` on the CLI) to go back to everything printing inline in the main job output instead - useful when you're interactively debugging a single jurisdiction and don't want to tail a separate file. When jurisdictions run concurrently with this flag off, the internal diagnostic lines from different jurisdictions can interleave with each other in the main output, since each adapter's own `print()` calls aren't coordinated across threads.
-
-The Python-level mechanism behind this is a small thread-aware stdout router (`_JurisdictionLogRouter` in `corpus_builder.py`) rather than a logging-module setup - none of the source adapters use Python's `logging` module today, they all print directly to stdout.
-
-Non-EU full-text fetching also prints two lines per call to `add_full_texts_parallel`, one for each of the two WAF-mitigation layers described below:
-
-- `[FULLTEXT] curl_cffi browser-TLS impersonation: available` or `... NOT available (pip install curl_cffi) - ...` - whether the `curl_cffi` browser-TLS-impersonation path used for WAF-prone hosts (`www.legislation.govt.nz`, `www.legislation.gov.uk`, `www.legislation.gov.au`) is actually active. If "NOT available", `curl_cffi` either isn't installed or failed to import, and every request to those hosts falls back to the plain `requests` session.
-- `[FULLTEXT] Playwright headless-browser WAF-challenge solver: available` or `... NOT available (pip install playwright && playwright install chromium) - ...` - whether the headless-browser fallback (see below) can run at all.
-
-Two more diagnostic lines can appear from the same call, both new as of 2026-07-28:
-
-- `[FULLTEXT] cross-term cache: reused N already-fetched document(s), skipping their fetch` - printed when at least one document in this batch was already successfully fetched under a *different* search term earlier in the same jurisdiction run, and its cached full text was reused instead of being fetched and parsed again. `NonEUAdapter` owns one cache dict per jurisdiction run (each query term is otherwise a fully independent pipeline call - see [Parallel Processing](#parallel-processing) - with no memory of what any other term already fetched); a 2026-07-27 live run found this mattered most for documents that legitimately match several search terms at once, where one 5.4MB EU document was being fetched and PDF/HTML-parsed 5 separate times. Only successful fetches are cached - a failure is left to retry fresh under the next term rather than being remembered as permanently failed.
-- `[RELEVANCE] M/N fetched document(s) don't contain any of their matched query term's words in title/full_text (term_verified=False) - ...` - how many of this batch's *successfully fetched* documents don't actually contain the search term they matched on, anywhere in their title or full text. This surfaces as a `term_verified` field (`true`/`false`/absent) on every output record: `false` means fetched-but-no-word-overlap (a 2026-07-28 live run found regulations.gov's `filter[searchTerm]` matching at the docket/submission level rather than the individual attached document - e.g. a "blue economy" hit whose title/text was an unrelated raw climate-data export - and AUS's full-text-contains search matching huge omnibus Acts like the *Income Tax Assessment Act 1997* against "offshore renewable" with no relevance ranking); absent (not `false`) means there was no matched term recorded or the fetch itself failed, so relevance couldn't be judged either way. This never drops a record from the corpus - a false negative (a genuinely relevant document phrased differently than the search term) would otherwise disappear with no way to notice or recover it - it only flags the mismatch for downstream filtering.
-
-Check `[ERROR SUMMARY]`'s `waf_challenge`/`waf_block` counts alongside these lines: a high count with both "available" points at something else (rate limiting, a changed page, etc.), while a high count with either "NOT available" points at that specific mitigation layer simply not being set up in this environment - e.g. a `pip install --upgrade` that ran before a dependency was added, or a compute-node Python environment that differs from wherever the package was last installed.
-
-`waf_challenge` (an interactive HTTP 202 + `x-amzn-waf-action: challenge`, seen on NZ/UK) and `waf_block` (a hard HTTP 403, or `x-amzn-waf-action: block`, seen on AUS) are the two WAF-related `full_text_error`/log values you'll see - both get the same treatment from `_get_with_waf_retry`: throttled via `_WAF_PRONE_HOST_MIN_INTERVAL_S`, preferentially routed through the curl_cffi-impersonated session, retried with backoff, and - if still challenged/blocked after that - retried one final time using cookies obtained by actually solving the challenge in a real headless browser (see the next paragraph). `fetch_aus_documents`'s own search requests to `www.legislation.gov.au` go through this same helper, not just AUS full-text fetches - a 2026-07-27 AUS smoke test found a clean run for roughly its first 12 search terms and then a `waf_block` on every term after that for the rest of the run, the same rate-based-block shape NZ showed for full-text fetches.
-
-**curl_cffi's TLS impersonation alone is not sufficient for `www.legislation.govt.nz`.** It was deployed as a well-evidenced hypothesis (a real Chrome browser succeeded immediately against a URL that consistently got `waf_challenge` through Python's `requests`, pointing at TLS/JA3 fingerprinting), but a follow-up live run with it active still got `waf_challenge` on 16/17 full-text requests - statistically the same as the 92/97 (94.8%) rate *before* the fix. The most likely explanation: NZ's block is an AWS WAF *Challenge* action, which serves an interactive JavaScript challenge that must actually be executed to obtain a valid session cookie - something no HTTP client can do regardless of how well it spoofs its TLS handshake, since it's still just sending a static request rather than running JS. `_solve_waf_challenge_via_browser` addresses this directly: it loads the URL in a real headless Chromium browser via [Playwright](https://playwright.dev/), lets the challenge JS execute, and extracts the resulting cookies for reuse in ordinary HTTP requests to the same host. This is deliberately a last resort - a full browser launch is orders of magnitude slower than an HTTP request - so `_get_thread_browser_waf_cookies` caches the outcome (success or failure) per host per thread rather than attempting it for every blocked document.
-
-Playwright is an optional dependency (the `browser` extra: `pip install policy-corpus-builder[browser]`) because, unlike `curl_cffi`, it needs a second setup step beyond `pip install` - the browser binary itself isn't installed by pip:
-
-```bash
-pip install policy-corpus-builder[browser]
-playwright install chromium
-```
-
-Without that second step, retrieval still runs fine - it just falls back to whatever curl_cffi's TLS impersonation alone achieves, which the live data above shows is not much for this specific host. **Whether headless Chromium can actually launch on the DTU HPC cluster's compute nodes is untested** - shared HPC environments often restrict the sandboxing/namespace operations Chromium wants by default (mitigated by launching with `--no-sandbox`, which this module already does, but that alone doesn't guarantee it'll work on every cluster's kernel/cgroup configuration) and may not have the browser's shared-library dependencies installed system-wide. If `playwright install chromium` or the first browser-based fetch fails on the cluster, that's a real environment constraint to investigate separately, not a bug in this fallback's logic.
-
-## Parallel Processing
-
-There are two independent levels of concurrency in a `build_policy_corpus(...)` run, and neither of them looks at the machine's CPU count - both are fixed defaults you set explicitly if you want to tune them.
-
-**Jurisdiction-level concurrency** (jurisdictions collected at the same time): controlled by `max_jurisdiction_workers` (`--max-jurisdiction-workers` on the CLI).
-
-- Default (`max_jurisdiction_workers=None`): one worker per *requested* jurisdiction - if you ask for `--jurisdictions EU UK CA`, all three run at once. Each jurisdiction hits a fully separate external API (EUR-Lex, legislation.gov.uk, CanLII, AustLII, api.legislation.govt.nz, regulations.gov), so there's no shared rate limit to protect by throttling below that.
-- Set it lower (e.g. `--max-jurisdiction-workers 2`) to cap how many jurisdictions run concurrently - useful if you want to be gentler on your own network connection or watch progress more linearly. The effective worker count is always `min(max_jurisdiction_workers, number of jurisdictions requested)`.
-- This number is **not** derived from `os.cpu_count()` or any other machine property - it only depends on how many jurisdictions you asked for and this optional override. A run with 6 jurisdictions gets 6 worker threads on a 2-core laptop exactly the same as it would on a 64-core HPC node; these are lightweight I/O-bound network threads, not CPU-bound work, so core count isn't the relevant constraint here anyway.
-
-**Per-term document cap for non-EU jurisdictions** (how many documents each of UK, AUS, CA, NZ, and US keeps per query term): controlled by `non_eu_max_per_term` (`--max-per-term` on the CLI).
-
-- Default (`non_eu_max_per_term=None`): no per-term document cap. Paginated adapters continue until their upstream results are exhausted; this does not add pagination to single-page adapters.
-- Pass a positive value (e.g. `--max-per-term 1000`) to cap results per term in each non-EU jurisdiction.
-- For the lower-level `run` command, omit `source.settings.max_per_term` in TOML for unlimited retrieval. Existing explicit limits still apply.
-- Canada uses `https://publications.gc.ca` and follows the search page's next-page links, deduplicating publications across pages. Request failures include their underlying exception in verbose logs.
-
-EU full-text retrieval reuses successful files from the shared cache directory across terms and subsequent runs, reporting the number reused. Missing cached text is fetched again. Set `use_cache = false` to force fresh retrieval.
-NZ search quotes hyphenated terms such as `nature-based` as well as multi-word phrases, preserving existing outer quotes.
-
-**Full-text-fetch concurrency within a jurisdiction** (how many documents' full text a single jurisdiction fetches at once): implemented for every jurisdiction as of 2026-07-28, via a `ThreadPoolExecutor` in each of `non_eu.py`'s `add_full_texts_parallel` and `eurlex_supported.py`'s `batch_fetch_eurlex_fulltext`. Two separate settings, since the two paths have very different risk profiles:
-
-- **Non-EU (UK, CA, AUS, NZ, US)**: `non_eu_max_workers` (`--max-workers` on the CLI), default **8** (`NON_EU_DEFAULT_MAX_WORKERS`). `NonEUAdapter` itself falls back to only 4 when a source config doesn't set `max_workers` explicitly, and `build-corpus`'s non-EU `SourceConfig`s never used to set it either - every non-EU jurisdiction run through `build_policy_corpus` was silently capped at 4 until this was exposed. Raising it mainly speeds up **CA and US**, which aren't rate-limited by host; **UK and AUS** see no benefit (their full-text fetches hit `www.legislation.gov.uk`/`www.legislation.gov.au`, throttled to 1 request/1.5s regardless of thread count via `_WAF_PRONE_HOST_MIN_INTERVAL_S` - intentional, don't raise this to try to bypass it); **NZ** partially benefits (its official API calls do, its browser-fallback path doesn't).
-- **EU** (EUR-Lex): `eu_max_workers` (`--eu-max-workers` on the CLI), default **4** (`EU_DEFAULT_MAX_WORKERS`) - deliberately more conservative than the non-EU default. EU's full-text fetch was a plain sequential loop until 2026-07-28 (consistently the slowest jurisdiction in every live run, making zero use of the threads/cores available), so this is a new speed lever rather than a silent-cap fix. Each worker thread still separately waits its own `min_interval_s` (2.0s default) between its own successive fetches - there is **no shared cross-thread throttle** enforcing one aggregate rate the way `_WAF_PRONE_HOST_MIN_INTERVAL_S` does for the non-EU WAF-prone hosts - so raising `eu_max_workers` increases the aggregate request rate to `eur-lex.europa.eu` roughly proportionally (e.g. `eu_max_workers=4` means roughly 4x the old request rate, not the same rate arriving faster). There is no confirmed rate-limit incident for EUR-Lex's webservice/cellar endpoints to calibrate a higher default against, unlike the empirically-confirmed AWS WAF blocks behind the non-EU WAF-prone-host list - treat raising this as a real, unverified risk trade-off, not a free win. If a live run shows EUR-Lex tolerates it well, raise it; if EUR-Lex ever starts responding with 429s or WAF-style challenges under concurrency, lower it back toward 1 (fully sequential, matching the pre-2026-07-28 behavior).
-- Note there's a known inconsistency worth being aware of on the non-EU side: `add_full_texts_parallel` and `build_non_eu_fulltext_docs` each default to `max_workers=12` if called directly (e.g. from a notebook or script using the library level API), while `run_non_eu_query_pipeline` (what the adapter actually calls) defaults to `4` before `build_policy_corpus`'s own `non_eu_max_workers` resolution applies. If you're calling these functions directly rather than through `build_policy_corpus`/the CLI, check which one you're using.
-- EUR-Lex NIM full-text retrieval (a separate stage from ordinary EU/EUR-Lex, only run when `--include-nim` is set) still has **no concurrency at all** - `batch_fetch_nim_fulltext` processes documents in a plain sequential loop. Not addressed by the 2026-07-28 EU change above; NIM is a smaller, narrower workload (CELEX seeds derived from EU's own results) and wasn't the reported bottleneck.
-- Like the jurisdiction-level setting, none of these numbers adapt to the machine you're running on.
-
-If you're moving a job to a machine with more (or fewer) cores or a faster/slower network - e.g. onto an HPC node - `max_jurisdiction_workers`, `non_eu_max_workers` (`--max-workers`), and `eu_max_workers` (`--eu-max-workers`) are all exposed directly on `build-corpus` today.
+Start with `build_policy_corpus(...)` in Python or `policy-corpus-builder build-corpus` in the terminal. EUR-Lex is the primary supported retrieval path; all live sources depend on upstream availability and access controls.
 
 ## Install
 
-```bash
-pip install -e .
-```
-
-Python `3.11+` is required.
-
-For NZ full-text retrieval, also install the optional `browser` extra and its browser binary (see [Supported New Zealand Workflow](#supported-new-zealand-workflow) for why this is needed):
+Requires Python **3.11+**. From this repository, install into your Python environment:
 
 ```bash
-pip install -e .[browser]
-playwright install chromium
+python -m pip install -e .
 ```
 
-## Local Credentials
-
-For local-only secrets, copy `.env.example` to `.env`, fill in your real credentials, and keep `.env` untracked.
+For the optional browser fallback used by NZ full-text retrieval:
 
 ```bash
-cp .env.example .env
+python -m pip install -e ".[browser]"
+python -m playwright install chromium
 ```
 
-Supported workflow credentials and environment variables:
+The browser fallback can help with access challenges, but does not guarantee successful downloads.
 
-- UK via `non-eu`: no required credential; set `POLICY_CORPUS_BUILDER_USER_AGENT` or `source.settings.user_agent` for responsible access
-- Canada via `non-eu`: no required credential
-- Australia via `non-eu`: no required credential
-- US via `non-eu`: `REGULATIONS_GOV_API_KEY`
-- New Zealand API mode via `non-eu`: `NZ_LEGISLATION_API_KEY`
-- ordinary EUR-Lex via `eurlex`: `EURLEX_WS_USER` and `EURLEX_WS_PASS`
-- EUR-Lex NIM via `eurlex-nim`: `EURLEX_WS_USER` and `EURLEX_WS_PASS`
+## Sources and credentials
 
-Compatibility environment variables:
+| Code | Source | Required environment variables |
+| --- | --- | --- |
+| `EU` | EUR-Lex WebService and CELEX full text | `EURLEX_WS_USER`, `EURLEX_WS_PASS` |
+| `UK` | legislation.gov.uk | None |
+| `CA` | Government of Canada Publications | None |
+| `AUS` | Federal Register of Legislation | None |
+| `NZ` | New Zealand Legislation API | `NZ_LEGISLATION_API_KEY` |
+| `US` | Regulations.gov API | `REGULATIONS_GOV_API_KEY` |
 
-- `EURLEX_USER`
-- `EURLEX_WEB_PASS`
+Set credentials in the environment. For an editable checkout, you can also copy [.env.example](.env.example) to an untracked `.env` in the repository root; the package loads it automatically. Existing environment values take precedence. Never commit credentials.
 
-The package will load `.env` automatically if it is present in the repository root (or a parent directory when importing the package locally). Never commit `.env`.
+Legacy EUR-Lex names `EURLEX_USER` and `EURLEX_WEB_PASS` are also accepted. National implementation measures (NIM) use the same EUR-Lex credentials. Set `POLICY_CORPUS_BUILDER_USER_AGENT` to identify your application and contact details for non-EU requests.
 
-## What v0.1 Includes
+## Quick start
 
-- one normalized document model: [src/policy_corpus_builder/models.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py)
-- one supported top-level builder: `build_policy_corpus(...)`
-- one supported ordinary EUR-Lex adapter path: `eurlex`
-- one supported EUR-Lex NIM adapter path: `eurlex-nim`
-- supported live non-EU paths: `non-eu` with `countries = ["UK"]`, `countries = ["CA"]`, `countries = ["AUS"]`, `countries = ["NZ"]` with an API key, and `countries = ["US"]` with `REGULATIONS_GOV_API_KEY`
-- deterministic final deduplication
-- JSONL corpus export
-- machine-readable run manifest export
-
-## Supported Surface
-
-The currently supported workflows are:
-
-- ordinary EUR-Lex via `adapter = "eurlex"`; this is the primary and strongest retrieval surface today
-- EUR-Lex NIM via `adapter = "eurlex-nim"`
-- UK via `adapter = "non-eu"` with `countries = ["UK"]`
-- Canada via `adapter = "non-eu"` with `countries = ["CA"]`
-- Australia via `adapter = "non-eu"` with `countries = ["AUS"]`
-- US via `adapter = "non-eu"` with `countries = ["US"]`
-- New Zealand via `adapter = "non-eu"` with `countries = ["NZ"]` and an `NZ_LEGISLATION_API_KEY`
-
-The non-EU workflows above are supported, but they are generally more contingent on each jurisdiction's current public website or API behavior. Changes to government service availability, response formats, search endpoints, page markup, scraping rules, access restrictions, or anti-bot controls may affect them before this package has been updated.
-
-The main public API worth treating as stable is:
-
-- `build_policy_corpus` in [src/policy_corpus_builder/corpus_builder.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/corpus_builder.py)
-- `PolicyCorpusBuildResult` in [src/policy_corpus_builder/corpus_builder.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/corpus_builder.py)
-- `get_adapter` in [src/policy_corpus_builder/adapters/__init__.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/__init__.py)
-- `LocalFileAdapter` in [src/policy_corpus_builder/adapters/local_file.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/local_file.py)
-- `NonEUAdapter` in [src/policy_corpus_builder/adapters/non_eu_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu_adapter.py)
-- `EurlexAdapter` in [src/policy_corpus_builder/adapters/eurlex_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_adapter.py)
-- `EurlexNIMAdapter` in [src/policy_corpus_builder/adapters/eurlex_nim_adapter.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim_adapter.py)
-
-The lower-level adapter/config workflow remains supported for advanced integrations, but it is no longer the first workflow users should reach for.
-
-For a stable summary of supported versus provisional code paths, see [docs/supported-surface.md](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/docs/supported-surface.md).
-
-## Stability And External Dependencies
-
-The ordinary EUR-Lex path is the main retrieval priority for this repository and currently has the strongest support expectations. EUR-Lex NIM retrieval is also supported, but it is seeded from EU legal acts and has its own eligibility and full-text limitations.
-
-Supported non-EU workflows are useful live retrieval paths, not placeholders. They should still be treated as more externally fragile because they rely on jurisdiction-specific government websites and APIs whose availability, search behavior, document markup, access rules, and anti-automation policies are controlled upstream.
-
-This limitation is not specific to one country adapter. It is an inherent constraint of live legal and policy retrieval: any supported live pipeline can need maintenance when governments or platform owners change the systems that this package queries.
-
-## Lower-Level Config And Adapter Usage
-
-If you need direct control over config files, adapters, query loading, normalization, or exports, those surfaces still exist. They are now secondary to `build_policy_corpus(...)`.
-
-The most relevant lower-level functions are:
-
-- `load_and_validate_config` in [src/policy_corpus_builder/config.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/config.py)
-- `load_queries` in [src/policy_corpus_builder/queries.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/queries.py)
-- `normalize_adapter_results` in [src/policy_corpus_builder/pipeline.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/pipeline.py)
-- `deduplicate_documents` in [src/policy_corpus_builder/postprocess.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/postprocess.py)
-- `export_documents_jsonl` in [src/policy_corpus_builder/exporters/jsonl.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/exporters/jsonl.py)
-- `run_from_config_path` in [src/policy_corpus_builder/orchestration.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/orchestration.py)
-
-### Example: Lower-Level Library Usage
+### Python
 
 ```python
-from pathlib import Path
+from policy_corpus_builder import build_policy_corpus
 
-from policy_corpus_builder.adapters import get_adapter
-from policy_corpus_builder.config import load_and_validate_config
-from policy_corpus_builder.exporters.jsonl import export_documents_jsonl
-from policy_corpus_builder.pipeline import normalize_adapter_results
-from policy_corpus_builder.postprocess import deduplicate_documents
-from policy_corpus_builder.queries import load_queries
-
-repo_root = Path.cwd()
-config_path = repo_root / "examples" / "local_file.toml"
-config = load_and_validate_config(config_path)
-
-queries = load_queries(config, base_path=config_path.parent)
-source = config.sources[0]
-adapter = get_adapter(source.adapter)
-loaded_source = adapter.load_source(source, base_path=config_path.parent)
-
-documents = []
-for query in queries:
-    raw_results = adapter.collect(
-        source,
-        query,
-        base_path=config_path.parent,
-        loaded_source=loaded_source,
-    )
-    documents.extend(
-        normalize_adapter_results(raw_results, source=source, query=query)
-    )
-
-deduped = deduplicate_documents(tuple(documents), config=config.normalization)
-output_path = export_documents_jsonl(
-    deduped.documents,
-    output_dir=repo_root / "examples" / "outputs" / "readme-demo",
+result = build_policy_corpus(
+    query_terms=["marine spatial planning", "nature-based"],
+    jurisdictions=["EU", "UK", "CA"],
+    outputs_path="outputs/policy-corpus",
 )
-print(output_path)
+
+print(result.final_corpus_path)
+print(result.final_document_count)
+print(result.manifest_path)
 ```
 
-### CLI Usage
-
-The recommended CLI workflow is the top-level happy path:
+### Terminal
 
 ```bash
-policy-corpus-builder build-corpus \
-  --query-terms "marine spatial planning" \
-  --jurisdictions EU UK \
-  --outputs-path outputs/policy-corpus-demo
+policy-corpus-builder build-corpus --query-terms "marine spatial planning" "nature-based" --jurisdictions EU UK CA --outputs-path outputs/policy-corpus
 ```
 
-The older config-driven CLI remains available for lower-level workflows:
+Select only the jurisdictions you need. For a credential-free first run, use `--jurisdictions CA`.
 
 ```bash
+policy-corpus-builder build-corpus --help
+```
+
+## Limits, concurrency, and logs
+
+| Python option | CLI option | Default |
+| --- | --- | --- |
+| `non_eu_max_per_term` | `--max-per-term` | `None`: no non-EU per-term cap |
+| `non_eu_max_workers` | `--max-workers` | 8 full-text workers per non-EU jurisdiction |
+| `eu_max_workers` | `--eu-max-workers` | 4 EU full-text workers |
+| `max_jurisdiction_workers` | `--max-jurisdiction-workers` | One worker per selected jurisdiction |
+| `write_jurisdiction_logs` | `--jurisdiction-logs` / `--no-jurisdiction-logs` | Separate logs enabled |
+
+An explicit positive `--max-per-term` still caps non-EU results. In a lower-level TOML config, omit `source.settings.max_per_term` for unlimited retrieval; an existing `max_per_term = 500` still imposes that limit. Unlimited removes the package's document cap, not upstream search or pagination restrictions, and does not change EU limits.
+
+Worker counts control concurrent requests, not CPU allocation. Lower them to reduce load on upstream services.
+
+The terminal shows run summaries by default. Detailed output goes to `logs/eu.log`, `logs/ca.log`, and equivalent files for other selected jurisdictions. Use `--no-jurisdiction-logs` to print those details inline.
+
+### Cache and source behavior
+
+- **EU:** successful full-text files are reused across terms and subsequent runs using the same output/cache directory. Missing cached text is fetched again. The lower-level EUR-Lex setting `use_cache = false` forces fresh text retrieval.
+- **Non-EU:** successful full-text fetches are reused across terms within the same adapter run. Failed fetches remain eligible for another attempt.
+- **Canada:** search uses `https://publications.gc.ca` without `www`, follows next-page links, and deduplicates results across pages. Verbose request failures include the underlying exception.
+- **New Zealand:** multi-word and hyphenated terms such as `nature-based` are quoted for search; existing outer quotes are preserved. An API key is required.
+
+Search matches do not guarantee relevant or complete full text. Inspect logs and `raw_metadata.raw_record` for retrieval errors and `term_verified` diagnostics. A completed run can retain metadata with missing full text when a source blocks or fails a download. Source search semantics vary; no cross-source exact-phrase guarantee is implied.
+
+## Outputs
+
+A top-level build writes under `outputs_path`:
+
+```text
+outputs/policy-corpus/
+  cache/                        Reusable retrieval cache
+  jurisdictions/<code>/documents.jsonl
+  final/documents.jsonl         Merged, deduplicated corpus
+  audit/                        Likely-duplicate review files
+  logs/                         Per-jurisdiction logs
+  run-manifest.json             Run settings, counts, and output paths
+  nim/                          Optional national implementation outputs
+  case_law/                     Optional case-law outputs
+```
+
+Each JSONL line is a [normalized document](src/policy_corpus_builder/models.py), with identifiers, title, source, jurisdiction, language, dates, URLs, query provenance, full text where available, and `raw_metadata` for source-specific details.
+
+The builder standardizes whitespace, dates, language and document-type labels, and selected text boilerplate. Original values and date precision are retained in metadata where applicable.
+
+The [duplicate audit](docs/duplicate-audit.md) flags likely duplicates for review; it does not remove additional records. `result.to_dict()` provides the run summary programmatically, including counts and artifact paths.
+
+## Optional EU workflows
+
+### Translated queries
+
+Pass `include_translations=True` and `translated_terms=[...]` to search additional supplied terms in the EU path. Non-EU sources still use only `query_terms`. The toolkit does not generate translations.
+
+CLI equivalents: `--include-translations --translated-terms "translated phrase"`.
+
+### National implementation measures
+
+Add `include_nim=True` to retrieve national implementation measures for eligible EU legal acts found by the main search. Include `EU` in `jurisdictions`.
+
+```python
+result = build_policy_corpus(
+    query_terms=["marine spatial planning"],
+    jurisdictions=["EU"],
+    outputs_path="outputs/eu-with-nim",
+    include_nim=True,
+    include_nim_fulltext=False,
+)
+```
+
+NIM full-text retrieval is enabled by default when NIM is requested. Use `include_nim_fulltext=False` or `--no-nim-fulltext` for metadata only. `nim_max_rows` / `--nim-max-rows` optionally limits processed measures per eligible EU act.
+
+NIM records are written separately from the final corpus. Runs without eligible seeds skip NIM. Overview tables summarize acts, countries, and dates; failed discovery is distinguished from zero results, and page-limited counts are lower bounds. `nim_min_valid_year` (default 1950) affects timing summaries only, preserving raw dates and counts.
+
+### Case law
+
+Set `include_case_law=True` or `--include-case-law` to export case law identified in ordinary EU query results. This is not a targeted or comprehensive court search. CELEX sector 6 records and experimental sector 8 references remain separate categories; non-EU case-law retrieval is unsupported.
+
+Full text is opt-in through `case_law_fulltext=True` / `--case-law-fulltext`, which requires case-law export to be enabled. Missing text does not discard discovered metadata. Counts describe exported source documents, not distinct proceedings or jurisdiction-wide totals.
+
+See [supported workflows and output semantics](docs/supported-surface.md) for case-law rules and NIM overview details.
+
+## Config-driven workflows
+
+Use TOML when you need source-specific settings, a query inventory file, or local-file input:
+
+```bash
+policy-corpus-builder list-adapters
 policy-corpus-builder validate-config --config examples/local_file.toml
 policy-corpus-builder run --config examples/local_file.toml
 ```
 
-`validate-config` and `run` continue to use the lower-level config pipeline. They are useful when you need direct TOML-driven source configuration, but new users should usually start with `build-corpus`.
+Configs contain `[project]`, `[queries]`, `[[sources]]`, `[normalization]`, and `[export]`. Query inventories contain one term per line; blank lines and `#` comments are ignored, and literal quotes are preserved. Inventory paths resolve relative to the config file.
 
-## Provisional And Internal Surface
+Start from an example: [local files](examples/local_file.toml), [EU](examples/eu.toml), [NIM](examples/eu_nim.toml), [UK](examples/non_eu_uk.toml), [Canada](examples/non_eu_canada.toml), [Australia](examples/non_eu_australia.toml), [NZ](examples/non_eu_new_zealand.toml), or [US](examples/non_eu_us.toml). Review their explicit limits before a production run; examples may intentionally restrict retrieval.
 
-The following modules and workflows are intentionally not part of the supported public surface:
+## Development and reference
 
-- legacy migrated [src/policy_corpus_builder/adapters/eurlex.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex.py)
-- legacy migrated [src/policy_corpus_builder/adapters/eurlex_nim.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/eurlex_nim.py)
-- [src/policy_corpus_builder/adapters/non_eu.py](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/adapters/non_eu.py)
-- notebook-era diagnostics, bulk loaders, cache summaries, and summary helpers inside those migrated modules
-- placeholder and demo-only surfaces such as `placeholder` and [examples/minimal.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/minimal.toml)
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
 
-Examples and notebooks are documentation aids, not stable implementation entry points.
+- [Supported public interfaces and limitations](docs/supported-surface.md)
+- [Writing adapters](docs/adapter-authors.md)
+- [Examples](examples/README.md)
+- [Build API and result object](src/policy_corpus_builder/corpus_builder.py)
 
-## Supported UK Workflow
-
-The current supported UK live workflow uses the `non-eu` adapter with `countries = ["UK"]`.
-
-What it supports today:
-
-- query-driven UK legislation discovery
-- normalized metadata export
-- official `legislation.gov.uk` API representations as the preferred full-text backend
-
-What it does not guarantee today:
-
-- successful full-text extraction for every UK record
-
-`policy-corpus-builder` now prefers the official UK API representations such as `data.xml` for full text. However, upstream access controls on `legislation.gov.uk` may still challenge automated requests. In those cases:
-
-- the run is still considered successful if discovery and normalization complete
-- exported records may contain `full_text = null`
-- source-specific diagnostics remain in `raw_metadata.raw_record`, including `full_text_error = "waf_challenge"` and `retrieval_status = "upstream_blocked"`
-
-For responsible use, set a clear contact-bearing user agent either through the environment variable `POLICY_CORPUS_BUILDER_USER_AGENT` or in `source.settings.user_agent` for the `non-eu` adapter.
-
-## Supported Canada Workflow
-
-The current supported Canada live workflow uses the `non-eu` adapter with `countries = ["CA"]`.
-
-What it supports today:
-
-- direct discovery against publications.gc.ca's own search page (`/site/eng/search/search.html`), one query per search term
-- candidate filtering that excludes the search page's own furniture (its home page, browse index, and the search page itself) while keeping direct `.pdf` links and anything else under `/site/eng/` or `/site/fra/`
-- landing-page (`/publication.html`) or direct-PDF full-text retrieval depending on which kind of result URL was found - for a `/publication.html` catalogue-record result, the real document is found via the record's MARC XML metadata page (`/marcXml.html`, same catalogue ID): its standard MARC 856 "location and access" field's `$u` subfield is the actual document URL, e.g. `<marc:datafield tag="856" ...><marc:subfield code="u">https://publications.gc.ca/collections/.../foo.pdf</marc:subfield></marc:datafield>`. This is tried first; if the MARC record is unavailable or has no 856 field, it falls back to scraping the landing page's own HTML for a link that looks like the document (by literal `.pdf` suffix, link text mentioning "pdf", or a `/collections/` path), and finally to the landing page's own visible catalogue-metadata text if no document link can be found at all.
-- a retry for publications.gc.ca's "Information Archived on the Web" notice: for older catalogue entries, the real PDF URL (found correctly by either method above) 302-redirects to `site/archivee-archived.html?url=<the PDF URL>` - an ordinary HTTP 200 text/html compliance notice, not a WAF action, so nothing else catches it - whose own "Continue to publication" link points right back at the identical URL, on both the `www.` and bare `publications.gc.ca` hostnames. A first fix attempt (retrying the same URL once more on the same session, betting on a cookie) was tried live and disconfirmed - the notice came back identically on retry. The current retry instead sends a `Referer` header set to the notice page's own URL, mimicking what a real browser sends when it clicks the notice's "Continue to publication" link - this was CONFIRMED working via a 2026-07-28 live rerun: all 16 CA records came back with real extracted PDF text (13KB-1.4MB each, `full_text_format=pdf`, no `full_text_pdf_lookup_status` failure reason), including the exact `FA1-2-2005-3E.pdf` example that had been hitting the notice throughout this investigation.
-- normalized JSONL export through the shared document model
-
-**History:** an earlier version of this workflow briefly discovered documents via the Open Government CKAN API (`open.canada.ca/data/api/3/action/package_search`) with a publications.gc.ca landing-page fallback, then briefly switched to scraping `laws-lois.justice.gc.ca`'s Advanced Search (acts/regulations only). Neither of those was working as intended - the laws-lois version in particular was found (2026-07) to return the same 7 site-navigation links for every search term, including nonsense ones, rather than real results. The direct publications.gc.ca search-page scrape above restores the originally-verified-working approach. Full-text retrieval for `/publication.html` results went through three further iterations after that: a 2026-07-27 live run found every full text was the landing page's own catalogue-metadata boilerplate (no dedicated handling followed the real document link at all), which was fixed by scraping the landing page's HTML for a `.pdf`-suffixed link; a 2026-07-28 live rerun found that fix still wasn't enough, since the landing page's "Electronic document" link isn't always a literal `.pdf`-suffixed href - the MARC XML `$u` field approach described above (identified by inspecting a live catalogue record) is what's now tried first; a further 2026-07-28 rerun (with a new `full_text_pdf_lookup_status` diagnostic field added specifically to see why) found the MARC/HTML-scrape lookup was actually succeeding at finding the right URL every time, but every single fetch of it was hitting the "Information Archived on the Web" notice above instead of the PDF; a same-session plain retry was tried next, but a further 2026-07-28 rerun disconfirmed it (`full_text_pdf_lookup_status` stayed `canada_publication_archived_notice` for every CA record even after the retry) - a direct fetch also ruled out a `www.`-vs-bare-domain explanation, since both hostnames hit the identical notice. The Referer-header retry described above is what finally resolved this: a further 2026-07-28 rerun confirmed real PDF full text for all 16 CA records, closing out this multi-iteration bug.
-
-The supported Canada example config is [examples/non_eu_canada.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_canada.toml).
-
-## Supported Australia Workflow
-
-The current supported Australia live workflow uses the `non-eu` adapter with `countries = ["AUS"]`.
-
-What it supports today:
-
-- query-driven Australia legislation discovery
-- normalized JSONL export through the shared document model
-
-The supported Australia example config is [examples/non_eu_australia.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_australia.toml).
-
-## Supported New Zealand Workflow
-
-The current supported New Zealand live workflow uses the `non-eu` adapter with `countries = ["NZ"]`.
-
-What it supports today:
-
-- official `api.legislation.govt.nz` discovery via `/v0/works`
-- API-returned version format selection for XML, PDF, and HTML - plus a best-effort derived PDF candidate (`_derive_nz_pdf_url`, e.g. `.../whole.html` -> `.../whole.pdf`) tried when the API's own "formats" list doesn't include one, since manual inspection of individual full-text failures found working PDF renditions at several documents the API hadn't listed a pdf format for
-- normalized JSONL export through the shared document model
-
-What it requires:
-
-- an `NZ_LEGISLATION_API_KEY` (`NZ_API_KEY` is accepted as a compatibility alias); there is no unauthenticated fallback
-- for full-text retrieval specifically (search/discovery via the API above works without it): the `browser` optional extra (`pip install policy-corpus-builder[browser]` + `playwright install chromium`), since `www.legislation.govt.nz` runs an AWS WAF Challenge that curl_cffi's TLS impersonation alone was confirmed insufficient against - see the WAF mitigation section under [Progress Output](#progress-output) for the full story
-
-The supported New Zealand example config is [examples/non_eu_new_zealand.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_new_zealand.toml).
-
-## Supported US Workflow
-
-The current supported US live workflow uses the `non-eu` adapter with `countries = ["US"]`.
-
-What it supports today:
-
-- Regulations.gov document discovery through the official `/v4/documents` API
-- API-backed document metadata retrieval for normalized corpus text
-- normalized JSONL export through the shared document model
-
-What it requires:
-
-- `REGULATIONS_GOV_API_KEY`
-
-The supported US example config is [examples/non_eu_us.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/non_eu_us.toml).
-
-## Supported EUR-Lex Workflow
-
-The current supported EUR-Lex live workflow uses the `eurlex` adapter with the ordinary EU WebService search path plus ordinary EU CELEX full-text retrieval.
-
-What it supports today:
-
-- query-driven EUR-Lex WebService search
-- CELEX-based ordinary EU document consolidation
-- CELEX full-text retrieval for supported document types
-- normalized JSONL export through the shared document model
-
-What it requires:
-
-- `EURLEX_WS_USER` and `EURLEX_WS_PASS`
-
-Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatibility.
-
-The supported EUR-Lex example config is [examples/eu.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu.toml).
-
-## Supported EUR-Lex NIM Workflow
-
-The current supported EUR-Lex NIM live workflow uses the `eurlex-nim` adapter.
-
-What it supports today:
-
-- CELEX-seeded national implementation retrieval for one EU legal act
-- query-seeded EUR-Lex act lookup followed by NIM retrieval for eligible legal acts
-- national measure record normalization into the shared document model
-- optional NIM full-text retrieval through the migrated EUR-Lex/NIM helper subset
-- normalized JSONL export through the shared document model
-
-What it requires:
-
-- `EURLEX_WS_USER` and `EURLEX_WS_PASS`
-
-Legacy names `EURLEX_USER` and `EURLEX_WEB_PASS` are still accepted for compatibility.
-
-The supported EUR-Lex NIM example config is [examples/eu_nim.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/eu_nim.toml).
-
-## Normalized Document Model
-
-The shared normalized record is [NormalizedDocument](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/src/policy_corpus_builder/models.py:14).
-
-Core fields include:
-
-- `document_id`
-- `source_name`
-- `source_document_id`
-- `title`
-- `summary`
-- `document_type`
-- `language`
-- `jurisdiction`
-- `publication_date`
-- `effective_date`
-- `url`
-- `download_url`
-- `query`
-- `full_text`
-- `retrieved_at`
-- `checksum`
-- `content_path`
-- `raw_metadata`
-
-Source-specific leftovers stay in `raw_metadata`.
-
-## Config Shape
-
-The lower-level config system still uses TOML with five top-level sections:
-
-- `[project]`
-- `[queries]`
-- `[[sources]]`
-- `[normalization]`
-- `[export]`
-
-The bundled example config is [examples/local_file.toml](C:/Users/acali/OneDrive%20-%20Danmarks%20Tekniske%20Universitet/PostDoc/Code/policy-corpus-builder/examples/local_file.toml).
-
-## Repository Scope
-
-This repository is intentionally separate from project-specific downstream analysis work.
-
-`policy-corpus-builder` is for:
-
-- source access
-- normalization
-- corpus cleaning
-- corpus export
-- stable top-level corpus building
-
-It is not for:
-
-- research questions
-- project-specific dictionaries
-- report generation
-- project-specific analysis logic
+Use the public builder and adapters for integrations. Legacy helpers and notebook-era internals are not stable public interfaces. Keep research dictionaries, reports, and downstream analysis in a separate project workspace.
