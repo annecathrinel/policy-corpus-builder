@@ -1136,7 +1136,7 @@ def fetch_aus_documents(
 def build_canada_publications_search_url(term: str) -> str:
     term = term.strip()
     q = quote(f'"{term}"', safe="")
-    return f"{CA_BASE}/site/eng/search/search.html?sLF=eng&text={q}&cnst=&adof=on"
+    return f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&language=eng&adof=on"
 
 
 def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]]:
