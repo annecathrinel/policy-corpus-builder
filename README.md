@@ -545,6 +545,7 @@ There are two independent levels of concurrency in a `build_policy_corpus(...)` 
 - Default (`non_eu_max_per_term=None`): no per-term document cap. Paginated adapters continue until their upstream results are exhausted; this does not add pagination to single-page adapters.
 - Pass a positive value (e.g. `--max-per-term 1000`) to cap results per term in each non-EU jurisdiction.
 - For the lower-level `run` command, omit `source.settings.max_per_term` in TOML for unlimited retrieval. Existing explicit limits still apply.
+- Canada uses `https://publications.gc.ca` and follows the search page's next-page links, deduplicating publications across pages. Request failures include their underlying exception in verbose logs.
 
 EU full-text retrieval reuses successful files from the shared cache directory across terms and subsequent runs, reporting the number reused. Missing cached text is fetched again. Set `use_cache = false` to force fresh retrieval.
 NZ search quotes hyphenated terms such as `nature-based` as well as multi-word phrases, preserving existing outer quotes.
