@@ -86,11 +86,11 @@ class NonEUCanadaTests(unittest.TestCase):
     def test_build_canada_publications_search_url_matches_current_live_route_shape(self) -> None:
         self.assertEqual(
             non_eu.build_canada_publications_search_url("biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?ast=%22biodiversity%22&cnst=&language=eng&adof=on",
+            "https://publications.gc.ca/site/eng/search/search.html?ast=%22biodiversity%22&cnst=&language=eng&adof=on",
         )
         self.assertEqual(
             non_eu.build_canada_publications_search_url("soil biodiversity"),
-            "https://www.publications.gc.ca/site/eng/search/search.html?ast=%22soil%20biodiversity%22&cnst=&language=eng&adof=on",
+            "https://publications.gc.ca/site/eng/search/search.html?ast=%22soil%20biodiversity%22&cnst=&language=eng&adof=on",
         )
 
     def test_extract_canada_publications_result_links_filters_search_furniture(self) -> None:
@@ -103,11 +103,11 @@ class NonEUCanadaTests(unittest.TestCase):
             results,
             [
                 (
-                    "https://www.publications.gc.ca/site/eng/9.876543/publication.html",
+                    "https://publications.gc.ca/site/eng/9.876543/publication.html",
                     "Biodiversity Plan 2024",
                 ),
                 (
-                    "https://www.publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf",
+                    "https://publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf",
                     "Species at Risk Report (PDF)",
                 ),
             ],
@@ -125,6 +125,32 @@ class NonEUCanadaTests(unittest.TestCase):
 
         self.assertEqual(results, [])
 
+    def test_canada_paginates_deduplicates_and_stops_on_repeated_next_page(self) -> None:
+        page_one = CANADA_PUBLICATIONS_SEARCH_HTML + '<a rel="next" href="/site/eng/search/search.html?text=x&page=2">Next</a>'
+        page_two = page_one + '<a href="/site/eng/9.111111/publication.html">Another publication</a>'
+        with patch.object(non_eu, "safe_get", side_effect=[_FakeResponse(200, page_one), _FakeResponse(200, page_two)]) as fetch:
+            result = non_eu.fetch_canada_documents(["x"], sleep_s=0)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args_list[1].args[0], "https://publications.gc.ca/site/eng/search/search.html?text=x&page=2")
+        self.assertTrue(fetch.call_args.kwargs["verbose_err"])
+
+    def test_canada_explicit_limit_does_not_fetch_next_page(self) -> None:
+        html = CANADA_PUBLICATIONS_SEARCH_HTML + '<a rel="next" href="/site/eng/search/search.html?page=2">Next</a>'
+        with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, html)) as fetch:
+            result = non_eu.fetch_canada_documents(["x"], max_per_term=1, sleep_s=0)
+        self.assertEqual(len(result), 1)
+        fetch.assert_called_once()
+
+    def test_canada_request_failure_exposes_exception(self) -> None:
+        import requests
+        session = requests.Session()
+        stdout = StringIO()
+        with patch.object(session, "request", side_effect=requests.exceptions.SSLError("certificate failure")), patch.object(non_eu.time, "sleep"), redirect_stdout(stdout):
+            result = non_eu.fetch_canada_documents(["x"], session=session)
+        self.assertTrue(result.empty)
+        self.assertIn("SSLError: certificate failure", stdout.getvalue())
+
     def test_fetch_canada_documents_extracts_results_from_search_page(self) -> None:
         with patch.object(non_eu, "safe_get", return_value=_FakeResponse(200, CANADA_PUBLICATIONS_SEARCH_HTML)):
             df = non_eu.fetch_canada_documents(["biodiversity"], max_per_term=10)
@@ -135,8 +161,8 @@ class NonEUCanadaTests(unittest.TestCase):
         self.assertEqual(
             df["doc_url"].tolist(),
             [
-                "https://www.publications.gc.ca/site/eng/9.876543/publication.html",
-                "https://www.publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf",
+                "https://publications.gc.ca/site/eng/9.876543/publication.html",
+                "https://publications.gc.ca/collections/collection_2024/eccc/En1-45-2024-eng.pdf",
             ],
         )
 

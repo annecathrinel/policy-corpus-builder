@@ -132,7 +132,7 @@ AUS_BASE = "https://www.legislation.gov.au"
 # navigation/help chrome rather than real results. publications.gc.ca is
 # the originally-verified working base, per a preserved earlier copy of
 # this module.
-CA_BASE = "https://www.publications.gc.ca"
+CA_BASE = "https://publications.gc.ca"
 NZ_API_BASE = "https://api.legislation.govt.nz/v0"
 US_BASE = "https://api.regulations.gov/v4"
 
@@ -1143,7 +1143,7 @@ def _extract_canada_publications_result_links(html: str) -> list[tuple[str, str]
 
     /site/fra/ links are excluded from candidates entirely, not just the
     search page's own self-link: this search is restricted to English
-    results (sLF=eng), and a 2026-07-27 live run found the only /site/fra/
+    results (language=eng), and a 2026-07-27 live run found the only /site/fra/
     link ever produced was the language-switcher's link back to the French
     version of the *same* search page - present as boilerplate on every
     results page, including ones with zero real hits, so a genuinely-empty
@@ -1196,43 +1196,55 @@ def fetch_canada_documents(
     if verbose:
         print("\n========== CA retrieval ==========")
         print(f"terms: {len(search_terms)} | max_per_term: {max_per_term if max_per_term is not None else 'unlimited'}")
-        print("[CA] note: publications.gc.ca's search results are a single")
-        print("[CA] unpaginated page per term, same as AUS.")
+        print("[CA] following search result pages until exhausted or the requested limit is reached.")
 
     for term in search_terms:
         request_url = build_canada_publications_search_url(term)
-        if verbose:
-            print(f"\n[CA] term='{term}' -> {request_url}")
-        response = safe_get(request_url, session=sess, verify=verify, verbose_err=False)
-        if response is None:
-            if verbose:
-                print(f"[CA] term='{term}' ERROR -> request failed; skipping this term")
-            continue
-        if response.status_code != 200:
-            if verbose:
-                print(f"[CA] term='{term}' ERROR -> HTTP {response.status_code}; skipping this term")
-            continue
-
-        candidates = _extract_canada_publications_result_links(response.text)
-        if verbose:
-            print(f"[CA] term='{term}' status={response.status_code} -> candidates={len(candidates)}")
-
+        seen_pages: set[str] = set()
+        seen_documents: set[str] = set()
         kept = 0
-        for doc_url, title in candidates:
+        while request_url and request_url not in seen_pages:
+            seen_pages.add(request_url)
+            if verbose:
+                print(f"\n[CA] term='{term}' -> {request_url}")
+            response = safe_get(request_url, session=sess, verify=verify, verbose_err=verbose)
+            if response is None:
+                if verbose:
+                    print(f"[CA] term='{term}' ERROR -> request failed; skipping this term")
+                break
+            if response.status_code != 200:
+                if verbose:
+                    print(f"[CA] term='{term}' ERROR -> HTTP {response.status_code}; skipping this term")
+                break
+            candidates = _extract_canada_publications_result_links(response.text)
+            if verbose:
+                print(f"[CA] term='{term}' status={response.status_code} -> candidates={len(candidates)}")
+            for doc_url, title in candidates:
+                if max_per_term is not None and kept >= max_per_term:
+                    break
+                if doc_url in seen_documents:
+                    continue
+                seen_documents.add(doc_url)
+                rows.append({
+                    "jurisdiction": "Canada", "source": "CA",
+                    "matched_term": term, "term": term,
+                    "doc_url": doc_url, "url": doc_url, "title": title,
+                })
+                kept += 1
             if max_per_term is not None and kept >= max_per_term:
                 break
-            rows.append(
-                {
-                    "jurisdiction": "Canada",
-                    "source": "CA",
-                    "matched_term": term,
-                    "term": term,
-                    "doc_url": doc_url,
-                    "url": doc_url,
-                    "title": title,
-                }
-            )
-            kept += 1
+            soup = BeautifulSoup(response.text, "html.parser")
+            next_link = soup.select_one('a[rel~="next"][href]')
+            if next_link is None:
+                break
+            next_url = urljoin(request_url, str(next_link["href"]))
+            parsed = urlparse(next_url)
+            if (parsed.scheme != "https"
+                    or parsed.hostname != urlparse(CA_BASE).hostname
+                    or parsed.path != "/site/eng/search/search.html"):
+                break
+            request_url = next_url
+            time.sleep(sleep_s)
         if verbose:
             print(f"[CA] term='{term}' DONE -> kept={kept}")
         time.sleep(sleep_s)
