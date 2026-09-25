@@ -448,7 +448,15 @@ def fetch_eurlex_job(
                 break
 
             pages_needed = max(1, math.ceil(totalhits / page_size_try))
-            pages_to_fetch = min(pages_needed, max_pages)
+            # max_pages is a row budget at the configured page_size; a smaller
+            # fallback page_size gets proportionally more pages, not fewer rows.
+            page_budget = max(max_pages, math.ceil(max_pages * page_size / page_size_try))
+            pages_to_fetch = min(pages_needed, page_budget)
+            if debug and pages_needed > page_budget:
+                print(
+                    f"[EURLEX] term={term_group!r} WARNING totalhits={totalhits} exceeds row budget "
+                    f"{page_budget * page_size_try}; results truncated (raise max_pages)."
+                )
 
             def _append_hits(page_hits: list[dict]) -> None:
                 for hit in page_hits:
@@ -817,8 +825,17 @@ def _fetch_text_with_retries(
                     return 200, text, "", elapsed, final_url, "application/pdf"
                 return 200, response.text, "", elapsed, final_url, content_type
             if response.status_code == 202:
-                last_error = "HTTP 202"
+                # eur-lex.europa.eu answers 202 + empty body when AWS WAF issues a
+                # JavaScript bot challenge; retrying does not clear it.
+                if response.headers.get("x-amzn-waf-action", "").lower() == "challenge":
+                    last_error = "HTTP 202 waf_challenge"
+                else:
+                    last_error = "HTTP 202"
                 return 202, None, last_error, elapsed, final_url, content_type
+            if response.status_code == 300:
+                # Cellar "Multiple Choices": the body lists the manifestation items
+                # (main act, annexes); get_eurlex_text resolves them.
+                return 300, response.text, "HTTP 300", elapsed, final_url, content_type
             if response.status_code in (429, 500, 502, 503, 504):
                 last_error = f"HTTP {response.status_code}"
                 if trace_routes:
@@ -838,6 +855,140 @@ def _fetch_text_with_retries(
                 )
             time.sleep(backoff_s * (2**attempt))
     return 0, None, last_error, 0.0, final_url, content_type
+
+
+CELLAR_TEXT_STREAM_SUFFIXES = (".html", ".xhtml", ".htm", ".xml", ".pdf")
+CELLAR_MAX_ITEMS = 20
+
+
+def _parse_cellar_multiple_choice(html: str) -> list[list[dict]]:
+    """Parses a Cellar 300 Multiple-Choice body into manifestations, each a list
+    of items {url, stream_name, stream_order} sorted by stream_order."""
+    soup = BeautifulSoup(html, "html.parser")
+    manifestations: list[list[dict]] = []
+    for manifestation in soup.find_all("li", attrs={"title": "manifestation"}):
+        items: list[dict] = []
+        for item in manifestation.find_all("li", attrs={"title": "item"}):
+            link = item.find("a", href=True)
+            if not link:
+                continue
+            name_node = item.find("li", attrs={"title": "stream_name"})
+            order_node = item.find("li", attrs={"title": "stream_order"})
+            try:
+                order = int(order_node.get_text(strip=True)) if order_node else len(items) + 1
+            except ValueError:
+                order = len(items) + 1
+            items.append(
+                {
+                    "url": link["href"],
+                    "stream_name": name_node.get_text(strip=True) if name_node else "",
+                    "stream_order": order,
+                }
+            )
+        if items:
+            manifestations.append(sorted(items, key=lambda entry: entry["stream_order"]))
+    return manifestations
+
+
+def _resolve_cellar_multiple_choice(
+    listing_html: str,
+    *,
+    celex: str,
+    lang: str,
+    session: requests.Session | None,
+    timeout_s: int,
+    retries: int,
+    trace_routes: bool,
+    listing_url: str,
+    listing_seconds: float,
+) -> dict:
+    """Follows a Cellar 300 response: picks the first manifestation with text-like
+    streams (HTML/XHTML preferred over PDF) and concatenates its items (act +
+    annexes) in stream order."""
+    manifestations = _parse_cellar_multiple_choice(listing_html)
+
+    def _rank(items: list[dict]) -> int:
+        names = [entry["stream_name"].lower() for entry in items]
+        if any(name.endswith((".html", ".xhtml", ".htm")) for name in names):
+            return 0
+        if any(name.endswith(".xml") for name in names):
+            return 1
+        if any(name.endswith(".pdf") for name in names):
+            return 2
+        return 3
+
+    failure = {
+        "status": 300,
+        "error": "cellar_multiple_choice_unresolved",
+        "full_text_raw": "",
+        "full_text_clean": "",
+        "final_url": listing_url,
+        "content_type": "",
+        "fetch_seconds": round(listing_seconds, 2),
+    }
+    if not manifestations:
+        return failure
+    items = sorted(manifestations, key=_rank)[0]
+    items = [
+        entry
+        for entry in items
+        if not entry["stream_name"] or entry["stream_name"].lower().endswith(CELLAR_TEXT_STREAM_SUFFIXES)
+    ][:CELLAR_MAX_ITEMS]
+
+    raw_parts: list[str] = []
+    clean_parts: list[str] = []
+    total_seconds = listing_seconds
+    content_type = ""
+    last_error = ""
+    for entry in items:
+        if trace_routes:
+            print(
+                f"[EURLEX TEXT] TRACE CELEX={celex} route=cellar item={entry['stream_name'] or entry['url']}",
+                flush=True,
+            )
+        status, body, err, elapsed, item_url, item_type = _fetch_text_with_retries(
+            entry["url"],
+            celex=celex,
+            route_name="cellar_item",
+            variant=celex,
+            headers=dict(DEFAULT_HEADERS),
+            timeout_s=timeout_s,
+            retries=retries,
+            session=session,
+            trace_routes=trace_routes,
+        )
+        total_seconds += elapsed
+        if status != 200 or not body:
+            last_error = err or f"HTTP {status}"
+            continue
+        text_clean, validation_error = _finalize_cellar_text(
+            html=body,
+            final_url=item_url,
+            content_type=item_type,
+            min_chars=1,
+        )
+        if validation_error or not text_clean:
+            last_error = validation_error or "empty_text"
+            continue
+        raw_parts.append(body)
+        clean_parts.append(text_clean)
+        content_type = content_type or item_type
+
+    full_text_clean = "\n\n".join(clean_parts)
+    if len(full_text_clean) < 150:
+        failure["error"] = f"cellar_multiple_choice_unresolved: {last_error}" if last_error else failure["error"]
+        failure["fetch_seconds"] = round(total_seconds, 2)
+        return failure
+    return {
+        "status": 200,
+        "error": "",
+        "full_text_raw": "\n".join(raw_parts),
+        "full_text_clean": full_text_clean,
+        "final_url": listing_url,
+        "content_type": content_type,
+        "fetch_seconds": round(total_seconds, 2),
+        "cellar_items_used": len(clean_parts),
+    }
 
 
 def get_eurlex_text(
@@ -866,6 +1017,20 @@ def get_eurlex_text(
         session=session,
         trace_routes=trace_routes,
     )
+    if status == 300 and html:
+        if route_name == "cellar":
+            return _resolve_cellar_multiple_choice(
+                html,
+                celex=celex,
+                lang=lang,
+                session=session,
+                timeout_s=timeout_s,
+                retries=retries,
+                trace_routes=trace_routes,
+                listing_url=final_url,
+                listing_seconds=elapsed,
+            )
+        html = None
     if status != 200 or not html:
         return {
             "status": status,
@@ -949,9 +1114,13 @@ def get_eurlex_text_multi(
         "fetch_seconds": 0.0,
     }
     saw_202 = False
+    waf_blocked = False
+    cellar_error = ""
     for lang in langs:
         for variant in celex_variants(celex_full):
             for route_name in ("cellar", "cellar_pdf", "eurlex_html", "eurlex_pdf"):
+                if waf_blocked and route_name.startswith("eurlex_"):
+                    continue
                 if trace_routes:
                     print(f"[EURLEX TEXT] TRACE CELEX={celex_full} variant={variant} lang={lang.upper()} route={route_name}", flush=True)
                 result = get_eurlex_text(
@@ -980,6 +1149,10 @@ def get_eurlex_text_multi(
                 last_result = dict(result)
                 if int(result.get("status", 0) or 0) == 202:
                     saw_202 = True
+                if "waf_challenge" in str(result.get("error", "")):
+                    waf_blocked = True
+                if route_name == "cellar" and result.get("error") and not cellar_error:
+                    cellar_error = str(result.get("error"))
                 if len(result.get("full_text_clean", "") or "") >= 150:
                     last_result["lang"] = lang
                     last_result["celex_variant_used"] = variant
@@ -990,7 +1163,9 @@ def get_eurlex_text_multi(
     last_result["celex_variant_used"] = attempt_trace[-1]["celex_variant"] if attempt_trace else ""
     last_result["route_used"] = attempt_trace[-1]["route_name"] if attempt_trace else "cellar"
     last_result["attempt_trace"] = attempt_trace
-    if saw_202 and str(last_result.get("error", "")).lower() in {"http 202", "", "no_attempt"}:
+    if waf_blocked:
+        last_result["error"] = f"waf_challenge (cellar: {cellar_error or 'no text'})"
+    elif saw_202 and str(last_result.get("error", "")).lower() in {"http 202", "", "no_attempt"}:
         last_result["error"] = "route_exhausted_after_202"
     return last_result
 
@@ -1130,6 +1305,10 @@ def _classify_failure(result: dict) -> str:
         return "unsupported_celex_type_for_fulltext"
     if "route_exhausted_after_202" in error:
         return "route_exhausted_after_202"
+    if "waf_challenge" in error:
+        return "waf_challenge"
+    if "cellar_multiple_choice_unresolved" in error:
+        return "cellar_multiple_choice_unresolved"
     if "sector0_route_mismatch" in error:
         return "sector0_route_mismatch"
     if "no_text_representation_for_type" in error:
