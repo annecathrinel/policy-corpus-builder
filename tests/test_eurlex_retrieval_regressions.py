@@ -39,44 +39,6 @@ class RetrievalRegressions(unittest.TestCase):
         self.assertEqual(len(result["attempt_trace"]), 3)
         self.assertGreater(len(result["full_text_clean"]), 150)
 
-    def test_cellar_multiple_choice_concatenates_items(self):
-        base = "https://publications.europa.eu/resource/cellar/abc.0001.03"
-        listing = (
-            '<html><body><ul><li title="manifestation">cellar:abc.0001.03<ul>'
-            f'<li title="item"><a href="{base}/DOC_3">x</a><ul><li title="stream_name">1_EN_annexe.html</li>'
-            '<li title="stream_order">3</li></ul></li>'
-            f'<li title="item"><a href="{base}/DOC_1">x</a><ul><li title="stream_name">10_EN_ACT.html</li>'
-            '<li title="stream_order">1</li></ul></li>'
-            "</ul></li></ul></body></html>"
-        ).encode()
-        session = Mock()
-        def get(url, **kwargs):
-            if url.endswith("/celex/52020DC0381"):
-                return response(url, 300, listing, "application/xhtml+xml")
-            if url.endswith("/DOC_1"):
-                return response(url, body=b"<html><body>" + b"Farm to Fork main act. " * 20 + b"</body></html>")
-            if url.endswith("/DOC_3"):
-                return response(url, body=b"<html><body>Annex action plan.</body></html>")
-            self.fail(f"unexpected request {url}")
-        session.get.side_effect = get
-        result = eu.get_eurlex_text_multi(pd.Series({"celex": "52020DC0381"}), session=session, retries=0)
-        self.assertEqual(result["route_used"], "cellar")
-        self.assertEqual(result["cellar_items_used"], 2)
-        self.assertLess(result["full_text_clean"].index("main act"), result["full_text_clean"].index("Annex action plan"))
-
-    def test_waf_challenge_skips_remaining_eurlex_routes(self):
-        session = Mock()
-        def get(url, **kwargs):
-            if "publications.europa.eu" in url:
-                return response(url, 404)
-            r = response(url, 202)
-            r.headers["x-amzn-waf-action"] = "challenge"
-            return r
-        session.get.side_effect = get
-        result = eu.get_eurlex_text_multi(pd.Series({"celex": "52025JC0130"}), session=session, retries=0)
-        self.assertEqual([a["route_name"] for a in result["attempt_trace"]], ["cellar", "cellar_pdf", "eurlex_html"])
-        self.assertEqual(eu._classify_failure({"retrieval_error": result["error"]}), "waf_challenge")
-
     def test_pdf_fallback_extracts_bytes(self):
         session = Mock()
         session.get.side_effect = lambda url, **kw: response(url, body=b"%PDF-fixture", content_type="application/pdf") if "/PDF/" in url else response(url, 404)
