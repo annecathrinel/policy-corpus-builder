@@ -150,29 +150,14 @@ def post_eurlex_ws(
         "Accept": "application/xml, text/xml;q=0.9, */*;q=0.8",
     }
 
-    last_error = ""
     for attempt in range(retry_5xx + 1):
         t0 = time.time()
-        try:
-            response = sess.post(
-                EURLEX_WS_ENDPOINT,
-                data=payload.encode("utf-8"),
-                headers=headers,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            # A read timeout / dropped connection on one SOAP page must not abort
-            # the whole build: retry like a 5xx, then report failure so
-            # fetch_eurlex_job falls back to a smaller page_size.
-            tracker["last_call"] = time.time()
-            last_error = f"{type(exc).__name__}: {exc}"
-            if debug:
-                label = f"term={term_label!r} " if term_label else ""
-                print(f"[EURLEX] {label}POST failed after {time.time() - t0:.2f}s ({type(exc).__name__}); attempt {attempt + 1}/{retry_5xx + 1}")
-            if attempt < retry_5xx:
-                time.sleep(5.0 * (2**attempt))
-                continue
-            return None, 0, last_error
+        response = sess.post(
+            EURLEX_WS_ENDPOINT,
+            data=payload.encode("utf-8"),
+            headers=headers,
+            timeout=timeout,
+        )
         dt = time.time() - t0
         tracker["last_call"] = time.time()
 
@@ -204,7 +189,7 @@ def post_eurlex_ws(
 
         return response.text, response.status_code, response.text
 
-    return None, 0, last_error
+    return None, 0, ""
 
 
 def _local_name(tag: str) -> str:
@@ -678,9 +663,6 @@ def _extract_text_candidate(content: str, *, content_type: str = "") -> tuple[st
     return text, ""
 
 
-NAMESPACE_PREFIX_RE = re.compile(r"(?<![a-z0-9])(?:xmlns|rdf|skos|dcterms|owl):")
-
-
 def _looks_like_valid_fulltext(text: str, *, min_chars: int = 300) -> tuple[bool, str]:
     clean = str(text or "").strip()
     if not clean:
@@ -690,11 +672,9 @@ def _looks_like_valid_fulltext(text: str, *, min_chars: int = 300) -> tuple[bool
     lowered = clean.lower()
     if any(token in lowered for token in ("verify that you're not a robot", "javascript is disabled", "the html format is unavailable", "document does not exist")):
         return False, "unavailable_or_challenge_page"
-    # Whole-prefix matches only ("ERDF:" in cohesion-policy texts contains "rdf:"),
-    # scaled by length so a long legal text is not rejected for a few matches.
-    namespace_hits = len(NAMESPACE_PREFIX_RE.findall(lowered))
+    namespace_hits = sum(lowered.count(token) for token in ["xmlns:", "rdf:", "skos:", "dcterms:", "owl:"])
     uri_hits = lowered.count("http://") + lowered.count("https://")
-    if namespace_hits >= max(2, len(clean) // 5000):
+    if namespace_hits >= 2:
         return False, "metadata_response_namespace_heavy"
     if uri_hits >= 12 and len(clean) < 3000:
         return False, "metadata_response_uri_heavy"
@@ -708,18 +688,12 @@ def _lang_to_iso639_3(lang: str | None) -> str:
     return EU_LANG2_TO_3.get(lang, "eng")
 
 
-CELLAR_ROUTES = {"cellar", "cellar_html", "cellar_pdf"}
-
-
 def _route_headers(route_name: str, *, lang: str = "en") -> dict[str, str]:
     headers = dict(DEFAULT_HEADERS)
-    if route_name in CELLAR_ROUTES:
+    if route_name in {"cellar", "cellar_pdf"}:
         headers.update(ROUTE_HEADERS["cellar"])
         if route_name == "cellar_pdf":
             headers["Accept"] = "application/pdf"
-        elif route_name == "cellar_html":
-            # Older acts (e.g. 31992L0043, 32000L0060) have no XHTML manifestation.
-            headers["Accept"] = "text/html"
         headers["Accept-Language"] = _lang_to_iso639_3(lang)
     else:
         headers.update(ROUTE_HEADERS["default_text"])
@@ -1027,7 +1001,7 @@ def get_eurlex_text(
     trace_routes: bool = False,
     route_name: str = "cellar",
 ) -> dict:
-    url = cellar_celex_url(celex) if route_name in CELLAR_ROUTES else (
+    url = cellar_celex_url(celex) if route_name in {"cellar", "cellar_pdf"} else (
         f"https://eur-lex.europa.eu/legal-content/{lang.upper()}/TXT/"
         f"{route_name.removeprefix('eurlex_').upper()}/?uri={quote('CELEX:' + celex, safe='')}"
     )
@@ -1044,7 +1018,7 @@ def get_eurlex_text(
         trace_routes=trace_routes,
     )
     if status == 300 and html:
-        if route_name in CELLAR_ROUTES:
+        if route_name == "cellar":
             return _resolve_cellar_multiple_choice(
                 html,
                 celex=celex,
@@ -1144,7 +1118,7 @@ def get_eurlex_text_multi(
     cellar_error = ""
     for lang in langs:
         for variant in celex_variants(celex_full):
-            for route_name in ("cellar", "cellar_html", "cellar_pdf", "eurlex_html", "eurlex_pdf"):
+            for route_name in ("cellar", "cellar_pdf", "eurlex_html", "eurlex_pdf"):
                 if waf_blocked and route_name.startswith("eurlex_"):
                     continue
                 if trace_routes:

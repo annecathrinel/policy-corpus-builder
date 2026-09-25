@@ -36,7 +36,7 @@ class RetrievalRegressions(unittest.TestCase):
         session.get.side_effect = get
         result = eu.get_eurlex_text_multi(pd.Series({"celex": "32023H0901(22)"}), session=session, retries=0)
         self.assertEqual(result["route_used"], "eurlex_html")
-        self.assertEqual(len(result["attempt_trace"]), 4)
+        self.assertEqual(len(result["attempt_trace"]), 3)
         self.assertGreater(len(result["full_text_clean"]), 150)
 
     def test_cellar_multiple_choice_concatenates_items(self):
@@ -64,38 +64,6 @@ class RetrievalRegressions(unittest.TestCase):
         self.assertEqual(result["cellar_items_used"], 2)
         self.assertLess(result["full_text_clean"].index("main act"), result["full_text_clean"].index("Annex action plan"))
 
-    def test_cellar_html_recovers_acts_without_xhtml(self):
-        session = Mock()
-        def get(url, **kwargs):
-            self.assertTrue(url.startswith("https://publications.europa.eu/"))
-            if kwargs["headers"]["Accept"] == "text/html":
-                return response(url, body=b"<html><body>" + b"Habitats Directive article. " * 20 + b"</body></html>")
-            return response(url, 404)
-        session.get.side_effect = get
-        result = eu.get_eurlex_text_multi(pd.Series({"celex": "31992L0043"}), session=session, retries=0)
-        self.assertEqual(result["route_used"], "cellar_html")
-        self.assertIn("Habitats Directive", result["full_text_clean"])
-
-    def test_erdf_mentions_are_not_rdf_metadata(self):
-        text = "Support from the ERDF: investment priorities. " * 40
-        self.assertEqual(eu._looks_like_valid_fulltext(text, min_chars=150), (True, ""))
-        rdf = "rdf:type skos:Concept rdf:about dcterms:title " * 5
-        self.assertFalse(eu._looks_like_valid_fulltext(rdf, min_chars=10)[0])
-
-    def test_soap_read_timeout_is_retried_not_raised(self):
-        session = Mock()
-        ok = response(eu.EURLEX_WS_ENDPOINT, body=b"<xml/>", content_type="application/xml")
-        session.post.side_effect = [requests.exceptions.ReadTimeout("slow"), ok]
-        with patch.object(eu.time, "sleep"):
-            xml, status, _ = eu.post_eurlex_ws("<x/>", session=session, retry_5xx=1, min_interval_s=0)
-        self.assertEqual((xml, status), ("<xml/>", 200))
-        session.post.side_effect = requests.exceptions.ReadTimeout("slow")
-        with patch.object(eu.time, "sleep"):
-            xml, status, raw = eu.post_eurlex_ws("<x/>", session=session, retry_5xx=1, min_interval_s=0)
-        self.assertIsNone(xml)
-        self.assertEqual(status, 0)
-        self.assertIn("ReadTimeout", raw)
-
     def test_waf_challenge_skips_remaining_eurlex_routes(self):
         session = Mock()
         def get(url, **kwargs):
@@ -106,7 +74,7 @@ class RetrievalRegressions(unittest.TestCase):
             return r
         session.get.side_effect = get
         result = eu.get_eurlex_text_multi(pd.Series({"celex": "52025JC0130"}), session=session, retries=0)
-        self.assertEqual([a["route_name"] for a in result["attempt_trace"]], ["cellar", "cellar_html", "cellar_pdf", "eurlex_html"])
+        self.assertEqual([a["route_name"] for a in result["attempt_trace"]], ["cellar", "cellar_pdf", "eurlex_html"])
         self.assertEqual(eu._classify_failure({"retrieval_error": result["error"]}), "waf_challenge")
 
     def test_pdf_fallback_extracts_bytes(self):
@@ -117,7 +85,7 @@ class RetrievalRegressions(unittest.TestCase):
             result = eu.get_eurlex_text_multi(pd.Series({"celex": "32024M11475"}), session=session, retries=0)
         self.assertEqual(result["route_used"], "eurlex_pdf")
         self.assertIn("Commission decision", result["full_text_clean"])
-        self.assertEqual(len(result["attempt_trace"]), 5)
+        self.assertEqual(len(result["attempt_trace"]), 4)
 
     def test_cellar_pdf_recovers_without_visiting_eurlex(self):
         session = Mock()
@@ -132,7 +100,7 @@ class RetrievalRegressions(unittest.TestCase):
             reader.return_value.pages = [Mock(extract_text=Mock(return_value="Council recommendation. " * 30))]
             result = eu.get_eurlex_text_multi(pd.Series({"celex": "32023H0901(22)"}), session=session, retries=0)
         self.assertEqual(result["route_used"], "cellar_pdf")
-        self.assertEqual(session.get.call_count, 3)
+        self.assertEqual(session.get.call_count, 2)
         self.assertGreater(len(result["full_text_clean"]), 150)
 
     def test_pdf_parse_error_and_challenge_are_not_fulltext(self):
