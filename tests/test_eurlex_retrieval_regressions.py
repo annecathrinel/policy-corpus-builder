@@ -20,6 +20,55 @@ def response(url, status=200, body=b"", content_type="text/html"):
 
 
 class RetrievalRegressions(unittest.TestCase):
+    @staticmethod
+    def choices():
+        return '<li title="manifestation">' + ''.join(
+            f'<li title="item"><a href="http://publications.europa.eu/resource/cellar/example/DOC_{i}">part</a>'
+            f'<ul><li title="stream_order">{i}</li><li title="stream_name">part{i}.html</li></ul></li>'
+            for i in (2, 1)) + '</li>'
+
+    def test_cellar_300_parts_are_ordered_and_cached_with_provenance(self):
+        session = Mock()
+        def get(url, **kwargs):
+            if '/celex/' in url:
+                return response(url, 300, self.choices().encode())
+            self.assertTrue(url.startswith('https://publications.europa.eu/resource/cellar/'))
+            text = ('Main act. ' if url.endswith('DOC_1') else 'Annex. ') * 40
+            return response(url, body=f'<html>{text}</html>'.encode())
+        session.get.side_effect = get
+        row = pd.Series({'celex': '52023DC0638'})
+        with tempfile.TemporaryDirectory() as tmp:
+            result = eu.fetch_eurlex_fulltext_for_row(row, cache_dir=Path(tmp), session=session, retries=0, min_interval_s=0)
+            self.assertEqual(result['retrieval_status'], 200)
+            self.assertTrue(result['full_text_clean'].startswith('Main act.'))
+            self.assertIn('Annex.', result['full_text_clean'])
+            self.assertEqual([p['order'] for p in result['document_parts']], [1, 2])
+            self.assertEqual(session.get.call_count, 3)
+            session.get.side_effect = AssertionError('Cache should avoid network')
+            cached = eu.fetch_eurlex_fulltext_for_row(row, cache_dir=Path(tmp), session=session)
+            self.assertEqual(cached['document_parts'], result['document_parts'])
+
+    def test_cellar_300_incomplete_parts_never_become_success(self):
+        for failure in (404, 300, 202):
+            session = Mock()
+            def get(url, **kwargs):
+                if '/celex/' in url:
+                    return response(url, 300, self.choices().encode())
+                if url.endswith('DOC_1'):
+                    return response(url, body=b'<html>' + b'Main act. ' * 40 + b'</html>')
+                return response(url, failure, self.choices().encode())
+            session.get.side_effect = get
+            result = eu.get_eurlex_text('52023DC0638', session=session, retries=0)
+            self.assertEqual(result['full_text_clean'], '')
+            self.assertIn('cellar_part_failed', result['error'])
+            self.assertEqual(session.get.call_count, 3)
+
+    def test_cellar_choices_reject_untrusted_or_ambiguous_links(self):
+        for html in (self.choices().replace('publications.europa.eu', 'unrelated.test'),
+                     self.choices() + self.choices(),
+                     self.choices().replace('stream_order', 'unknown')):
+            self.assertEqual(eu._cellar_document_parts(html, 'https://publications.europa.eu/'), [])
+
     def test_parenthesized_celex_is_preserved(self):
         for value in ("32023H0901(22)", "https://eur-lex.europa.eu/?uri=CELEX%3A32023H0901%2822%29&qid=123"):
             self.assertEqual(extract_celex_token(value), "32023H0901(22)")

@@ -85,6 +85,7 @@ The terminal shows run summaries by default. Detailed output goes to `logs/eu.lo
 ### Cache and source behavior
 
 - **EU:** successful full-text files are reused across terms and subsequent runs using the same output/cache directory. Missing cached text is fetched again. The lower-level EUR-Lex setting `use_cache = false` forces fresh text retrieval.
+  Cellar HTTP 300 responses listing a single manifestation's document parts are resolved in stream order. All listed parts must pass validation before the combined text is cached; source URLs and per-part results are retained in `document_parts` and a `.parts.json` sidecar beside the cached text. Ambiguous choices remain failures. HTTP 202 on EUR-Lex HTML/PDF routes can still prevent recovery; failure logs include the status and error for each attempted route.
 - **Non-EU:** successful full-text fetches are reused across terms within the same adapter run. Failed fetches remain eligible for another attempt.
 - **Canada:** search uses `https://publications.gc.ca` without `www`, follows next-page links, and deduplicates results across pages. Verbose request failures include the underlying exception.
 - **New Zealand:** multi-word and hyphenated terms such as `nature-based` are quoted for search; existing outer quotes are preserved. An API key is required.

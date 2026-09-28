@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -816,6 +816,8 @@ def _fetch_text_with_retries(
                         return 200, None, f"pdf_parse_error: {type(exc).__name__}", elapsed, final_url, content_type
                     return 200, text, "", elapsed, final_url, "application/pdf"
                 return 200, response.text, "", elapsed, final_url, content_type
+            if response.status_code == 300:
+                return 300, response.text, "HTTP 300", elapsed, final_url, content_type
             if response.status_code == 202:
                 last_error = "HTTP 202"
                 return 202, None, last_error, elapsed, final_url, content_type
@@ -838,6 +840,74 @@ def _fetch_text_with_retries(
                 )
             time.sleep(backoff_s * (2**attempt))
     return 0, None, last_error, 0.0, final_url, content_type
+
+
+def _cellar_document_parts(html: str, base_url: str) -> list[dict]:
+    """Read one negotiated manifestation; never combine alternative editions."""
+    soup = BeautifulSoup(html, "html.parser")
+    manifestations = soup.find_all("li", title="manifestation")
+    if len(manifestations) != 1:
+        return []
+    parts = []
+    seen = set()
+    for item in manifestations[0].find_all("li", title="item"):
+        anchor = item.find("a", href=True)
+        order_tag = item.find("li", title="stream_order")
+        if anchor is None or order_tag is None:
+            return []
+        url = urljoin(base_url, anchor["href"])
+        parsed = urlparse(url)
+        if (parsed.scheme not in {"http", "https"}
+                or parsed.netloc != "publications.europa.eu"
+                or not parsed.path.startswith("/resource/cellar/")):
+            return []
+        try:
+            order = int(order_tag.get_text(strip=True))
+        except ValueError:
+            return []
+        url = parsed._replace(scheme="https").geturl()
+        if url in seen:
+            continue
+        seen.add(url)
+        name = item.find("li", title="stream_name")
+        parts.append({"url": url, "order": order,
+                      "name": name.get_text(strip=True) if name else ""})
+    if len({part["order"] for part in parts}) != len(parts):
+        return []
+    return sorted(parts, key=lambda part: part["order"])
+
+
+def _fetch_cellar_parts(html: str, *, final_url: str, headers: dict,
+                        session, timeout_s: int, retries: int,
+                        celex: str, trace_routes: bool) -> dict:
+    parts = _cellar_document_parts(html, final_url)
+    result = {"status": 300, "error": "cellar_300_unresolved_choices",
+              "full_text_raw": "", "full_text_clean": "", "final_url": final_url,
+              "content_type": "text/plain", "fetch_seconds": 0.0, "document_parts": []}
+    if not parts:
+        return result
+    texts = []
+    for part in parts:
+        status, body, error, elapsed, resolved_url, content_type = _fetch_text_with_retries(
+            part["url"], celex=celex, route_name="cellar_part", headers=headers,
+            session=session, timeout_s=timeout_s, retries=retries, trace_routes=trace_routes)
+        text = ""
+        if status == 200 and body:
+            text, error = _finalize_cellar_text(
+                html=body, final_url=resolved_url, content_type=content_type, min_chars=1)
+        result["document_parts"].append({**part, "final_url": resolved_url,
+            "status": status, "error": error, "content_type": content_type, "text_len": len(text)})
+        result["fetch_seconds"] += elapsed
+        if not text:
+            result["error"] = f"cellar_part_failed: {error or 'empty_text'}"
+            return result  # Do not cache an incomplete document as a success.
+        texts.append(text)
+    combined = "\n\n".join(texts)
+    if len(combined) < 150:
+        result["error"] = "short_text"
+        return result
+    result.update(status=200, error="", full_text_clean=combined)
+    return result
 
 
 def get_eurlex_text(
@@ -866,6 +936,10 @@ def get_eurlex_text(
         session=session,
         trace_routes=trace_routes,
     )
+    if status == 300 and html and route_name in {"cellar", "cellar_pdf"}:
+        return _fetch_cellar_parts(
+            html, final_url=final_url, headers=headers, session=session,
+            timeout_s=timeout_s, retries=retries, celex=celex, trace_routes=trace_routes)
     if status != 200 or not html:
         return {
             "status": status,
@@ -975,6 +1049,7 @@ def get_eurlex_text_multi(
                         "error": result.get("error", ""),
                         "content_type": result.get("content_type", ""),
                         "text_len": len(result.get("full_text_clean", "") or ""),
+                        "document_parts": result.get("document_parts", []),
                     }
                 )
                 last_result = dict(result)
@@ -1459,11 +1534,18 @@ def fetch_eurlex_fulltext_for_row(
     text_cache_dir = cache_dir / "text_cache"
     text_path = _cache_path_for_celex(celex_full, text_cache_dir, "txt")
     html_path = _cache_path_for_celex(celex_full, html_cache_dir, "html")
+    provenance_path = text_path.with_suffix(".parts.json")
 
     if use_cache and text_path.exists() and text_path.stat().st_size > 0:
         text_clean = _normalize_cached_clean_text(
             text_path.read_text(encoding="utf-8", errors="replace")
         )
+        document_parts = []
+        if provenance_path.exists():
+            try:
+                document_parts = json.loads(provenance_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
         if verbose:
             # celex_full (not celex) here: a live 2026-07-28 run's log
             # showed the same base CELEX (e.g. 02014R0808 or 02021R2115)
@@ -1498,6 +1580,7 @@ def fetch_eurlex_fulltext_for_row(
             "lang_source_fulltext": _lang_source_for_doc_row(row, langs[0] if langs else "en"),
             "fetch_seconds": 0.0,
             "fetched_from_cache": True,
+            "document_parts": document_parts,
             "text_path": str(text_path),
             "content_type": "",
             "term_verified": _matched_terms_found_in_text(matched_term_groups, title, text_clean),
@@ -1520,6 +1603,9 @@ def fetch_eurlex_fulltext_for_row(
             pass
     if multi_result.get("full_text_clean"):
         try:
+            provenance_path.write_text(
+                json.dumps(multi_result.get("document_parts", []), ensure_ascii=False, indent=2),
+                encoding="utf-8")
             text_path.write_text(str(multi_result.get("full_text_clean", "")), encoding="utf-8")
         except Exception:
             pass
@@ -1546,7 +1632,8 @@ def fetch_eurlex_fulltext_for_row(
         else:
             print(
                 f"[EURLEX TEXT] {progress_label} CELEX={celex_full} FAILED status={multi_result.get('status', 0)} "
-                f"error={multi_result.get('error', '') or 'empty_text'}",
+                f"error={multi_result.get('error', '') or 'empty_text'} "
+                f"routes={','.join(str(a['route_name']) + ':' + str(a['status']) + ':' + str(a['error']) for a in attempt_trace)}",
                 flush=True,
             )
     return {
@@ -1570,6 +1657,7 @@ def fetch_eurlex_fulltext_for_row(
         "route_used": str(multi_result.get("route_used", "cellar") or "cellar"),
         "content_type": str(multi_result.get("content_type", "") or ""),
         "attempt_trace": attempt_trace,
+        "document_parts": multi_result.get("document_parts", []),
         "term_verified": _matched_terms_found_in_text(
             matched_term_groups, title, str(multi_result.get("full_text_clean", "") or "")
         ),
