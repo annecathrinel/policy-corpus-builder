@@ -9,19 +9,19 @@ abstract: >-
   jurisdictions (UK, Canada, Australia, US, New Zealand), and local-file
   sources, for building reproducible policy-document corpora for research.
 authors:
-  - family-names: Linder
+  - family-names: "Linder"
     given-names: "Anne Cathrine"
     affiliation: "Technical University of Denmark (DTU)"
+    orcid: "https://orcid.org/0000-0002-6556-7847"
 license: MIT
 repository-code: "https://github.com/annecathrinel/policy-corpus-builder"
 url: "https://github.com/annecathrinel/policy-corpus-builder"
 version: 0.1.0
-date-released: "2026-07-23"
+doi: 10.5281/zenodo.24460525
+date-released: "2026-11-23"
 keywords:
   - policy analysis
   - legal informatics
   - text corpus
   - EUR-Lex
   - research software
-  - nature-inclusive design
-  - offshore renewable energy
