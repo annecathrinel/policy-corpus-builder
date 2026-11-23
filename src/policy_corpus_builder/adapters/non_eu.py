@@ -300,8 +300,20 @@ def uk_contents_url(url: str) -> str:
     return canonical_url
 
 
+def quote_search_phrase(term: str) -> str:
+    """Apply exactly one outer quote pair to a literal phrase.
+
+    This does not enable Boolean or wildcard syntax. Adapters retain their
+    existing phrase semantics; callers may supply a quoted inventory.
+    """
+    term = term.strip()
+    if len(term) >= 2 and term.startswith('"') and term.endswith('"'):
+        return term
+    return '"' + term + '"'
+
+
 def build_uk_search_feed_url(term: str, *, page: int = 1) -> str:
-    query = f'"{term}"' if " " in term else term
+    query = quote_search_phrase(term) if " " in term else term
     params: list[tuple[str, str]] = [("text", query)]
     for dataset in UK_DATASETS:
         params.append(("type", dataset))
@@ -313,7 +325,7 @@ def build_uk_search_feed_url(term: str, *, page: int = 1) -> str:
 
 def build_aus_search_url(term: str) -> str:
     term = term.strip()
-    quoted_term = quote(f'"{term}"', safe="")
+    quoted_term = quote(quote_search_phrase(term), safe="")
     return f"{AUS_BASE}/search/text({quoted_term},nameAndText,contains)/pointintime(Latest)"
 
 
@@ -977,7 +989,7 @@ def fetch_uk_documents(
         if verbose:
             print(f"\n[UK] term='{term}' START")
         while max_per_term is None or kept < max_per_term:
-            q = f'"{term}"' if " " in term else term
+            q = quote_search_phrase(term) if " " in term else term
             url = f"{UK_BASE}/all?text={quote(q)}"
             if page > 1:
                 url += f"&page={page}"
@@ -1127,7 +1139,7 @@ def fetch_aus_documents(
 
 def build_canada_publications_search_url(term: str) -> str:
     term = term.strip()
-    q = quote(f'"{term}"', safe="")
+    q = quote(quote_search_phrase(term), safe="")
     return f"{CA_BASE}/site/eng/search/search.html?ast={q}&cnst=&language=eng&adof=on"
 
 
@@ -1480,7 +1492,7 @@ def fetch_us_documents(
             print(f"\n[US] term='{term}' START")
         while max_per_term is None or kept < max_per_term:
             request_page_size = page_size if max_per_term is None else max(5, min(page_size, max_per_term - kept))
-            search_term = f'"{term}"' if " " in term else term
+            search_term = quote_search_phrase(term) if " " in term else term
             params = {
                 "filter[searchTerm]": search_term,
                 "page[size]": request_page_size,
@@ -2671,8 +2683,12 @@ def _matched_terms_found_in_text(matched_terms: object, title: str, full_text: s
     haystack = f"{title or ''} {full_text or ''}".lower()
     if not haystack.strip():
         return None
+    # Endpoint wildcard semantics differ. A literal word-presence check
+    # cannot verify wildcard searches; report unknown rather than false.
+    if any("*" in term or "?" in term for term in terms):
+        return None
     for term in terms:
-        words = [word for word in re.split(r"\s+", term.lower().strip()) if word]
+        words = [word for word in re.split(r"\s+", term.lower().strip().strip('"')) if word]
         if words and all(word in haystack for word in words):
             return True
     return False

@@ -83,6 +83,9 @@ def build_expert_query(
 
     per_term: list[str] = []
     for term in group_terms:
+        term = term.strip()
+        if len(term) >= 2 and term.startswith('"') and term.endswith('"'):
+            term = term[1:-1]
         parts = [f'{field} ~ "{esc(term)}"' for field in fields]
         per_term.append("((" + " OR ".join(parts) + "))")
     return f"{expert_scope} AND (" + " OR ".join(per_term) + ")"
